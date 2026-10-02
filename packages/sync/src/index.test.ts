@@ -547,6 +547,74 @@ describe("SyncEngine event ingestion", () => {
     expect(wsTicket).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps responsive room sockets when a suspended PWA resumes", async () => {
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      sent: string[] = [];
+      constructor() { sockets.push(this); }
+      close(): void { this.readyState = 3; }
+      send(value: string): void {
+        this.sent.push(value);
+        if (JSON.parse(value).type === "ping") queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: "ping", at: Date.now() }) }));
+      }
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const sync = vi.fn(async () => ({ next_cursor: 0, has_more: false, items: [] }));
+    const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
+    const api = { baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient;
+    const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
+    const engine = new SyncEngine(api, db, async () => null, undefined, null);
+
+    await engine.start();
+    await engine.connectRoom("!resume-room-000001:example.com");
+    await Promise.all([engine.resume(), engine.resume()]);
+    engine.stop();
+    vi.unstubAllGlobals();
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].sent).toEqual([JSON.stringify({ type: "ping" })]);
+    expect(sync).toHaveBeenCalledTimes(2);
+    expect(wsTicket).toHaveBeenCalledOnce();
+  });
+
+  it("replaces only a room socket that misses the resume heartbeat", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      constructor() { sockets.push(this); }
+      close(): void { this.readyState = 3; }
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket } as unknown as ApiClient;
+    const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
+    const engine = new SyncEngine(api, db, async () => null, undefined, null);
+
+    await engine.start();
+    await engine.connectRoom("!stale-room-0000001:example.com");
+    const resumed = engine.resume();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await resumed;
+    engine.stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0].readyState).toBe(3);
+    expect(wsTicket).toHaveBeenCalledTimes(2);
+  });
+
   it("does not reconnect a socket after the device is revoked", async () => {
     const network = new EventTarget();
     const sockets: Array<{ onclose: ((event: { code: number }) => void) | null; readyState: number }> = [];

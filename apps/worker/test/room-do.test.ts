@@ -124,6 +124,25 @@ describe("RoomDurableObject", () => {
     aliceSocket.close(1000, "done"); bobSocket.close(1000, "done");
   });
 
+  it("answers a resume heartbeat without durable or object-storage writes", async () => {
+    const room = env.ROOMS.getByName(roomId);
+    await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());
+    const response = await room.fetch(new Request("https://room.test/socket", { headers: { upgrade: "websocket", "x-edgechat-user": alice, "x-edgechat-device": "device-a" } }));
+    const socket = response.webSocket!; socket.accept();
+    const pong = new Promise<Record<string, unknown>>((resolve) => {
+      socket.addEventListener("message", (message) => {
+        const frame = JSON.parse(String(message.data)) as Record<string, unknown>;
+        if (frame.type === "ping") resolve(frame);
+      });
+    });
+
+    socket.send(JSON.stringify({ type: "ping" }));
+    expect(await pong).toMatchObject({ type: "ping", at: expect.any(Number) });
+    expect((await env.DB.prepare("SELECT count(*) AS count FROM room_events WHERE room_id = ?").bind(roomId).first<{ count: number }>())?.count).toBe(0);
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+    socket.close(1000, "done");
+  });
+
   it("closes only another device's live socket after a password change", async () => {
     const room = env.ROOMS.getByName(roomId);
     await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());

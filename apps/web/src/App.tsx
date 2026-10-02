@@ -990,6 +990,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     rooms().length;
     if (!currentSession || !currentIdentity || !currentMls) return;
     const engine = new SyncEngine(api, db, processEvent, async () => { await loadRooms(currentMls); }, undefined, resolveArchiveKey, presenceSharing(), db, archiveSegmentCache); syncRef = engine;
+    let foregroundResumePending = false;
     const refresh = (received: Event) => {
       const event = (received as CustomEvent<RoomEvent>).detail;
       setRooms((current) => current.map((room) => room.room_id === event.room_id ? { ...room, current_seq: Math.max(room.current_seq, event.seq) } : room));
@@ -1016,7 +1017,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     };
     engine.addEventListener("processed", refresh);
     const resumeRemovals = () => {
-      setConnectionState("online");
+      if (!foregroundResumePending) setConnectionState("online");
       void acknowledgeRetentionCoverage().catch(() => undefined);
       void repairCloudHistory().catch(() => undefined);
       void repairCloudAttachments().catch(() => undefined);
@@ -1112,10 +1113,22 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     engine.addEventListener("archive-repair-available", archiveRepairAvailable);
     navigator.serviceWorker?.addEventListener("message", pushSyncHint);
     engine.addEventListener("quarantined", () => setNotice("一条无法验证的加密消息已隔离，后续消息仍会继续同步"));
+    const resumeVisibleSession = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine || foregroundResumePending) return;
+      foregroundResumePending = true;
+      setConnectionState("syncing");
+      void engine.resume()
+        .then(() => { if (session() === currentSession) { setConnectionState("online"); void outboxRef?.kick(); } })
+        .catch((cause) => { if (canUseOfflineSession(cause, navigator.onLine)) setConnectionState("offline"); })
+        .finally(() => { foregroundResumePending = false; });
+    };
+    const resumePersistedPage = (event: PageTransitionEvent) => { if (event.persisted) resumeVisibleSession(); };
+    document.addEventListener("visibilitychange", resumeVisibleSession);
+    window.addEventListener("pageshow", resumePersistedPage);
     void engine.start().then(() => rooms().forEach((room) => { void engine.connectRoom(room.room_id); scheduleDeliveryReceipt(room.room_id); }));
     peerRecoveryTimer = window.setInterval(() => { if (navigator.onLine) void processPeerRecoveries().catch(() => undefined); }, 30_000);
     onCleanup(() => {
-      engine.removeEventListener("typing", typing); engine.removeEventListener("presence", presence); engine.removeEventListener("presence-snapshot", presenceSnapshot); engine.removeEventListener("presence-reset", presenceReset); engine.removeEventListener("repair-available", repairAvailable); engine.removeEventListener("attachment-repair-available", attachmentRepairAvailable); engine.removeEventListener("archive-repair-available", archiveRepairAvailable); engine.removeEventListener("synced", resumeRemovals); engine.removeEventListener("account-deletion", accountDeletion); engine.removeEventListener("device-revoked", deviceRevoked); engine.removeEventListener("session-expired", sessionExpired); engine.removeEventListener("room-unavailable", unavailableRoom); engine.removeEventListener("device-event", deviceEvent); engine.removeEventListener("realtime", realtime); engine.removeEventListener("error", syncError); engine.removeEventListener("history-transfer-required", historyTransferRequired); engine.removeEventListener("history-recovery-complete", historyRecoveryComplete); navigator.serviceWorker?.removeEventListener("message", pushSyncHint); engine.stop();
+      engine.removeEventListener("typing", typing); engine.removeEventListener("presence", presence); engine.removeEventListener("presence-snapshot", presenceSnapshot); engine.removeEventListener("presence-reset", presenceReset); engine.removeEventListener("repair-available", repairAvailable); engine.removeEventListener("attachment-repair-available", attachmentRepairAvailable); engine.removeEventListener("archive-repair-available", archiveRepairAvailable); engine.removeEventListener("synced", resumeRemovals); engine.removeEventListener("account-deletion", accountDeletion); engine.removeEventListener("device-revoked", deviceRevoked); engine.removeEventListener("session-expired", sessionExpired); engine.removeEventListener("room-unavailable", unavailableRoom); engine.removeEventListener("device-event", deviceEvent); engine.removeEventListener("realtime", realtime); engine.removeEventListener("error", syncError); engine.removeEventListener("history-transfer-required", historyTransferRequired); engine.removeEventListener("history-recovery-complete", historyRecoveryComplete); navigator.serviceWorker?.removeEventListener("message", pushSyncHint); document.removeEventListener("visibilitychange", resumeVisibleSession); window.removeEventListener("pageshow", resumePersistedPage); engine.stop();
       for (const timer of typingExpiryTimers.values()) window.clearTimeout(timer);
       typingExpiryTimers.clear(); setTypingSessions({}); setPresenceByRoom({});
       for (const timer of deliveryReceiptTimers.values()) window.clearTimeout(timer);

@@ -639,6 +639,8 @@ export class SyncEngine extends EventTarget {
   private historyBlockedRooms = new Set<RoomId>();
   private ingestQueue: Promise<void> = Promise.resolve();
   private catchUpTask: Promise<void> | null = null;
+  private resumeTask: Promise<void> | null = null;
+  private socketProbes = new Map<RoomId, { socket: WebSocket; timer: ReturnType<typeof setTimeout>; promise: Promise<boolean>; resolve: (alive: boolean) => void }>();
   private readonly archiveCatchUp: OrderedArchiveCatchUp | null;
   private readonly onlineHandler = () => { void this.recover(); };
 
@@ -686,6 +688,7 @@ export class SyncEngine extends EventTarget {
     this.reconnectTimers.clear();
     this.connecting.clear();
     this.desiredRooms.clear();
+    for (const [roomId, probe] of [...this.socketProbes]) this.finishSocketProbe(roomId, probe.socket, false);
     for (const socket of this.sockets.values()) socket.close(1000, "client stopped");
     this.sockets.clear();
   }
@@ -758,6 +761,7 @@ export class SyncEngine extends EventTarget {
         try {
           const frame = JSON.parse(String(message.data)) as SocketFrame;
           if (frame.type === "room.event") void this.ingest(frame.event).catch((error) => this.connectionError(error));
+          else if (frame.type === "ping") this.finishSocketProbe(roomId, socket, true);
           else if (frame.type === "typing" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("typing", { detail: frame }));
           else if (frame.type === "presence" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("presence", { detail: frame satisfies PresenceSocketFrame }));
           else if (frame.type === "presence.snapshot" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("presence-snapshot", { detail: frame satisfies PresenceSnapshotSocketFrame }));
@@ -774,6 +778,7 @@ export class SyncEngine extends EventTarget {
   }
 
   private socketClosed(roomId: RoomId, socket: WebSocket, code: number): void {
+    this.finishSocketProbe(roomId, socket, false);
     if (this.sockets.get(roomId) !== socket) return;
     this.sockets.delete(roomId);
     this.dispatchEvent(new CustomEvent("presence-reset", { detail: { room_id: roomId } }));
@@ -811,6 +816,64 @@ export class SyncEngine extends EventTarget {
       this.connectionError(error);
       if (retryableConnectionError(error)) for (const roomId of this.desiredRooms) this.scheduleReconnect(roomId);
     }
+  }
+
+  /**
+   * Reconcile durable sync after a suspended page and replace only room sockets
+   * that fail the existing ephemeral RoomDO ping. No event or object is written.
+   */
+  resume(): Promise<void> {
+    if (!this.running) return Promise.resolve();
+    if (this.resumeTask) return this.resumeTask;
+    const task = this.resumeOnce().finally(() => { if (this.resumeTask === task) this.resumeTask = null; });
+    this.resumeTask = task;
+    return task;
+  }
+
+  private async resumeOnce(): Promise<void> {
+    const targets = [...this.desiredRooms]
+      .filter((roomId) => !this.disconnectedRooms.has(roomId) && !this.historyBlockedRooms.has(roomId))
+      .map((roomId) => ({ roomId, socket: this.sockets.get(roomId) ?? null }));
+    const probes = targets.map(async (target) => ({ ...target, alive: target.socket ? await this.probeSocket(target.roomId, target.socket) : false }));
+    let syncError: unknown;
+    const catchUp = this.catchUp().catch((error) => { syncError = error; this.connectionError(error); });
+    const results = await Promise.all(probes);
+    await catchUp;
+    if (!this.running) {
+      if (syncError) throw syncError;
+      return;
+    }
+    for (const { roomId, socket, alive } of results) {
+      if (alive) continue;
+      if (socket && this.sockets.get(roomId) === socket) {
+        this.sockets.delete(roomId);
+        try { socket.close(1000, "heartbeat timeout"); } catch { /* already terminal */ }
+      }
+      await this.connectRoom(roomId);
+    }
+    if (syncError) throw syncError;
+  }
+
+  private probeSocket(roomId: RoomId, socket: WebSocket): Promise<boolean> {
+    if (socket.readyState !== 1) return Promise.resolve(false);
+    const existing = this.socketProbes.get(roomId);
+    if (existing?.socket === socket) return existing.promise;
+    if (existing) this.finishSocketProbe(roomId, existing.socket, false);
+    let settle!: (alive: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => { settle = resolve; });
+    const timer = setTimeout(() => this.finishSocketProbe(roomId, socket, false), 3_000);
+    this.socketProbes.set(roomId, { socket, timer, promise, resolve: settle });
+    try { socket.send(JSON.stringify({ type: "ping" } satisfies ClientSocketFrame)); }
+    catch { this.finishSocketProbe(roomId, socket, false); }
+    return promise;
+  }
+
+  private finishSocketProbe(roomId: RoomId, socket: WebSocket, alive: boolean): void {
+    const probe = this.socketProbes.get(roomId);
+    if (!probe || probe.socket !== socket) return;
+    clearTimeout(probe.timer);
+    this.socketProbes.delete(roomId);
+    probe.resolve(alive);
   }
 
   private connectionError(error: unknown): void {
