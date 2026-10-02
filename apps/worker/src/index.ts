@@ -3667,18 +3667,26 @@ async function uploadAttachmentRepair(request: Request, env: Env, auth: AuthCont
   }
   if (!row.ciphertext_sha256) throw new HttpError(409, "Legacy attachment has no verifiable digest", "attachment_repair_unverified");
   if (declaredSize !== row.ciphertext_bytes) throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
-  const bytes = await request.arrayBuffer();
-  if (bytes.byteLength !== row.ciphertext_bytes) throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
-  const digest = await crypto.subtle.digest("SHA-256", bytes); const digestText = b64url(digest);
-  if (digestText !== row.ciphertext_sha256) throw new HttpError(400, "Attachment ciphertext digest mismatch", "invalid_attachment_digest");
+  const digest = fromB64url(row.ciphertext_sha256);
+  if (digest.byteLength !== 32 || b64url(digest) !== row.ciphertext_sha256) throw new Error("Stored attachment digest is invalid");
   try {
-    const stored = await env.ARCHIVE.put(row.object_key, bytes, {
-      onlyIf: { etagDoesNotMatch: "*" }, sha256: digest,
-      httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId: row.room_id, sha256: digestText },
-    });
+    let stored: R2Object | null;
+    try {
+      stored = await env.ARCHIVE.put(row.object_key, request.body, {
+        onlyIf: { etagDoesNotMatch: "*" }, sha256: digest,
+        httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId: row.room_id, sha256: row.ciphertext_sha256 },
+      });
+    } catch (error) {
+      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Attachment ciphertext digest mismatch", "invalid_attachment_digest");
+      throw error;
+    }
+    if (stored && stored.size !== row.ciphertext_bytes) {
+      await env.ARCHIVE.delete(row.object_key);
+      throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
+    }
     if (!stored) {
       const existing = await env.ARCHIVE.head(row.object_key);
-      if (!existing || existing.size !== row.ciphertext_bytes || existing.customMetadata?.sha256 !== digestText) throw new Error("R2 key was recreated with conflicting bytes");
+      if (!existing || existing.size !== row.ciphertext_bytes || existing.customMetadata?.sha256 !== row.ciphertext_sha256) throw new Error("R2 key was recreated with conflicting bytes");
     }
     const completed = await db.deleteFrom("attachment_repair_jobs").where("attachment_id", "=", id).where("lease_device_id", "=", auth.deviceId).where("lease_token_hash", "=", await sha256(token)).executeTakeFirst();
     if (completed.numDeletedRows !== 1n) {
@@ -3914,18 +3922,26 @@ async function uploadArchiveRepair(request: Request, env: Env, auth: AuthContext
   if (!row || row.lease_device_id !== auth.deviceId || row.lease_token_hash !== await sha256(token) || !row.lease_expires_at || row.lease_expires_at <= Date.now()) throw new HttpError(409, "Archive repair lease is missing or stale", "invalid_repair_lease");
   if (!row.ciphertext_sha256) throw new HttpError(409, "Legacy archive segment has no verifiable digest", "archive_repair_unverified");
   if (declaredSize !== row.byte_size) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
-  const bytes = await request.arrayBuffer();
-  if (bytes.byteLength !== row.byte_size) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
-  const digest = await crypto.subtle.digest("SHA-256", bytes); const digestText = b64url(digest);
-  if (digestText !== row.ciphertext_sha256) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
+  const digest = fromB64url(row.ciphertext_sha256);
+  if (digest.byteLength !== 32 || b64url(digest) !== row.ciphertext_sha256) throw new Error("Stored archive segment digest is invalid");
   try {
-    const stored = await env.ARCHIVE.put(row.object_key, bytes, {
-      onlyIf: { etagDoesNotMatch: "*" }, sha256: digest, httpMetadata: { contentType: "application/octet-stream" },
-      customMetadata: { roomId: row.room_id, start: String(row.start_seq), end: String(row.end_seq), sha256: digestText },
-    });
+    let stored: R2Object | null;
+    try {
+      stored = await env.ARCHIVE.put(row.object_key, request.body, {
+        onlyIf: { etagDoesNotMatch: "*" }, sha256: digest, httpMetadata: { contentType: "application/octet-stream" },
+        customMetadata: { roomId: row.room_id, start: String(row.start_seq), end: String(row.end_seq), sha256: row.ciphertext_sha256 },
+      });
+    } catch (error) {
+      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
+      throw error;
+    }
+    if (stored && stored.size !== row.byte_size) {
+      await env.ARCHIVE.delete(row.object_key);
+      throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
+    }
     if (!stored) {
       const existing = await env.ARCHIVE.head(row.object_key);
-      if (!existing || existing.size !== row.byte_size || existing.customMetadata?.sha256 !== digestText) throw new Error("R2 archive key was recreated with conflicting bytes");
+      if (!existing || existing.size !== row.byte_size || existing.customMetadata?.sha256 !== row.ciphertext_sha256) throw new Error("R2 archive key was recreated with conflicting bytes");
     }
     const completed = await db.deleteFrom("archive_segment_repair_jobs").where("segment_id", "=", segmentId)
       .where("lease_device_id", "=", auth.deviceId).where("lease_token_hash", "=", await sha256(token)).executeTakeFirst();
