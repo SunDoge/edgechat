@@ -31,6 +31,7 @@ describe("RoomDurableObject", () => {
     expect(await room.appendEvent(event("two"), 1)).toMatchObject({ ok: true, event: { seq: 2 } });
     const duplicate = await room.appendEvent(event("one"), 1);
     expect(duplicate).toEqual(first);
+    expect(await room.appendEvent({ ...event("one"), signature: "different-signature" }, 1)).toEqual({ ok: false, code: "event_id_conflict" });
     if (!first.ok || !first.event.acceptance_receipt) throw new Error("missing acceptance receipt");
     expect(await verifyAcceptanceReceipt(env, first.event, first.event.acceptance_receipt)).toBe(true);
     expect(await verifyAcceptanceReceipt(env, { ...first.event, ciphertext: "tampered" }, first.event.acceptance_receipt)).toBe(false);

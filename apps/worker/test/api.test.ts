@@ -533,6 +533,67 @@ describe("single-server durable delivery", () => {
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
   });
 
+  it("consumes one-time MLS claims when the owner adds a group member and retries the exact commit idempotently", async () => {
+    const aliceDevice = await device("group-owner-device");
+    const bobDevice = await device("group-existing-device");
+    const carolDevice = await device("group-new-device");
+    const alice = await register("group_owner", aliceDevice);
+    const bob = await register("group_existing", bobDevice);
+    const carol = await register("group_new", carolDevice);
+    const now = Date.now();
+    const relationshipRoom = "!group-contact-room:localhost";
+    const groupRoom = "!group-membership-room:localhost" as RoomId;
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO rooms (room_id,home_server,kind,name,current_seq,created_by,created_at,mls_epoch) VALUES (?, 'localhost', 'direct', NULL, 0, ?, ?, 1)").bind(relationshipRoom, alice.user_id, now),
+      env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'owner', ?, NULL)").bind(relationshipRoom, alice.user_id, now),
+      env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'member', ?, NULL)").bind(relationshipRoom, carol.user_id, now),
+      env.DB.prepare("INSERT INTO rooms (room_id,home_server,kind,name,current_seq,created_by,created_at,mls_epoch) VALUES (?, 'localhost', 'group', 'Team', 0, ?, ?, 1)").bind(groupRoom, alice.user_id, now),
+      env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'owner', ?, NULL)").bind(groupRoom, alice.user_id, now),
+      env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'member', ?, NULL)").bind(groupRoom, bob.user_id, now),
+      env.DB.prepare("INSERT INTO room_devices (room_id,device_id,user_id,joined_epoch,joined_seq,removed_epoch,created_at,removed_at) VALUES (?,?,?,1,0,NULL,?,NULL)").bind(groupRoom, alice.device_id, alice.user_id, now),
+      env.DB.prepare("INSERT INTO room_devices (room_id,device_id,user_id,joined_epoch,joined_seq,removed_epoch,created_at,removed_at) VALUES (?,?,?,1,0,NULL,?,NULL)").bind(groupRoom, bob.device_id, bob.user_id, now),
+    ]);
+    await env.ROOMS.getByName(groupRoom).initialize(groupRoom, [{ user_id: alice.user_id, role: "owner" }, { user_id: bob.user_id, role: "member" }], now, 1);
+
+    const headers = { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" };
+    const claimResponse = await SELF.fetch("https://edgechat.test/api/v1/mls/key-packages/claim", {
+      method: "POST", headers, body: JSON.stringify({ user_ids: [carol.user_id], room_id: groupRoom }),
+    });
+    expect(claimResponse.status, await claimResponse.clone().text()).toBe(200);
+    const claimed = await claimResponse.json() as { key_packages: Array<{ claim_id: string; device_id: string; user_id: string }> };
+    expect(claimed.key_packages).toMatchObject([{ device_id: carol.device_id, user_id: carol.user_id }]);
+
+    const unsigned: Omit<ClientEvent, "signature"> = {
+      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      type: "control.group.commit", created_at: Date.now(), ciphertext: "opaque-add-member-commit",
+      metadata: { mls_epoch: 2, membership_action: "add", target_user_id: carol.user_id, target_device_ids: [carol.device_id] },
+    };
+    const signed = { ...unsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(unsigned))) };
+    const endpoint = `https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/members`;
+    const payload = { user_id: carol.user_id, event: signed, mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_recipients: [carol.device_id], mls_claim_ids: claimed.key_packages.map((item) => item.claim_id) };
+    const missingClaim = await SELF.fetch(endpoint, { method: "POST", headers, body: JSON.stringify({ ...payload, mls_claim_ids: [] }) });
+    expect(missingClaim.status).toBe(409);
+    expect(await missingClaim.json()).toMatchObject({ code: "invalid_mls_claim" });
+
+    const added = await SELF.fetch(endpoint, { method: "POST", headers, body: JSON.stringify(payload) });
+    expect(added.status, await added.clone().text()).toBe(200);
+    expect(await added.json()).toMatchObject({ room_id: groupRoom, user_id: carol.user_id, epoch: 2, event: { event_id: signed.event_id, seq: 1 } });
+    expect(await env.DB.prepare("SELECT consumed_room_id FROM device_key_packages WHERE package_id = ?").bind(claimed.key_packages[0]!.claim_id).first()).toEqual({ consumed_room_id: groupRoom });
+    expect(await env.DB.prepare("SELECT role,removed_at FROM room_members WHERE room_id = ? AND user_id = ?").bind(groupRoom, carol.user_id).first()).toEqual({ role: "member", removed_at: null });
+
+    const retry = await SELF.fetch(endpoint, { method: "POST", headers, body: JSON.stringify(payload) });
+    expect(retry.status, await retry.clone().text()).toBe(200);
+    expect(await retry.json()).toMatchObject({ event: { event_id: signed.event_id, seq: 1 } });
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM room_events WHERE event_id = ?").bind(signed.event_id).first()).toEqual({ count: 1 });
+
+    const conflictingUnsigned = { ...unsigned, ciphertext: "different-membership-commit" };
+    const conflicting = { ...conflictingUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(conflictingUnsigned))) };
+    const conflict = await SELF.fetch(endpoint, { method: "POST", headers, body: JSON.stringify({ ...payload, event: conflicting }) });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "event_id_conflict" });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+  });
+
   it("relays one bounded encrypted peer-recovery bundle and deletes it after target acknowledgement", async () => {
     const targetDevice = await device("peer-recovery-target"); const sourceDevice = await device("peer-recovery-source");
     const target = await register("peer_recovery_owner", targetDevice);

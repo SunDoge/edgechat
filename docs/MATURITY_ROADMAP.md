@@ -35,6 +35,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] Progressive/resumable linked-device history handoff with one versioned local database-and-attachment bundle, D1 manifest, independently authenticated shards, durable target staging, and per-shard R2 acknowledgement/deletion.
 - [x] Persist-before-publish KeyPackage replenishment, low-water monitoring, claim-context idempotency and expired-claim cleanup.
 - [x] Device-removal Commit workflow with durable per-room progress, explicit pending/complete states, stale-epoch rejection, session/ticket invalidation, and WebSocket closure.
+- [x] Group-member Add/Remove Commit admission with signed exact device sets, target-only one-time KeyPackage claims, idempotent exact-envelope retries, and no R2/S3 objects.
 - [x] MLS-encrypted cross-device read state.
 - [x] Device-level peer identity verification with out-of-band comparable fingerprints, local trust persistence, automatic downgrade for new/changed keys, conversation-header warnings, and no server-side trust graph or R2 objects.
 - [x] First-class cross-device saved messages through an owner-only MLS room, with immutable membership and zero-copy R2 attachment references.

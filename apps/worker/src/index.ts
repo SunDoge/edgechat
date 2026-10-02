@@ -1160,7 +1160,12 @@ async function setUserBlock(env: Env, auth: AuthContext, targetUserId: UserId, b
 
 async function appendRoomEvent(env: Env, roomId: RoomId, event: ClientEvent, currentEpoch: number): Promise<RoomEvent> {
   const result = await env.ROOMS.getByName(roomId).appendEvent(event, currentEpoch);
-  if (!result.ok) throw new HttpError(409, result.code === "stale_epoch" ? "Room MLS epoch changed while ordering the event" : "Event MLS epoch is invalid", result.code);
+  if (!result.ok) {
+    const message = result.code === "stale_epoch"
+      ? "Room MLS epoch changed while ordering the event"
+      : result.code === "event_id_conflict" ? "Event ID is already bound to another signed envelope" : "Event MLS epoch is invalid";
+    throw new HttpError(409, message, result.code);
+  }
   return result.event;
 }
 
@@ -2146,19 +2151,31 @@ async function claimMlsKeyPackages(request: Request, env: Env, auth: AuthContext
   const requested = Array.isArray(body.user_ids) ? body.user_ids.filter((value): value is string => typeof value === "string") : [];
   if (auth.actor === "bot" && auth.botRoomId) throw new HttpError(403, "Bot provisioning capability has already been consumed", "bot_provisioned");
   if (auth.actor === "bot" && requested.some((id) => id !== auth.userId)) throw new HttpError(403, "Personal bots may only claim their owner's devices", "bot_owner_scope");
-  const userIds = Array.from(new Set([auth.userId, ...requested])) as UserId[];
+  const db = createDatabase(env.DB);
+  const existingRoom = await db.selectFrom("rooms").select(["kind", "purpose"]).where("room_id", "=", claimContext).executeTakeFirst();
+  if (existingRoom) {
+    if (auth.actor !== "user" || existingRoom.kind !== "group" || existingRoom.purpose !== "chat" || await memberRole(env, claimContext, auth.userId) !== "owner") {
+      throw new HttpError(403, "Only the group owner may claim packages for a new member", "forbidden");
+    }
+    if (new Set(requested).size !== 1 || requested[0] === auth.userId) throw new HttpError(400, "Exactly one new group member is required", "invalid_members");
+    const membership = await db.selectFrom("room_members").select("removed_at").where("room_id", "=", claimContext).where("user_id", "=", requested[0] as UserId).executeTakeFirst();
+    if (membership?.removed_at === null) throw new HttpError(409, "User is already a member", "membership_conflict");
+  }
+  const userIds = Array.from(new Set(existingRoom ? requested : [auth.userId, ...requested])) as UserId[];
   if (userIds.length < 1 || userIds.length > 32) throw new HttpError(400, "Invalid MLS member list", "invalid_members");
   userIds.forEach((id) => assertLocalId(id, "@", env));
-  await assertNoBlockedPair(env, userIds);
+  const policyParticipants = existingRoom
+    ? [...(await db.selectFrom("room_members").select("user_id").where("room_id", "=", claimContext).where("removed_at", "is", null).execute()).map((member) => member.user_id), ...userIds]
+    : userIds;
+  await assertNoBlockedPair(env, policyParticipants);
   const deniedInvitee = (await Promise.all(userIds.filter((userId) => userId !== auth.userId)
     .map(async (userId) => ({ userId, allowed: await invitationAllowed(env, auth.userId, userId) })))).find((entry) => !entry.allowed);
   if (deniedInvitee) throw new HttpError(403, "A user does not accept invitations from this account", "invitation_not_allowed");
   const unknownInvitees = auth.actor === "user" ? (await Promise.all(userIds.filter((userId) => userId !== auth.userId)
     .map(async (userId) => ({ userId, known: await hasEstablishedRelationship(env, auth.userId, userId) })))).filter((entry) => !entry.known) : [];
-  if (userIds.length > 2 && unknownInvitees.length) {
+  if ((existingRoom || userIds.length > 2) && unknownInvitees.length) {
     throw new HttpError(403, "Create direct message requests before inviting unknown users to a group", "group_invitation_requires_contact");
   }
-  const db = createDatabase(env.DB);
   const devices = await db.selectFrom("devices").select(["device_id", "user_id"]).where("user_id", "in", userIds).where("kind", "=", "user").where("revoked_at", "is", null).where("device_id", "!=", auth.deviceId).execute();
   const claimed: Array<{ package_id: string; device_id: string; user_id: string; key_package: string; reserve: boolean }> = [];
   for (const device of devices) {
@@ -2532,7 +2549,7 @@ async function createRoom(request: Request, env: Env, auth: AuthContext): Promis
 async function changeMember(body: Record<string, unknown>, env: Env, auth: AuthContext, roomId: RoomId, targetUserId: UserId, remove: boolean): Promise<Response> {
   assertLocalId(targetUserId, "@", env);
   const db = createDatabase(env.DB);
-  const room = await db.selectFrom("rooms").select(["kind", "purpose", "current_seq", "mls_epoch"]).where("room_id", "=", roomId).executeTakeFirst();
+  const room = await db.selectFrom("rooms").select(["kind", "purpose", "mls_epoch"]).where("room_id", "=", roomId).executeTakeFirst();
   if (!room) throw new HttpError(404, "Room not found", "not_found");
   if (room.purpose === "saved") throw new HttpError(409, "Saved messages membership cannot be changed", "fixed_membership");
   if (room.kind !== "group") throw new HttpError(409, "Direct room membership cannot be changed", "fixed_membership");
@@ -2541,35 +2558,67 @@ async function changeMember(body: Record<string, unknown>, env: Env, auth: AuthC
   if (pendingDeviceChange) throw new HttpError(409, "A device revocation is pending in this room", "room_membership_busy");
   if (remove && targetUserId === auth.userId) throw new HttpError(409, "The owner cannot remove itself", "owner_required");
 
+  if (!body.event || typeof body.event !== "object") throw new HttpError(400, "Signed MLS commit event required", "missing_mls_commit");
+  const event = await verifyEvent(env, auth, body.event as Record<string, unknown>, roomId);
+  if (event.type !== "control.group.commit") throw new HttpError(400, "Expected control.group.commit", "invalid_mls_commit");
+  const action = remove ? "remove" : "add";
+  if (event.metadata.membership_action !== action || event.metadata.target_user_id !== targetUserId) {
+    throw new HttpError(400, "Signed membership target does not match the request", "invalid_mls_commit");
+  }
+  const epoch = Number(event.metadata.mls_epoch);
+  if (!Number.isInteger(epoch) || epoch < 2) throw new HttpError(409, "MLS commit epoch is invalid", "stale_epoch");
+  const duplicateRow = await db.selectFrom("room_events").select("event_json").where("room_id", "=", roomId).where("event_id", "=", event.event_id).executeTakeFirst();
+  const duplicate = duplicateRow ? JSON.parse(duplicateRow.event_json) as RoomEvent : null;
+  if (duplicate && duplicate.signature !== event.signature) throw new HttpError(409, "Event ID is already bound to another signed envelope", "event_id_conflict");
+
   const target = await db.selectFrom("users").select("user_id").where("user_id", "=", targetUserId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirst();
   if (!target) throw new HttpError(404, "User not found", "user_not_found");
   const active = await db.selectFrom("room_members").select(["user_id", "removed_at"]).where("room_id", "=", roomId).where("user_id", "=", targetUserId).executeTakeFirst();
-  if (remove ? !active || active.removed_at !== null : active?.removed_at === null) throw new HttpError(409, remove ? "User is not an active member" : "User is already a member", "membership_conflict");
+  const applied = remove ? Boolean(active && active.removed_at !== null) : active?.removed_at === null;
+  if (duplicate && room.mls_epoch === epoch && applied) return json({ room_id: roomId, user_id: targetUserId, epoch, event: duplicate });
+  if (room.mls_epoch !== epoch - 1 || applied) {
+    throw new HttpError(409, duplicate ? "Membership commit reconciliation state conflicts" : remove ? "User is not an active member" : "User is already a member", duplicate ? "membership_reconciliation_conflict" : "membership_conflict");
+  }
   if (!remove) {
     const activeUserIds = (await db.selectFrom("room_members").select("user_id").where("room_id", "=", roomId).where("removed_at", "is", null).execute()).map((member) => member.user_id);
     await assertNoBlockedPair(env, [...activeUserIds, targetUserId]);
     if (!(await invitationAllowed(env, auth.userId, targetUserId))) throw new HttpError(403, "This user does not accept invitations from this account", "invitation_not_allowed");
   }
 
-  if (!body.event || typeof body.event !== "object") throw new HttpError(400, "Signed MLS commit event required", "missing_mls_commit");
-  const event = await verifyEvent(env, auth, body.event as Record<string, unknown>, roomId);
-  if (event.type !== "control.group.commit") throw new HttpError(400, "Expected control.group.commit", "invalid_mls_commit");
-  const epoch = Number(event.metadata.mls_epoch);
-  if (!Number.isInteger(epoch) || epoch !== room.mls_epoch + 1) throw new HttpError(409, "MLS commit epoch is not the next epoch", "stale_epoch");
-
   let joinState: string | null = null;
-  let targetDevices: string[] = [];
+  const targetDevices = (await db.selectFrom("devices").select("device_id").where("user_id", "=", targetUserId).where("kind", "=", "user").where("revoked_at", "is", null).execute()).map((device) => device.device_id);
+  const signedTargetDevices = Array.isArray(event.metadata.target_device_ids) ? event.metadata.target_device_ids.filter((value): value is string => typeof value === "string") : [];
+  if (new Set(signedTargetDevices).size !== targetDevices.length || targetDevices.some((deviceId) => !signedTargetDevices.includes(deviceId))) {
+    throw new HttpError(400, "Signed membership device set is incomplete", "missing_mls_recipient");
+  }
+  let claims: Array<{ package_id: string; device_id: string; consumed_room_id: string | null }> = [];
   if (!remove) {
     const welcome = stringField(body, "mls_welcome", 1_000_000);
     const ratchetTree = stringField(body, "mls_ratchet_tree", 1_000_000);
     const recipients = Array.isArray(body.mls_recipients) ? body.mls_recipients.filter((value): value is string => typeof value === "string") : [];
-    targetDevices = (await db.selectFrom("devices").select("device_id").where("user_id", "=", targetUserId).where("revoked_at", "is", null).execute()).map((device) => device.device_id);
     if (new Set(recipients).size !== targetDevices.length || targetDevices.some((deviceId) => !recipients.includes(deviceId))) throw new HttpError(400, "MLS Welcome must cover every target device", "missing_mls_recipient");
+    const claimIds = Array.isArray(body.mls_claim_ids) ? body.mls_claim_ids.filter((value): value is string => typeof value === "string") : [];
+    claims = claimIds.length ? await db.selectFrom("device_key_packages").select(["package_id", "device_id", "consumed_room_id"])
+      .where("package_id", "in", claimIds).where("claimed_by_device_id", "=", auth.deviceId).where("claim_context", "=", roomId).execute() : [];
+    if (new Set(claimIds).size !== targetDevices.length || claims.length !== targetDevices.length
+      || targetDevices.some((deviceId) => !claims.some((claim) => claim.device_id === deviceId && (claim.consumed_room_id === null || claim.consumed_room_id === roomId)))) {
+      throw new HttpError(409, "Valid one-time MLS KeyPackage claims are required", "invalid_mls_claim");
+    }
     joinState = JSON.stringify({ version: 1, welcome, ratchet_tree: ratchetTree });
   }
 
   const now = Date.now();
-  const accepted = await appendRoomEvent(env, roomId, event, room.mls_epoch);
+  const unconsumedClaims = claims.filter((claim) => claim.consumed_room_id === null);
+  if (unconsumedClaims.length) {
+    await batch(env.DB, unconsumedClaims.map((claim) => db.updateTable("device_key_packages").set({ consumed_room_id: roomId })
+      .where("package_id", "=", claim.package_id).where("consumed_room_id", "is", null)));
+    const consumed = await db.selectFrom("device_key_packages").select(["package_id", "consumed_room_id"])
+      .where("package_id", "in", unconsumedClaims.map((claim) => claim.package_id)).execute();
+    if (consumed.length !== unconsumedClaims.length || consumed.some((claim) => claim.consumed_room_id !== roomId)) {
+      throw new HttpError(409, "MLS KeyPackage claim was consumed concurrently", "mls_claim_race");
+    }
+  }
+  const accepted = await appendRoomEvent(env, roomId, event, epoch - 1);
   if (remove) await env.ROOMS.getByName(roomId).removeMember(targetUserId, auth.userId, now);
   else await env.ROOMS.getByName(roomId).addMember(targetUserId, "member", auth.userId, now);
   const membership = remove

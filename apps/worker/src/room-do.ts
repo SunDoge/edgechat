@@ -11,7 +11,7 @@ type EventRow = { event_json: string; accepted_at: number };
 type CompactionLeaseRow = { token: string; device_id: string; segment_id: string; start_seq: number; end_seq: number; expires_at: number };
 type RepairLeaseRow = { token_hash: string; device_id: string; start_seq: number; end_seq: number; generation: number; expires_at: number };
 type SocketAttachment = { userId: UserId; deviceId: string; connectionId: string; typingActive: boolean; lastTypingAt: number; allowTyping: boolean; sharePresence: boolean };
-export type AppendEventResult = { ok: true; event: RoomEvent } | { ok: false; code: "stale_epoch" | "invalid_epoch" };
+export type AppendEventResult = { ok: true; event: RoomEvent } | { ok: false; code: "stale_epoch" | "invalid_epoch" | "event_id_conflict" };
 export type RepairRangeState = { floor_seq: number; generation: number; current_seq: number; missing_sequences: number[] };
 export type RetentionAdvanceResult = { floor_seq: number; generation: number; current_seq: number; deleted_events: number; advanced: boolean };
 
@@ -107,6 +107,9 @@ export class RoomDurableObject extends DurableObject<Env> {
     const duplicate = this.ctx.storage.sql.exec<EventRow>("SELECT event_json, accepted_at FROM events WHERE event_id = ?", event.event_id).toArray()[0];
     if (duplicate) {
       let existing = JSON.parse(duplicate.event_json) as RoomEvent;
+      // Exact-envelope retry is required: an event ID must never authorize a
+      // different signed membership operation during DO/D1 reconciliation.
+      if (existing.signature !== event.signature) return { ok: false, code: "event_id_conflict" };
       if (!existing.acceptance_receipt) {
         const receipt = await issueAcceptanceReceipt(this.env, existing, existing.seq, meta.retention_generation, duplicate.accepted_at);
         if (receipt) {
