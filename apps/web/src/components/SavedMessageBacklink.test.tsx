@@ -33,6 +33,21 @@ describe("saved message backlinks", () => {
     expect(document.body.textContent).not.toContain("已转发");
   });
 
+  it("copies only the locally decrypted message text", () => {
+    const copyText = vi.fn();
+    const message = { event_id: payload.message_id, message_id: payload.message_id, room_id: "!saved-room-12345:example.com", seq: 2,
+      sender: "@alice:example.com", device_id: "device", event_type: "message.text", created_at: 1, ciphertext: "cipher",
+      plaintext: "remember me", payload, deleted_at: null, deleted_by: null, delete_event_id: null, edited_at: null, edit_event_id: null, expires_at: null } as LocalMessage;
+    dispose = render(() => <MessageBubble message={message} currentUserId="@alice:example.com" group={false} retracting={false}
+      downloadAttachment={vi.fn()} decryptAttachment={vi.fn(async () => new ArrayBuffer(0))} indexImage={vi.fn()} retract={vi.fn()}
+      reply={vi.fn()} quote={vi.fn()} forward={vi.fn()} save={vi.fn()} copyText={copyText} canSave={false} saving={false} selecting={false} selected={false}
+      select={vi.fn()} edit={vi.fn()} react={vi.fn()} jumpToMessage={vi.fn()} openMessageReference={vi.fn()} openContact={vi.fn()}
+      reactions={[]} readBy={0} deliveredBy={0} displayName={(userId) => userId} linkPreviews={false}/>, root());
+    document.querySelector<HTMLButtonElement>('[aria-label="消息操作"]')?.click();
+    [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("复制文字"))?.click();
+    expect(copyText).toHaveBeenCalledWith("remember me");
+  });
+
   it("keeps the backlink usable while its saved copy is offline in the outbox", () => {
     const open = vi.fn();
     const event = { event_id: payload.message_id, room_id: "!saved-room-12345:example.com", sender: "@alice:example.com", device_id: "device",

@@ -1,5 +1,5 @@
 import { For, Show, createEffect, createSignal, createUniqueId, onCleanup } from "solid-js";
-import { IconArrowBackUp, IconArrowForwardUp, IconArrowRight, IconBookmark, IconChecks, IconCircleCheck, IconCircleCheckFilled, IconDotsVertical, IconEdit, IconMoodSmile, IconPaperclip, IconQuote, IconTrash } from "@tabler/icons-solidjs";
+import { IconArrowBackUp, IconArrowForwardUp, IconArrowRight, IconBookmark, IconChecks, IconCircleCheck, IconCircleCheckFilled, IconCopy, IconDotsVertical, IconEdit, IconMoodSmile, IconPaperclip, IconQuote, IconTrash } from "@tabler/icons-solidjs";
 import type { LocalMessage, LocalReactionSummary } from "@edgechat/db";
 import type { MessageReference } from "@edgechat/protocol";
 import { EncryptedImage } from "./EncryptedImage";
@@ -31,6 +31,7 @@ export function MessageBubble(props: {
   quote: (message: LocalMessage, selectedText?: string) => void;
   forward: (message: LocalMessage) => void;
   save: (message: LocalMessage) => void;
+  copyText?: (text: string) => void;
   canSave: boolean;
   saving: boolean;
   selecting: boolean;
@@ -133,6 +134,7 @@ export function MessageBubble(props: {
             <button ref={menuButton} type="button" aria-label="消息操作" aria-haspopup="menu" aria-controls={menuOpen() ? menuId : undefined} aria-expanded={menuOpen()} class={`grid size-9 place-items-center rounded-md opacity-65 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-1 ${mine() ? "hover:bg-white/10 focus-visible:outline-white" : "hover:bg-neutral-100 focus-visible:outline-brand"} sm:size-7 sm:opacity-0 sm:group-hover:opacity-70`} onPointerDown={() => setQuoteSelection(captureQuoteSelection())} onClick={(event) => { const opening = !menuOpen(); focusLastOnOpen = false; if (opening && event.detail === 0) setQuoteSelection(captureQuoteSelection()); setMenuOpen(opening); setEmojiOpen(false); }} onKeyDown={(event) => { openMenuFromTrigger(event, (last) => { focusLastOnOpen = last; setQuoteSelection(captureQuoteSelection()); setMenuOpen(true); setEmojiOpen(false); }); }}><IconDotsVertical class="size-3.5 stroke-current"/></button>
             <Show when={menuOpen()}><div ref={menu} id={menuId} role="menu" aria-label="消息操作" onKeyDown={menuKeyDown} class={`max-h-[min(70dvh,28rem)] min-w-40 overflow-y-auto rounded-xl border border-black/8 bg-white p-1 text-sm text-ink shadow-xl absolute bottom-9 z-20 sm:bottom-8 ${mine() ? "right-0" : "left-0"}`}>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.reply(props.message); setMenuOpen(false); }}><IconArrowBackUp class="size-4 stroke-muted"/>回复</button>
+              <Show when={props.copyText && messageText(payload()).trim()}><button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.copyText?.(messageText(payload())); setMenuOpen(false); }}><IconCopy class="size-4 stroke-muted"/>复制文字</button></Show>
               <Show when={messageText(payload()).trim()}><button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.quote(props.message, quoteSelection() || undefined); setMenuOpen(false); }}><IconQuote class="size-4 stroke-muted"/>{quoteSelection() ? "引用所选文字" : "引用文字"}</button></Show>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.forward(props.message); setMenuOpen(false); }}><IconArrowForwardUp class="size-4 stroke-muted"/>转发</button>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.select(props.message); setMenuOpen(false); }}><IconChecks class="size-4 stroke-muted"/>选择</button>

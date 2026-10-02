@@ -24,6 +24,7 @@ import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageList
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
 import { AuthScreen } from "./components/AuthScreen";
 import { MessageBubble } from "./components/MessageBubble";
+import { MessageDateSeparator } from "./components/MessageDateSeparator";
 import { NewRoomDialog } from "./components/NewRoomDialog";
 import { PendingMessageBubble } from "./components/PendingMessageBubble";
 import { RoomListItem } from "./components/RoomListItem";
@@ -75,6 +76,7 @@ import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE, type StartupFailur
 import { StartupRecoveryScreen } from "./components/StartupRecoveryScreen";
 import { inspectLocalStorageHealth, requestPersistentLocalStorage, type LocalStorageHealth, type PersistenceRequestResult } from "./local-storage-health";
 import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, isAccountExportStorageError, type AccountExportStaging } from "./account-export-staging";
+import { startsNewMessageDay } from "./message-date";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -271,6 +273,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (!(roomId in current)) return current;
       const next = { ...current }; delete next[roomId]; return next;
     });
+  }
+
+  async function copyMessageText(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice("已复制消息文字");
+    } catch {
+      setNotice("无法复制消息文字，请检查浏览器剪贴板权限");
+    }
   }
 
   function historyRecoveryError(cause: unknown): string {
@@ -2948,13 +2959,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           </>}
           render={(index) => {
             const entry = timelineEntries()[index]!;
-            if (entry.kind === "pending") return <PendingMessageBubble message={entry.message} onRetry={() => void retryMessage(entry.message.event_id)} openMessageReference={openMessageReference}/>;
+            const previous = timelineEntries()[index - 1];
+            const dateSeparator = startsNewMessageDay(entry.message.created_at, previous?.message.created_at)
+              ? <MessageDateSeparator timestamp={entry.message.created_at}/>
+              : null;
+            if (entry.kind === "pending") return <>{dateSeparator}<PendingMessageBubble message={entry.message} onRetry={() => void retryMessage(entry.message.event_id)} openMessageReference={openMessageReference}/></>;
             const message = entry.message;
             const payload = () => normalizeMessagePayload((message.payload ?? {}) as MessagePayload, message.event_id);
             const target = () => payload().relation?.target.message_id ? messages().find((candidate) => candidate.message_id === payload().relation?.target.message_id) : undefined;
             const readBy = () => readReceipts().filter((receipt) => receipt.user_id !== currentSession().user_id && Number(receipt.last_read_seq) >= Number(message.seq)).length;
             const deliveredBy = () => deliveryReceipts().filter((receipt) => receipt.user_id !== currentSession().user_id && Number(receipt.last_delivered_seq) >= Number(message.seq)).length;
-            return <MessageBubble message={message} currentUserId={currentSession().user_id} group={room().kind === "group" && room().purpose === "chat"} displayName={(userId) => memberName(room(), userId)} linkPreviews={linkPreviews()} retracting={pendingDeleteTargets().has(message.event_id)} readBy={readBy()} deliveredBy={deliveredBy()} relationPreview={target() ? { sender: target()!.sender, text: target()!.plaintext, deleted: Boolean(target()!.deleted_at) } : undefined} reactions={reactions().filter((reaction) => reaction.message_id === message.message_id)} downloadAttachment={(attachment) => void downloadAttachment(attachment)} decryptAttachment={decryptAttachment} indexImage={indexImage} retract={(item) => void retractMessage(item)} reply={beginReply} quote={beginQuote} forward={(item) => setForwardingMessages([item])} save={(item) => void saveMessage(item)} canSave={room().purpose !== "saved"} saving={savingMessageId() === message.message_id} selecting={selectedMessageIds().size > 0} selected={selectedMessageIds().has(message.message_id)} select={toggleMessageSelection} edit={beginEdit} react={(item, reaction) => void reactToMessage(item, reaction)} jumpToMessage={jumpToMessage} openMessageReference={openMessageReference} openContact={openSharedContact}/>;
+            return <>{dateSeparator}<MessageBubble message={message} currentUserId={currentSession().user_id} group={room().kind === "group" && room().purpose === "chat"} displayName={(userId) => memberName(room(), userId)} linkPreviews={linkPreviews()} retracting={pendingDeleteTargets().has(message.event_id)} readBy={readBy()} deliveredBy={deliveredBy()} relationPreview={target() ? { sender: target()!.sender, text: target()!.plaintext, deleted: Boolean(target()!.deleted_at) } : undefined} reactions={reactions().filter((reaction) => reaction.message_id === message.message_id)} downloadAttachment={(attachment) => void downloadAttachment(attachment)} decryptAttachment={decryptAttachment} indexImage={indexImage} retract={(item) => void retractMessage(item)} reply={beginReply} quote={beginQuote} forward={(item) => setForwardingMessages([item])} save={(item) => void saveMessage(item)} copyText={(text) => void copyMessageText(text)} canSave={room().purpose !== "saved"} saving={savingMessageId() === message.message_id} selecting={selectedMessageIds().size > 0} selected={selectedMessageIds().has(message.message_id)} select={toggleMessageSelection} edit={beginEdit} react={(item, reaction) => void reactToMessage(item, reaction)} jumpToMessage={jumpToMessage} openMessageReference={openMessageReference} openContact={openSharedContact}/></>;
           }}
         /><Show when={historyFocus()?.roomId === room().room_id ? historyFocus() : null}>{(focus) => <div class="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-4"><Show when={focus().status === "ready"} fallback={<div class="rounded-full bg-neutral-900/90 px-4 py-2 text-sm font-medium text-white shadow-lg" role="status">正在打开历史消息…</div>}><button type="button" class="pointer-events-auto flex min-h-10 items-center gap-1.5 rounded-full bg-neutral-900 px-4 text-sm font-semibold text-white shadow-lg hover:bg-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => void returnToLatestMessages()}><IconChevronDown class="size-4 stroke-white"/>{focus().hasNewer ? "回到最新消息" : "退出历史查看"}</button></Show></div>}</Show></div>}
         composer={<div>
