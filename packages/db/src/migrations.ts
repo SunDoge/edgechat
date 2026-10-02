@@ -19,10 +19,20 @@ export const LOCAL_SCHEMA_V2 = `CREATE TABLE room_membership_outbox (
   updated_at BIGINT NOT NULL
 )`;
 
-export const LOCAL_SCHEMA_VERSION = 2;
+export const LOCAL_SCHEMA_V3 = `CREATE TABLE room_profiles (
+  room_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
+  event_seq BIGINT NOT NULL,
+  name TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  updated_at BIGINT NOT NULL
+)`;
+
+export const LOCAL_SCHEMA_VERSION = 3;
 export const LOCAL_SCHEMA_MIGRATIONS: readonly LocalSchemaMigration[] = Object.freeze([
   { version: 1, name: "initial_local_schema", checksum: "f1e403a6e8c19ccd6943e34523664090f1a2aec623a88ea9d1588ef1278b9a69", sql: LOCAL_SCHEMA },
   { version: 2, name: "room_membership_outbox", checksum: "c30cd87e8264841f9255936181a7ed428750d4d217f41f8633a2f93a07acdc59", sql: LOCAL_SCHEMA_V2 },
+  { version: 3, name: "encrypted_room_profiles", checksum: "a966c145856ad22b2a5d4befe73d1a176fc9ddfe52738a912e3878a45dffe0ee", sql: LOCAL_SCHEMA_V3 },
 ]);
 
 const LOCAL_SCHEMA_META = `CREATE TABLE IF NOT EXISTS local_schema_meta (

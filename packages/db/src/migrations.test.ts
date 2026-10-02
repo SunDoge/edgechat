@@ -9,7 +9,7 @@ describe("versioned local PGlite migrations", () => {
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await expect(migrateLocalSchema(db)).resolves.toBe(LOCAL_SCHEMA_VERSION);
     expect((await db.query("SELECT version,migration_name FROM local_schema_meta WHERE id = 1")).rows)
-      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "room_membership_outbox" }]);
+      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "encrypted_room_profiles" }]);
     expect((await db.query("SELECT user_id FROM users")).rows).toEqual([{ user_id: "@alice:example.com" }]);
     await db.close();
   });
@@ -23,6 +23,13 @@ describe("versioned local PGlite migrations", () => {
       [new Uint8Array([1]), new Uint8Array([2])]);
     expect((await db.query("SELECT operation,target_user_id FROM room_membership_outbox")).rows)
       .toEqual([{ operation: "remove", target_user_id: "@bob:example.com" }]);
+    await db.close();
+  });
+
+  it("adds the encrypted room profile projection", async () => {
+    const db = new PGlite(); await migrateLocalSchema(db);
+    await db.query("INSERT INTO room_profiles VALUES ('!room:example.com','event',7,'Weekend plans','@alice:example.com',10)");
+    expect((await db.query("SELECT event_seq,name FROM room_profiles")).rows).toEqual([{ event_seq: 7, name: "Weekend plans" }]);
     await db.close();
   });
 

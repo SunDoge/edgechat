@@ -1,5 +1,5 @@
 import type { LocalDatabase, OutboxItem } from "@edgechat/db";
-import { isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, type ClientEvent, type RoomEvent, type RoomId } from "@edgechat/protocol";
+import { isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomProfilePayload, type ClientEvent, type RoomEvent, type RoomId } from "@edgechat/protocol";
 
 type OutboxApi = { sendEvent(roomId: RoomId, event: ClientEvent): Promise<{ event: RoomEvent }> };
 
@@ -102,6 +102,8 @@ export class OutboxEngine extends EventTarget {
         await this.db.applyDeliveryReceipt(result.event, item.payload, true);
       } else if (result.event.type === "control.message-expiry" && isMessageExpiryPolicyPayload(item.payload)) {
         await this.db.applyMessageExpiryPolicy(result.event, item.payload);
+      } else if (result.event.type === "control.room.profile" && isRoomProfilePayload(item.payload)) {
+        await this.db.applyRoomProfile(result.event, item.payload);
       } else {
         await this.db.saveDecryptedEvent(result.event, item.plaintext, item.payload);
       }

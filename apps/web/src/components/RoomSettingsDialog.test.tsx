@@ -12,6 +12,7 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     preference: { room_id: "!room:example.com", pinned_at: null, archived_at: null, muted_until: null, local_retention_days: null, updated_at: 1 },
     messageExpirySeconds: null,
     messageExpirySupported: true,
+    roomProfileSupported: true,
     identityMemberCount: 1,
     currentUserId: "@alice:example.com",
     canManageMembers: true,
@@ -21,6 +22,7 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     onAddMember: vi.fn(async () => undefined),
     onRemoveMember: vi.fn(async () => undefined),
     onToggleMember: vi.fn(async () => undefined),
+    onSaveRoomName: vi.fn(async () => undefined),
     onSaveRetention: vi.fn(async () => 0),
     onSaveMessageExpiry: vi.fn(async () => undefined),
     onVerifyIdentity: vi.fn(), onClose: vi.fn(),
@@ -45,5 +47,13 @@ describe("RoomSettingsDialog group membership", () => {
     mount({ canManageMembers: false });
     expect(document.querySelector("#member-search")).toBeNull();
     expect([...document.querySelectorAll("button")].some((button) => button.textContent === "移出")).toBe(false);
+  });
+
+  it("queues an encrypted room name update for the owner", async () => {
+    const props = mount();
+    const input = document.querySelector("#room-profile-name") as HTMLInputElement;
+    input.value = "  Hiking club  "; input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    (input.closest("form") as HTMLFormElement).dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(props.onSaveRoomName).toHaveBeenCalledWith("Hiking club"));
   });
 });

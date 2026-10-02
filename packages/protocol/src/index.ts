@@ -5,7 +5,7 @@ export const MAX_ATTACHMENT_PLAINTEXT_BYTES = 25 * 1024 * 1024;
 export const MAX_MESSAGE_ATTACHMENTS = 10;
 export const MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES = 100 * 1024 * 1024;
 
-export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1"] as const;
+export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1"] as const;
 export type ServerProtocolFeature = typeof serverProtocolFeatures[number];
 export type ServerProtocolCapabilities = {
   version: number;
@@ -142,10 +142,17 @@ export type MessageExpiryPolicyPayload = {
   updated_at: number;
 };
 
+export type RoomProfilePayload = {
+  version: 1;
+  kind: "room.profile";
+  name: string;
+  updated_at: number;
+};
+
 export const roomEventTypes = [
   "message.text", "message.file", "message.image", "message.contact", "message.delete", "message.edit", "message.reaction",
   "control.member.add", "control.member.remove", "control.device.add",
-  "control.device.revoke", "control.key.update", "control.group.commit", "control.message-expiry",
+  "control.device.revoke", "control.key.update", "control.group.commit", "control.message-expiry", "control.room.profile",
   "receipt.read", "receipt.delivered", "typing.start", "typing.stop",
 ] as const;
 export type RoomEventType = typeof roomEventTypes[number];
@@ -339,6 +346,14 @@ export function isMessageExpiryPolicyPayload(value: unknown): value is MessageEx
   const payload = value as Partial<MessageExpiryPolicyPayload>;
   return payload.version === 1 && payload.kind === "room.message-expiry" && Number.isSafeInteger(payload.updated_at) && Number(payload.updated_at) >= 0
     && (payload.expires_in_seconds === null || MESSAGE_EXPIRY_OPTIONS_SECONDS.includes(payload.expires_in_seconds as MessageExpirySeconds));
+}
+export function isRoomProfilePayload(value: unknown): value is RoomProfilePayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<RoomProfilePayload>;
+  return payload.version === 1 && payload.kind === "room.profile" && typeof payload.name === "string"
+    && payload.name === payload.name.trim() && payload.name.length >= 1 && payload.name.length <= 100
+    && !/[\u0000-\u001f\u007f]/u.test(payload.name)
+    && Number.isSafeInteger(payload.updated_at) && Number(payload.updated_at) >= 0;
 }
 export function canonicalEventBytes(event: Omit<ClientEvent, "signature">): Uint8Array<ArrayBuffer> {
   const ordered = { event_id: event.event_id, room_id: event.room_id, sender: event.sender, device_id: event.device_id, type: event.type, created_at: event.created_at, ciphertext: event.ciphertext, metadata: event.metadata };

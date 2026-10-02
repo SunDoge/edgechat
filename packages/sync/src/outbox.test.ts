@@ -22,6 +22,7 @@ function database(initial: OutboxItem[]) {
       applyReadReceipt: vi.fn(async () => { calls.push("read"); }),
       applyDeliveryReceipt: vi.fn(async () => { calls.push("delivered"); }),
       applyMessageExpiryPolicy: vi.fn(async () => { calls.push("expiry-policy"); }),
+      applyRoomProfile: vi.fn(async () => { calls.push("room-profile"); }),
       removeOutbox: vi.fn(async () => { calls.push("removed"); }),
       deferOutbox: vi.fn(async () => { calls.push("deferred"); }),
       enqueueOutbox: vi.fn(), retryOutbox: vi.fn(),
@@ -112,6 +113,17 @@ describe("OutboxEngine", () => {
     expect(db.value.applyMessageExpiryPolicy).toHaveBeenCalledWith(expect.objectContaining({ event_id: "expiry-1", seq: 10 }), policyPayload);
     expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
     expect(db.calls).toEqual(["sending", "expiry-policy", "removed"]);
+  });
+
+  it("projects an accepted encrypted room profile without creating a timeline row", async () => {
+    const profileEvent = { ...event, event_id: "profile-1", type: "control.room.profile" as const };
+    const profilePayload = { version: 1 as const, kind: "room.profile" as const, name: "Weekend plans", updated_at: 4 };
+    const db = database([{ ...item, event_id: profileEvent.event_id, event: profileEvent, payload: profilePayload }]);
+    const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...profileEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);
+    await engine.start(); engine.stop();
+    expect(db.value.applyRoomProfile).toHaveBeenCalledWith(expect.objectContaining({ event_id: "profile-1", seq: 10 }), profilePayload);
+    expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
+    expect(db.calls).toEqual(["sending", "room-profile", "removed"]);
   });
 
   it("drains an item enqueued while an empty scan is finishing", async () => {

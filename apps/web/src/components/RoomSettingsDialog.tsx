@@ -9,6 +9,7 @@ export function RoomSettingsDialog(props: {
   preference: LocalRoomPreference;
   messageExpirySeconds: MessageExpirySeconds | null;
   messageExpirySupported: boolean;
+  roomProfileSupported: boolean;
   identityMemberCount: number;
   currentUserId: string;
   canManageMembers: boolean;
@@ -18,6 +19,7 @@ export function RoomSettingsDialog(props: {
   onAddMember: (userId: string) => Promise<void>;
   onRemoveMember: (userId: string) => Promise<void>;
   onToggleMember: (userId: string, hidden: boolean) => Promise<void>;
+  onSaveRoomName: (name: string) => Promise<void>;
   onSaveRetention: (days: LocalRetentionDays | null) => Promise<number>;
   onSaveMessageExpiry: (seconds: MessageExpirySeconds | null) => Promise<void>;
   onVerifyIdentity: () => void;
@@ -27,6 +29,8 @@ export function RoomSettingsDialog(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [memberBusy, setMemberBusy] = createSignal<string | null>(null);
+  const [roomName, setRoomName] = createSignal(props.roomTitle);
+  const [roomNameBusy, setRoomNameBusy] = createSignal(false);
   const [expiryValue, setExpiryValue] = createSignal(props.messageExpirySeconds === null ? "off" : String(props.messageExpirySeconds));
   const [expiryBusy, setExpiryBusy] = createSignal(false);
   const [memberQuery, setMemberQuery] = createSignal("");
@@ -37,7 +41,7 @@ export function RoomSettingsDialog(props: {
   const changed = () => selectedDays() !== props.preference.local_retention_days;
   const selectedExpiry = (): MessageExpirySeconds | null => expiryValue() === "off" ? null : Number(expiryValue()) as MessageExpirySeconds;
   const expiryChanged = () => selectedExpiry() !== props.messageExpirySeconds;
-  const anyBusy = () => busy() || expiryBusy() || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId);
+  const anyBusy = () => busy() || expiryBusy() || roomNameBusy() || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId);
 
   createEffect(() => {
     const query = memberQuery().trim(); const version = ++memberSearchVersion;
@@ -92,6 +96,16 @@ export function RoomSettingsDialog(props: {
     catch (cause) { setError(cause instanceof Error ? cause.message : "无法移除群成员"); }
   }
 
+  async function submitRoomName(event: SubmitEvent) {
+    event.preventDefault();
+    const name = roomName().trim();
+    if (!name || name === props.roomTitle || anyBusy() || !props.roomProfileSupported) return;
+    setRoomNameBusy(true); setError("");
+    try { await props.onSaveRoomName(name); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "无法更新群聊名称"); }
+    finally { setRoomNameBusy(false); }
+  }
+
   return <Dialog id="room-settings" title={props.roomTitle} description="对话、成员与本机历史设置" onClose={() => { if (!anyBusy()) props.onClose(); }}>
     <div class="flex flex-col divide-y divide-black/5">
     <form class="order-2 grid gap-4 p-5" onSubmit={submit}>
@@ -128,6 +142,12 @@ export function RoomSettingsDialog(props: {
     <Show when={error()}><p role="alert" class="order-4 px-5 pb-5 text-sm text-red-600">{error()}</p></Show>
     <Show when={props.canManageMembers}><section class="order-1 p-5" aria-labelledby="group-members-title">
       <div class="flex items-start justify-between gap-3"><div class="min-w-0"><h3 id="group-members-title" class="text-sm font-semibold text-ink">群成员</h3><p class="mt-1 text-xs/5 text-muted">添加或移除成员会安全更新这段群聊的加密密钥。</p></div><span class="shrink-0 text-xs tabular-nums text-muted">{props.members.length + 1} 人</span></div>
+      <form class="mt-4 grid grid-cols-[minmax(0,1fr)_auto] gap-2" onSubmit={submitRoomName}>
+        <label class="min-w-0" for="room-profile-name"><span class="sr-only">群聊名称</span><input id="room-profile-name" name="room_profile_name" value={roomName()} maxlength={100} disabled={anyBusy() || !props.roomProfileSupported} class="h-10 w-full rounded-lg bg-white px-3 text-base text-ink ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand disabled:bg-neutral-50 disabled:text-neutral-400 sm:text-sm" onInput={(event) => setRoomName(event.currentTarget.value)}/></label>
+        <button type="submit" disabled={anyBusy() || !props.roomProfileSupported || !roomName().trim() || roomName().trim() === props.roomTitle} class="h-10 shrink-0 rounded-lg bg-brand-soft px-3 text-sm font-semibold text-brand hover:bg-brand/10 disabled:bg-neutral-100 disabled:text-neutral-400">{roomNameBusy() ? "正在保存…" : "保存名称"}</button>
+      </form>
+      <p class="mt-2 text-xs/5 text-muted">名称通过端到端加密同步；服务器仍可看到建群时设置的初始名称。</p>
+      <Show when={!props.roomProfileSupported}><p class="mt-2 text-xs/5 text-muted">当前服务器版本不支持加密群聊资料。</p></Show>
       <label class="relative mt-3 block" for="member-search"><span class="sr-only">搜索要添加的用户</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 shrink-0 stroke-muted"/><input id="member-search" name="member_search" value={memberQuery()} disabled={anyBusy()} autofocus class="h-10 w-full rounded-lg bg-white pl-9 pr-3 text-base text-ink ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand disabled:bg-neutral-50 disabled:text-neutral-400 sm:text-sm" placeholder="搜索要添加的用户" onInput={(event) => setMemberQuery(event.currentTarget.value)}/></label>
       <Show when={memberQuery().trim().length >= 2}><div class="mt-2 divide-y divide-black/5 rounded-xl ring-1 ring-black/8" aria-live="polite">
         <For each={memberResults()}>{(person) => <div class="flex min-h-14 items-center gap-3 px-3"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{person.display_name}</strong><small class="block truncate text-xs text-muted">{person.user_id}</small></span><button type="button" disabled={anyBusy()} class="h-10 shrink-0 rounded-lg px-3 text-sm font-semibold text-brand hover:bg-brand-soft disabled:opacity-50" onClick={() => void addMember(person.user_id)}>{props.membershipBusyUserId === person.user_id ? "正在添加…" : "添加"}</button></div>}</For>

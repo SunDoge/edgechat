@@ -40,7 +40,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
   expect(tooNew.status).toBe(426);
@@ -596,6 +596,23 @@ describe("single-server durable delivery", () => {
     const conflict = await SELF.fetch(endpoint, { method: "POST", headers, body: JSON.stringify({ ...payload, event: conflicting }) });
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ code: "event_id_conflict" });
+
+    const profileUnsigned: Omit<ClientEvent, "signature"> = {
+      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      type: "control.room.profile", created_at: Date.now(), ciphertext: "opaque-encrypted-room-profile", metadata: { mls_epoch: 2 },
+    };
+    const profileEvent = { ...profileUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(profileUnsigned))) };
+    const profileResponse = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(profileEvent) });
+    expect(profileResponse.status, await profileResponse.clone().text()).toBe(201);
+    expect(await profileResponse.json()).toMatchObject({ event: { event_id: profileEvent.event_id, type: "control.room.profile", seq: 2 } });
+
+    const memberProfileUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), sender: carol.user_id, device_id: carol.device_id, created_at: Date.now() };
+    const memberProfile = { ...memberProfileUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, carolDevice.signing.privateKey, canonicalEventBytes(memberProfileUnsigned))) };
+    const forbiddenProfile = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, {
+      method: "POST", headers: { authorization: `Bearer ${carol.access_token}`, "content-type": "application/json" }, body: JSON.stringify(memberProfile),
+    });
+    expect(forbiddenProfile.status).toBe(403);
+    expect(await forbiddenProfile.json()).toMatchObject({ code: "room_profile_forbidden" });
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
   });
 

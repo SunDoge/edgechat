@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
+import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -44,6 +44,7 @@ describe("federation-ready identifiers", () => {
     expect(serverSupports(currentServerProtocol, "attachments.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "archive.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "messages.contact.v1")).toBe(true);
+    expect(serverSupports(currentServerProtocol, "rooms.profile.v1")).toBe(true);
   });
 
   it("rejects malformed or incompatible server capability envelopes", () => {
@@ -66,4 +67,11 @@ it("validates the bounded encrypted message-expiry policy", () => {
   expect(isMessageExpiryPolicyPayload({ version: 1, kind: "room.message-expiry", expires_in_seconds: 60, updated_at: 12 })).toBe(false);
   expect(isMessageExpiryPolicyPayload({ version: 1, kind: "room.message-expiry", expires_in_seconds: 3_600, updated_at: -1 })).toBe(false);
   expect(serverSupports(currentServerProtocol, "messages.expiry.v1")).toBe(true);
+});
+
+it("validates bounded encrypted room profiles", () => {
+  expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "Weekend plans", updated_at: 10 })).toBe(true);
+  expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: " padded ", updated_at: 10 })).toBe(false);
+  expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "x".repeat(101), updated_at: 10 })).toBe(false);
+  expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "bad\nname", updated_at: 10 })).toBe(false);
 });

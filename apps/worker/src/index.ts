@@ -2900,7 +2900,10 @@ async function sendEvent(request: Request, env: Env, ctx: ExecutionContext, auth
   }
   const db = createDatabase(env.DB);
   const [roomEpoch, duplicateRow] = await Promise.all([
-    db.selectFrom("rooms").select(["mls_epoch", "kind"]).where("room_id", "=", roomId).executeTakeFirst(),
+    db.selectFrom("rooms as room").innerJoin("room_members as member", (join) => join
+      .onRef("member.room_id", "=", "room.room_id").on("member.user_id", "=", auth.userId))
+      .select(["room.mls_epoch", "room.kind", "room.purpose", "member.role", "member.removed_at"])
+      .where("room.room_id", "=", roomId).executeTakeFirst(),
     db.selectFrom("room_events").select("event_json").where("event_id", "=", event.event_id).where("room_id", "=", roomId).executeTakeFirst(),
   ]);
   const duplicate = duplicateRow ? JSON.parse(duplicateRow.event_json) as RoomEvent : null;
@@ -2911,6 +2914,10 @@ async function sendEvent(request: Request, env: Env, ctx: ExecutionContext, auth
     throw new HttpError(409, "Encrypted event was created for a stale MLS epoch", "stale_epoch");
   }
   if (!roomEpoch) throw new HttpError(404, "Room not found", "not_found");
+  if (!duplicate && event.type === "control.room.profile"
+    && (roomEpoch.kind !== "group" || roomEpoch.purpose !== "chat" || roomEpoch.role !== "owner" || roomEpoch.removed_at !== null)) {
+    throw new HttpError(403, "Only the group owner may update the room profile", "room_profile_forbidden");
+  }
   if (!duplicate && roomEpoch.kind === "direct") {
     const requestState = await directRequestState(env, roomId);
     if (requestState?.status === "rejected") throw new HttpError(403, "Message request was rejected", "message_request_rejected");
