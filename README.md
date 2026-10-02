@@ -353,7 +353,7 @@ pnpm test
 pnpm run build
 ```
 
-`pnpm run db:types` rebuilds `apps/worker/src/database.generated.ts` from all D1 migrations through `kysely-codegen`; the full check verifies that the committed type file is current. It also verifies the immutable migration SHA-256 manifest, contiguous numbering, and explicit rollout policy for newly recorded expand/data/contract migrations. `pnpm run build` compiles the Rust crate for `wasm32`, builds the PWA, and performs a Wrangler deployment dry run.
+`pnpm run db:types` rebuilds `apps/worker/src/database.generated.ts` from all D1 migrations through `kysely-codegen`; the full check verifies that the committed type file is current. It also verifies the immutable D1 migration SHA-256 manifest, contiguous numbering, and explicit rollout policy for newly recorded expand/data/contract migrations. Local PGlite databases have their own contiguous, SHA-256-pinned migration history: each pending migration runs in one transaction, a client refuses a database written by a newer schema version, and restored databases pass through the same migration gate before their staging slot becomes active. Published local migration SQL is immutable; add a new entry in `packages/db/src/migrations.ts` instead of editing `LOCAL_SCHEMA` or an earlier entry. These local checks use OPFS/IndexedDB only and create no D1 or R2/S3 traffic. `pnpm run build` compiles the Rust crate for `wasm32`, builds the PWA, and performs a Wrangler deployment dry run.
 
 ## Cloudflare deployment
 

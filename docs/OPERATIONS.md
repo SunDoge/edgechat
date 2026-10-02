@@ -90,6 +90,18 @@ The recorder refuses missing numbers, edits to recorded SQL, unreviewed data
 rewrites, destructive statements mislabeled as expansion, and disabling foreign
 keys. Updating `manifest.json` by hand defeats the release gate and is forbidden.
 
+PGlite has a separate client-local migration ledger in
+`packages/db/src/migrations.ts`. `packages/db/src/schema.ts` is the immutable
+version-1 payload: after release, do not edit it or any recorded migration.
+Append one contiguous migration, compute and commit its SHA-256 digest, and add
+tests for both upgrade and interrupted/failing execution. Every local database
+open verifies the complete applied history and runs each pending migration in a
+transaction. Backup restore applies this same gate to the staging database
+before activation. An older client intentionally refuses a database written by
+a newer client; do not advise users to clear local storage as a rollback. Deploy
+an accepting client or restore an explicitly user-created encrypted backup.
+These migrations are entirely browser-local and make no D1 or R2/S3 request.
+
 Cloudflare D1 Time Travel is automatic. On the production storage backend it can
 restore by timestamp or bookmark; the documented history window is up to 30 days
 on Workers Paid and seven days on Workers Free. A restore overwrites the database

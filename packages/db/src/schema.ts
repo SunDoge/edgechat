@@ -1,3 +1,6 @@
+// Immutable version-1 PGlite migration payload. Once released, do not edit this
+// string: append the next migration in migrations.ts instead. Its SHA-256 digest
+// is verified before every local database open and restore.
 export const LOCAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   user_id TEXT PRIMARY KEY,

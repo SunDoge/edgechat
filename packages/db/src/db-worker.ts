@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import { PGlite } from "@electric-sql/pglite";
-import { LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
+import { LOCAL_PREPARE_LINKED_DEVICE_HISTORY } from "./schema";
+import { migrateLocalSchema } from "./migrations";
 import { purgeRoomBefore, setRoomRetention, type LocalRetentionDays } from "./retention";
 import { purgeExpiredMessages } from "./expiry";
 
@@ -63,7 +64,7 @@ function databaseFor(profileId: string): Promise<PGlite> {
       storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
       const db = new PGlite(configured);
       await db.waitReady;
-      await db.exec(LOCAL_SCHEMA);
+      await migrateLocalSchema(db);
       return db;
     }
     let db: PGlite;
@@ -76,7 +77,7 @@ function databaseFor(profileId: string): Promise<PGlite> {
       db = new PGlite(`idb://${slot}`);
       await db.waitReady;
     }
-    await db.exec(LOCAL_SCHEMA);
+    await migrateLocalSchema(db);
     return db;
   })();
   return database;
@@ -113,7 +114,7 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
       const restored = new PGlite(dataDir, { loadDataDir: request.snapshot });
       try {
         await restored.waitReady;
-        await restored.exec(LOCAL_SCHEMA);
+        await migrateLocalSchema(restored);
         const result = await restored.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1");
         if (result.rows.length !== 1 || result.rows[0].user_id !== request.expectedUserId) throw new Error("备份中的本机消息库不属于这个账户");
         if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
