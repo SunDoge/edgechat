@@ -38,6 +38,7 @@ export function RoomSettingsDialog(props: {
   onSaveMessageExpiry: (seconds: MessageExpirySeconds | null) => Promise<void>;
   onRequestLeave: () => Promise<void>;
   onCancelLeave: () => Promise<void>;
+  onOpenMedia: () => void;
   onVerifyIdentity: () => void;
   onClose: () => void;
 }) {
@@ -163,6 +164,9 @@ export function RoomSettingsDialog(props: {
 
   return <Dialog id="room-settings" title={props.roomTitle} description="对话、成员与本机历史设置" onClose={() => { if (!anyBusy()) props.onClose(); }}>
     <div class="flex flex-col divide-y divide-black/5">
+    <section class="order-1 p-5" aria-labelledby="room-media-title">
+      <div class="flex items-start gap-3"><IconPhoto class="mt-0.5 size-4 shrink-0 stroke-brand"/><div class="min-w-0 flex-1"><h3 id="room-media-title" class="text-sm font-semibold text-ink">对话媒体</h3><p class="mt-1 text-xs/5 text-muted">浏览这台设备已索引的图片、语音和文件，不会自动下载云端附件。</p><button type="button" disabled={anyBusy()} class="mt-3 min-h-10 rounded-lg bg-brand-soft px-3 text-sm font-semibold text-brand hover:bg-brand/10 disabled:opacity-50" onClick={props.onOpenMedia}>查看媒体</button></div></div>
+    </section>
     <form class="order-2 grid gap-4 p-5" onSubmit={submit}>
       <div>
         <label for="local-retention" class="block text-sm font-medium text-ink">在这台设备上保留消息</label>

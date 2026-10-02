@@ -36,6 +36,7 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     onSaveMessageExpiry: vi.fn(async () => undefined),
     onRequestLeave: vi.fn(async () => undefined),
     onCancelLeave: vi.fn(async () => undefined),
+    onOpenMedia: vi.fn(),
     onVerifyIdentity: vi.fn(), onClose: vi.fn(),
     ...overrides,
   };
@@ -44,6 +45,12 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
 }
 
 describe("RoomSettingsDialog group membership", () => {
+  it("opens the device-local conversation media library", () => {
+    const props = mount();
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "查看媒体")?.click();
+    expect(props.onOpenMedia).toHaveBeenCalledOnce();
+  });
+
   it("lets an owner search only non-members and add one", async () => {
     const props = mount();
     const input = document.querySelector("#member-search") as HTMLInputElement;

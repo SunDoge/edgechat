@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
-import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, MARK_EVENT_PROCESSED_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
+import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, MARK_EVENT_PROCESSED_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
 import { LOCAL_CLEAR_ACCOUNT_DATA, LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
 import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4 } from "./migrations";
 import { purgeRoomBefore, setRoomRetention } from "./retention";
@@ -396,6 +396,28 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO image_embeddings VALUES ('a','clip','v1','p1',3,$1,1)", [vector]);
     const result = await db.query<{ message_id: string; dimensions: number }>("SELECT m.message_id, e.dimensions FROM messages m JOIN attachments a USING (message_id) JOIN image_embeddings e USING (attachment_id)");
     expect(result.rows[0]).toEqual({ message_id: "$message:example.com", dimensions: 3 });
+    await db.close();
+  });
+
+  it("pages room media locally while excluding withdrawn and hidden-member attachments", async () => {
+    const db = new PGlite(); await db.exec(LOCAL_SCHEMA);
+    const room = "!0123456789abcdef:example.com";
+    for (const [seq, sender, deleted] of [[1, "@alice:example.com", false], [2, "@hidden:example.com", false], [3, "@alice:example.com", true], [4, "@alice:example.com", false], [5, "@alice:example.com", false]] as const) {
+      await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,payload,deleted_at)
+        VALUES ($1,$2,$3,$4,$5,'phone','message.image',$4,'cipher','{}',$6)`, [`event-${seq}`, `$message${seq}:example.com`, room, seq, sender, deleted ? seq : null]);
+      const partCount = seq === 4 ? 2 : 1;
+      for (let position = 0; position < partCount; position += 1) {
+        const attachmentId = `attachment-${seq}-${position}`; const partId = `part-${seq}-${position}`;
+        await db.query("INSERT INTO attachments (attachment_id,room_id,event_id,message_id,part_id,local_status,metadata) VALUES ($1,$2,$3,$4,$5,'remote',$6::jsonb)", [attachmentId, room, `event-${seq}`, `$message${seq}:example.com`, partId, JSON.stringify({ id: attachmentId, name: `${seq}.png`, type: "image/png", size: 10, key: "key", nonce: "nonce" })]);
+        await db.query("INSERT INTO message_parts (part_id,message_id,position,kind,attachment_id) VALUES ($1,$2,$3,'image',$4)", [partId, `$message${seq}:example.com`, position, attachmentId]);
+      }
+    }
+    await db.query("INSERT INTO room_hidden_senders VALUES ($1,'@hidden:example.com',1)", [room]);
+
+    const first = await db.query<{ attachment_id: string; seq: number; position: number }>(ROOM_ATTACHMENTS_FIRST_PAGE_SQL, [room, 3]);
+    expect(first.rows.map(({ attachment_id }) => attachment_id)).toEqual(["attachment-5-0", "attachment-4-1", "attachment-4-0"]);
+    const second = await db.query<{ attachment_id: string }>(ROOM_ATTACHMENTS_BEFORE_SQL, [room, 4, 0, 3]);
+    expect(second.rows.map(({ attachment_id }) => attachment_id)).toEqual(["attachment-1-0"]);
     await db.close();
   });
 

@@ -16,6 +16,14 @@ export type LocalMessage = {
 };
 
 export type LocalMessageWindow = { messages: LocalMessage[]; hasOlder: boolean; hasNewer: boolean };
+export type LocalRoomAttachmentCursor = { seq: number; position: number };
+export type LocalRoomAttachment = {
+  attachment_id: string; message_id: string; room_id: RoomId; seq: number; sender: string;
+  created_at: number; position: number; kind: "image" | "voice" | "file";
+  metadata: Record<string, unknown>;
+};
+type LocalRoomAttachmentRow = Omit<LocalRoomAttachment, "kind" | "metadata"> & { kind: string; metadata: Record<string, unknown> | string };
+export type LocalRoomAttachmentPage = { items: LocalRoomAttachment[]; next_cursor: LocalRoomAttachmentCursor | null };
 export type LocalSignedEventRange = { events: RoomEvent[]; complete: boolean; missing_seq: number | null };
 export type LocalRoomSyncState = { room_id: RoomId; baseline_seq: number; processed_through_seq: number };
 type LocalEventEnvelopeRow = { event_id: string; room_id: string; seq: number | string; event_json: RoomEvent | string };
@@ -50,6 +58,21 @@ export const SET_HIDDEN_ROOM_MEMBERS_SQL = `WITH desired(user_id) AS (SELECT jso
   inserted AS (INSERT INTO room_hidden_senders (room_id,user_id,created_at)
     SELECT $1,user_id,$3 FROM desired ON CONFLICT DO NOTHING RETURNING user_id)
   SELECT count(*) FROM desired`;
+
+export const ROOM_ATTACHMENTS_FIRST_PAGE_SQL = `SELECT a.attachment_id, m.message_id, m.room_id, m.seq, m.sender, m.created_at, p.position, p.kind, a.metadata
+  FROM attachments a JOIN messages m ON m.message_id = a.message_id AND m.room_id = a.room_id
+  JOIN message_parts p ON p.message_id = m.message_id AND p.attachment_id = a.attachment_id
+  WHERE m.room_id = $1 AND m.deleted_at IS NULL AND p.kind IN ('image','voice','file')
+    AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
+  ORDER BY m.seq DESC, p.position DESC LIMIT $2`;
+
+export const ROOM_ATTACHMENTS_BEFORE_SQL = `SELECT a.attachment_id, m.message_id, m.room_id, m.seq, m.sender, m.created_at, p.position, p.kind, a.metadata
+  FROM attachments a JOIN messages m ON m.message_id = a.message_id AND m.room_id = a.room_id
+  JOIN message_parts p ON p.message_id = m.message_id AND p.attachment_id = a.attachment_id
+  WHERE m.room_id = $1 AND m.deleted_at IS NULL AND p.kind IN ('image','voice','file')
+    AND (m.seq < $2 OR (m.seq = $2 AND p.position < $3))
+    AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
+  ORDER BY m.seq DESC, p.position DESC LIMIT $4`;
 
 export const APPLY_ROOM_PROFILE_SQL = `INSERT INTO room_profiles (room_id,event_id,event_seq,name,avatar,updated_by,updated_at)
   VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
@@ -506,6 +529,26 @@ export class LocalDatabase {
       "SELECT event_id, message_id, room_id, seq, sender, device_id, event_type, created_at, ciphertext, plaintext, payload, deleted_at, deleted_by, delete_event_id, edited_at, edit_event_id, expires_at FROM messages m WHERE room_id = $1 AND seq < $2 AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender) ORDER BY seq DESC LIMIT $3",
       [roomId, beforeSeq, safeLimit],
     );
+  }
+
+  async roomAttachments(roomId: RoomId, cursor: LocalRoomAttachmentCursor | null = null, limit = 48): Promise<LocalRoomAttachmentPage> {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    const rows = await this.query<LocalRoomAttachmentRow>(
+      cursor ? ROOM_ATTACHMENTS_BEFORE_SQL : ROOM_ATTACHMENTS_FIRST_PAGE_SQL,
+      cursor ? [roomId, cursor.seq, cursor.position, safeLimit + 1] : [roomId, safeLimit + 1],
+    );
+    const items = rows.slice(0, safeLimit).flatMap((row): LocalRoomAttachment[] => {
+      if (row.kind !== "image" && row.kind !== "voice" && row.kind !== "file") return [];
+      let metadata: unknown;
+      try { metadata = jsonValue(row.metadata); } catch { return []; }
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+      return [{ ...row, kind: row.kind, metadata: metadata as Record<string, unknown> }];
+    });
+    const lastRow = rows[Math.min(rows.length, safeLimit) - 1];
+    return {
+      items,
+      next_cursor: rows.length > safeLimit && lastRow ? { seq: Number(lastRow.seq), position: Number(lastRow.position) } : null,
+    };
   }
 
   async messageWindow(roomId: RoomId, targetSeq: number, before = 80, after = 120): Promise<LocalMessageWindow> {
