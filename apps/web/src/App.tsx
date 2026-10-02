@@ -69,6 +69,7 @@ import { clearPushConfig, disablePush, reconcilePush, setActivePushProfile, susp
 import { activateLocalProfile, bindLocalProfile, clearLocalProfileToken, createLocalProfile, profileSessionKey, removeLocalProfile, updateLocalProfileName, type LocalProfile } from "./local-profiles";
 import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE, type StartupFailure } from "./startup-recovery";
 import { StartupRecoveryScreen } from "./components/StartupRecoveryScreen";
+import { inspectLocalStorageHealth, requestPersistentLocalStorage, type LocalStorageHealth, type PersistenceRequestResult } from "./local-storage-health";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -147,6 +148,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [devices, setDevices] = createSignal<DeviceRow[]>([]);
   const [deviceRevocations, setDeviceRevocations] = createSignal<Record<string, DeviceRevocationProgress>>({});
   const [storage, setStorage] = createSignal<StorageUsage | null>(null);
+  const [localStorageHealth, setLocalStorageHealth] = createSignal<LocalStorageHealth | null>(null);
   const [invitationPolicy, setInvitationPolicy] = createSignal<InvitationPolicy | null>(null);
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [roomSettingsOpen, setRoomSettingsOpen] = createSignal(false);
@@ -1890,12 +1892,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法读取最新消息"); }
   }
   async function openDevices() {
-    setDevicesOpen(true); setStorage(null); setInvitationPolicy(null); setProfile(null);
+    setDevicesOpen(true); setStorage(null); setLocalStorageHealth(null); setInvitationPolicy(null); setProfile(null);
+    void inspectLocalStorageHealth().then(setLocalStorageHealth);
     try {
       const [deviceResult, storageResult, privacyResult, profileResult] = await Promise.all([api.devices(), api.storageUsage(), api.privacy(), api.profile()]);
       setDevices(deviceResult.devices); setStorage(storageResult); setInvitationPolicy(privacyResult.invitation_policy); setProfile(profileResult.profile);
       const current = session(); if (current) setPushStatus(await reconcilePush(api, current.vapid_public_key));
     } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法读取账户状态"); }
+  }
+  async function protectLocalStorage(): Promise<PersistenceRequestResult> {
+    const result = await requestPersistentLocalStorage();
+    setLocalStorageHealth(result.health);
+    return result;
   }
   async function updateProfile(displayName: string, bio: string, avatar: ProfileAvatarChange): Promise<void> {
     let result = await api.updateProfile(displayName, bio);
@@ -2589,7 +2597,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticStatus={semanticStatus()} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
       <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id) })) : []} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>
-      <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
+      <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
       <Show when={profileOpen() && profile()}>{(currentProfile) => <ProfileDialog profile={currentProfile()} onSave={updateProfile} onClose={() => setProfileOpen(false)}/>}</Show>
       <Show when={deviceLinkOpen()}><DeviceLinkApprovalDialog api={api} onApprove={(linkId) => executeDeviceLink(linkId)} onClose={() => setDeviceLinkOpen(false)}/></Show>
       <Show when={backupOpen()}><BackupDialog onCreate={exportPortableBackup} onClose={() => setBackupOpen(false)}/></Show>

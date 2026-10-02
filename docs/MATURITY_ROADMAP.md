@@ -26,6 +26,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] Durable message outbox with unchanged-ciphertext retry, event-ID idempotency, reload recovery, exponential backoff and visible send states.
 - [x] Client-only backup/restore with versioned, chunk-authenticated encrypted PGlite, device-key, and OpenMLS snapshots; no R2/S3 duplication.
 - [x] Typed Dexie wrappers for device keys and temporary browser staging, preserving existing IndexedDB schemas while leaving PGlite storage exclusively under PGlite control.
+- [x] User-initiated browser persistent-storage protection with approximate origin quota pressure, explicit best-effort/unsupported states, and clear separation from cloud R2 quota and encrypted backup; zero network or object-storage traffic.
 
 ### Gate 2 — secure multi-device operation
 
