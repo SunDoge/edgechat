@@ -83,9 +83,47 @@ function databaseFor(profileId: string): Promise<PGlite> {
   return database;
 }
 
+async function stageRestoredDatabase(request: Extract<DbRequest, { kind: "restore" | "restore-device-history" }>): Promise<"opfs" | "indexeddb"> {
+  if (!PROFILE_ID.test(request.profileId)) throw new Error("Invalid local profile identifier");
+  if (request.snapshot.size === 0 || request.snapshot.size > 2_147_483_648) throw new Error("Backup database is empty or too large");
+  const profileId = request.profileId.toLowerCase();
+  const configured = await activeDataDir(profileId);
+  const backends: readonly ("opfs" | "indexeddb")[] = configured
+    ? [configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb"]
+    : ["opfs", "indexeddb"];
+  let lastError: unknown;
+  for (const backend of backends) {
+    const slot = `edgechat-local-${profileId}-restore-${crypto.randomUUID()}`;
+    const dataDir = backend === "opfs" ? `opfs-ahp://${slot}` : `idb://${slot}`;
+    const restored = new PGlite(dataDir, { loadDataDir: request.snapshot });
+    try {
+      await restored.waitReady;
+      await migrateLocalSchema(restored);
+      const result = await restored.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1");
+      if (result.rows.length !== 1 || result.rows[0].user_id !== request.expectedUserId) throw new Error("备份中的本机消息库不属于这个账户");
+      if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
+      await restored.close();
+      await setActiveDataDir(profileId, dataDir);
+      return backend;
+    } catch (error) {
+      lastError = error;
+      await restored.close().catch(() => undefined);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Unable to stage the restored local database");
+}
+
 self.onmessage = async (event: MessageEvent<DbRequest>) => {
   const request = event.data;
   try {
+    // Recovery must not depend on opening the current slot: that slot may be the
+    // reason the user is restoring. Validate a fresh slot and switch only after
+    // it is complete, leaving the old data untouched on every failure path.
+    if (request.kind === "restore" || request.kind === "restore-device-history") {
+      storage = await stageRestoredDatabase(request);
+      self.postMessage({ id: request.id, restored: true, storage } satisfies DbResponse);
+      return;
+    }
     const db = await databaseFor(request.profileId);
     if (request.kind === "dump") {
       const blob = await db.runExclusive(() => db.dumpDataDir("gzip"));
@@ -105,26 +143,6 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
     if (request.kind === "purge-expired-messages") {
       const deleted = await purgeExpiredMessages(db, request.now);
       self.postMessage({ id: request.id, rows: [{ deleted }], storage } satisfies DbResponse);
-      return;
-    }
-    if (request.kind === "restore" || request.kind === "restore-device-history") {
-      if (request.snapshot.size === 0 || request.snapshot.size > 2_147_483_648) throw new Error("Backup database is empty or too large");
-      const slot = `edgechat-local-${request.profileId.toLowerCase()}-restore-${crypto.randomUUID()}`;
-      const dataDir = storage === "opfs" ? `opfs-ahp://${slot}` : `idb://${slot}`;
-      const restored = new PGlite(dataDir, { loadDataDir: request.snapshot });
-      try {
-        await restored.waitReady;
-        await migrateLocalSchema(restored);
-        const result = await restored.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1");
-        if (result.rows.length !== 1 || result.rows[0].user_id !== request.expectedUserId) throw new Error("备份中的本机消息库不属于这个账户");
-        if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
-        await restored.close();
-        await setActiveDataDir(request.profileId.toLowerCase(), dataDir);
-      } catch (error) {
-        await restored.close().catch(() => undefined);
-        throw error;
-      }
-      self.postMessage({ id: request.id, restored: true, storage } satisfies DbResponse);
       return;
     }
     if (!("sql" in request)) throw new Error("Invalid database request");

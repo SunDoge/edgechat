@@ -67,6 +67,8 @@ import { historyRecoveryCopy, type HistoryRecoveryViewState } from "./history-re
 import { openComposerDraft, sealComposerDraft } from "./draft-sync";
 import { clearPushConfig, disablePush, reconcilePush, setActivePushProfile, suspendPush, type PushStatus } from "./push-subscription";
 import { activateLocalProfile, bindLocalProfile, clearLocalProfileToken, createLocalProfile, profileSessionKey, removeLocalProfile, updateLocalProfileName, type LocalProfile } from "./local-profiles";
+import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE, type StartupFailure } from "./startup-recovery";
+import { StartupRecoveryScreen } from "./components/StartupRecoveryScreen";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -82,6 +84,9 @@ type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedN
 
 export function App(props: { localProfile: LocalProfile; localProfiles: LocalProfile[]; accessToken: string | null }) {
   const profileId = props.localProfile.profile_id;
+  const restoreUserKey = profileSessionKey(profileId, "restore-user-id");
+  const restoreCheckpointKey = profileSessionKey(profileId, "restore-checkpoint");
+  const restorePhaseKey = profileSessionKey(profileId, "restore-phase");
   const api = new ApiClient("", props.accessToken);
   const db = new LocalDatabase(profileId);
   const attachmentCache = new AttachmentCiphertextCache(profileId);
@@ -94,6 +99,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [identity, setIdentity] = createSignal<DeviceIdentity | null>(null);
   const [mls, setMls] = createSignal<OpenMlsMessagingCore | null>(null);
   const [loading, setLoading] = createSignal(true);
+  const [startupFailure, setStartupFailure] = createSignal<StartupFailure | null>(sessionStorage.getItem(restorePhaseKey) === "preparing" ? INTERRUPTED_RESTORE_FAILURE : null);
   const [rooms, setRooms] = createSignal<ServerRoom[]>([]);
   const [selectedId, setSelectedId] = createSignal<RoomId | null>(null);
   const [messages, setMessages] = createSignal<LocalMessage[]>([]);
@@ -835,6 +841,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   onMount(() => {
     void (async () => {
       try {
+        if (startupFailure()) return;
+        if (sessionStorage.getItem(restoreCheckpointKey)) { api.setToken(null); return; }
         const storedIdentity = await loadIdentity(profileId);
         if (!storedIdentity || !api.getToken()) return;
         if (!storedIdentity.mlsState) { await clearLocalProfileToken(profileId); api.setToken(null); return; }
@@ -865,7 +873,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           if (cached) sessionStorage.setItem(profileSessionKey(profileId, "restore-user-id"), cached.user_id);
           await clearLocalProfileToken(profileId); api.setToken(null);
         }
-        else setNotice(cause instanceof Error ? cause.message : "启动失败");
+        else {
+          const failure = describeStartupFailure(cause);
+          setStartupFailure(failure);
+          console.warn(JSON.stringify({ message: "startup recovery required", code: failure.code }));
+        }
         if (!session()) { mlsRef?.destroy(); mlsRef = null; identityRef = null; setMls(null); setIdentity(null); }
       } finally { setLoading(false); }
     })();
@@ -2007,15 +2019,26 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       backup_checkpoint: contents.backupCheckpoint, ...publicKeys,
     });
     const previousIdentity = await loadIdentity(profileId);
-    await saveIdentity(profileId, restoredIdentity);
-    try { await db.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId); }
+    sessionStorage.setItem(restorePhaseKey, "preparing");
+    sessionStorage.setItem(restoreUserKey, contents.userId);
+    sessionStorage.setItem(restoreCheckpointKey, contents.backupCheckpoint);
+    let staged = false;
+    try {
+      await saveIdentity(profileId, restoredIdentity);
+      await db.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId);
+      staged = true;
+      await clearLocalProfileToken(profileId); api.setToken(null);
+      sessionStorage.setItem(restorePhaseKey, "ready");
+    }
     catch (cause) {
-      if (previousIdentity) await saveIdentity(profileId, previousIdentity); else await clearIdentity(profileId);
+      if (!staged) {
+        if (previousIdentity) await saveIdentity(profileId, previousIdentity); else await clearIdentity(profileId);
+        sessionStorage.removeItem(restoreUserKey);
+        sessionStorage.removeItem(restoreCheckpointKey);
+        sessionStorage.removeItem(restorePhaseKey);
+      } else setStartupFailure(INTERRUPTED_RESTORE_FAILURE);
       throw cause;
     }
-    await clearLocalProfileToken(profileId); api.setToken(null);
-    sessionStorage.setItem(profileSessionKey(profileId, "restore-user-id"), contents.userId);
-    sessionStorage.setItem(profileSessionKey(profileId, "restore-checkpoint"), contents.backupCheckpoint);
     location.reload();
   }
 
@@ -2474,6 +2497,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     localStorage.removeItem(profileSessionKey(profileId, "account-appeal-receipt"));
     sessionStorage.removeItem(profileSessionKey(profileId, "restore-user-id"));
     sessionStorage.removeItem(profileSessionKey(profileId, "restore-checkpoint"));
+    sessionStorage.removeItem(profileSessionKey(profileId, "restore-phase"));
     const next = await removeLocalProfile(profileId);
     if (next) await setActivePushProfile(next.profile_id);
     location.reload();
@@ -2575,5 +2599,5 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     </main>;
   };
 
-  return <><Show when={!loading()} fallback={<div class="grid min-h-dvh place-content-center justify-items-center gap-3 bg-white"><IconMessageCircle class="size-7 stroke-brand"/><p class="text-sm text-muted">正在打开本地消息库…</p></div>}><Show when={session() && identity() && mls()} fallback={<AuthScreen profileId={profileId} api={api} core={core} db={db} onReady={ready} onRestoreBackup={restorePortableBackup} onManageProfiles={() => setLocalProfilesOpen(true)}/>}><Workspace/></Show></Show><Show when={localProfilesOpen()}><LocalProfilesDialog profiles={localProfiles()} activeProfileId={profileId} onSelect={switchLocalProfile} onAdd={addLocalProfile} onClose={() => setLocalProfilesOpen(false)}/></Show></>;
+  return <><Show when={!loading()} fallback={<div class="grid min-h-dvh place-content-center justify-items-center gap-3 bg-white"><IconMessageCircle class="size-7 stroke-brand"/><p class="text-sm text-muted">正在打开本地消息库…</p></div>}><Show when={!startupFailure()} fallback={<StartupRecoveryScreen failure={startupFailure()!} profileName={props.localProfile.display_name} inactive={localProfilesOpen()} onRetry={() => location.reload()} onManageProfiles={() => setLocalProfilesOpen(true)} onRestoreBackup={restorePortableBackup}/>}><Show when={session() && identity() && mls()} fallback={<AuthScreen profileId={profileId} api={api} core={core} db={db} onReady={ready} onRestoreBackup={restorePortableBackup} onManageProfiles={() => setLocalProfilesOpen(true)}/>}><Workspace/></Show></Show></Show><Show when={localProfilesOpen()}><LocalProfilesDialog profiles={localProfiles()} activeProfileId={profileId} onSelect={switchLocalProfile} onAdd={addLocalProfile} onClose={() => setLocalProfilesOpen(false)}/></Show></>;
 }

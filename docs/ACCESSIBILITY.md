@@ -11,6 +11,7 @@ EdgeChat treats keyboard, assistive-technology, reduced-motion and CJK input beh
 - Conversation and message action menus expose `aria-haspopup`, `aria-expanded`, `aria-controls` and labelled menu relationships. Arrow Up/Down wraps, Home/End jumps, Escape closes and restores the trigger, while Tab retains native navigation.
 - Composer input uses a real `textarea`, protects Chinese/Japanese/Korean IME composition, and associates a screen-reader explanation whenever sending is disabled.
 - Connection and long-running recovery states use polite live status announcements; failures that require attention use alerts.
+- Startup failures use a dedicated heading and keyboard-first recovery actions instead of dropping users into account creation. Raw storage/crypto errors remain behind stable diagnostic codes, and the current surface becomes inert while the local-profile dialog is open.
 - Touch targets for primary icon actions are at least 44 CSS pixels on coarse pointers. `prefers-reduced-motion` collapses nonessential animation durations.
 
 ## Release audit matrix

@@ -79,7 +79,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 
 ### Gate 4 — platform maturity
 
-- [ ] Install/update/recovery UX across Chromium, Firefox and iOS PWA constraints. Browser-aware installation, standalone detection and controlled service-worker activation with draft-safe user confirmation are implemented; browser-specific recovery and cross-browser device validation remain.
+- [ ] Install/update/recovery UX across Chromium, Firefox and iOS PWA constraints. Browser-aware installation, standalone detection and controlled service-worker activation with draft-safe user confirmation are implemented. Startup now fails into a non-destructive recovery surface with stable diagnostics, update/retry, local-profile switching, and backup restore that stages independently of an unreadable active PGlite slot. Browser-specific recovery and cross-browser device validation remain.
 - [x] Native PWA share target for text, links and one file, with bounded device-local staging, explicit room/send confirmation and no pre-confirmation R2 traffic.
 - [x] Bounded multiple-file/album composition, multi-part zero-copy forwarding, and immediate failed-upload reclamation.
 - [x] Multiple-file OS share-target staging with bounded local persistence, an explicit destination confirmation step, legacy staged-record compatibility, and failure-safe retry.

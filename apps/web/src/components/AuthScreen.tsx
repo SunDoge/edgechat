@@ -7,11 +7,13 @@ import { loadIdentity, saveIdentity } from "../vault";
 import { authErrorMessage } from "../auth-errors";
 import { Brand, Input } from "./primitives";
 import { DeviceLinkSetup } from "./DeviceLinkSetup";
+import { BackupRestoreForm } from "./BackupRestoreForm";
 import { profileSessionKey } from "../local-profiles";
 
 export function AuthScreen(props: { profileId: string; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void>; onManageProfiles: () => void }) {
   const restoreUserKey = profileSessionKey(props.profileId, "restore-user-id");
   const restoreCheckpointKey = profileSessionKey(props.profileId, "restore-checkpoint");
+  const restorePhaseKey = profileSessionKey(props.profileId, "restore-phase");
   const appealReceiptKey = profileSessionKey(props.profileId, "account-appeal-receipt");
   const restoredUserHint = sessionStorage.getItem(restoreUserKey) ?? "";
   const restoreCheckpoint = sessionStorage.getItem(restoreCheckpointKey) ?? "";
@@ -24,12 +26,6 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [restoreOpen, setRestoreOpen] = createSignal(false);
-  const [restoreFile, setRestoreFile] = createSignal<File | null>(null);
-  const [restorePassword, setRestorePassword] = createSignal("");
-  const [restoreAccountPassword, setRestoreAccountPassword] = createSignal("");
-  const [restoreConfirmed, setRestoreConfirmed] = createSignal(false);
-  const [restoreBusy, setRestoreBusy] = createSignal(false);
-  const [restoreError, setRestoreError] = createSignal("");
   const [appealOpen, setAppealOpen] = createSignal(false);
   const [appealCategory, setAppealCategory] = createSignal<AccountAppealCategory>("login_locked");
   const [appealReceipt, setAppealReceipt] = createSignal(localStorage.getItem(appealReceiptKey) ?? "");
@@ -58,18 +54,10 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
       const authenticatedIdentity = result.device_credential ? { ...stored, recoveryCredential: result.device_credential } : stored;
       if (authenticatedIdentity !== stored) await saveIdentity(props.profileId, authenticatedIdentity);
       sessionStorage.removeItem(restoreCheckpointKey);
+      sessionStorage.removeItem(restorePhaseKey);
       props.onReady(result, authenticatedIdentity, result.access_token, mls);
     } catch (cause) { setError(authErrorMessage(cause)); }
     finally { setBusy(false); }
-  }
-
-  async function restore(event: SubmitEvent) {
-    event.preventDefault();
-    const file = restoreFile();
-    if (!file || !restorePassword() || !restoreAccountPassword() || !restoreConfirmed() || restoreBusy()) return;
-    setRestoreBusy(true); setRestoreError("");
-    try { await props.onRestoreBackup(file, restorePassword(), restoreAccountPassword()); }
-    catch (cause) { setRestoreError(cause instanceof Error ? cause.message : "无法恢复备份"); setRestoreBusy(false); }
   }
 
   async function refreshAppealStatus(receipt = appealReceipt()) {
@@ -89,16 +77,6 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
     } catch (cause) { setAppealError(cause instanceof Error ? cause.message : "无法提交申诉"); }
     finally { setAppealBusy(false); }
   }
-
-  const RestoreForm = () => <form class="grid gap-4 rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5" onSubmit={restore}>
-    <div><h1 class="text-lg font-semibold text-ink">恢复这台设备</h1><p class="mt-1 text-sm/5 text-muted">先完整验证文件和服务器检查点，再替换本机消息库。恢复后仍需登录。</p></div>
-    <label class="grid gap-2 text-sm font-medium text-ink" for="backup-file">备份文件<input id="backup-file" name="backup_file" type="file" accept=".edgechat-backup,application/vnd.edgechat.backup" required class="block w-full text-sm text-muted file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-medium file:text-ink file:ring-1 file:ring-black/10" onChange={(event) => setRestoreFile(event.currentTarget.files?.[0] ?? null)}/></label>
-    <Input label="备份密码" id="restore-password" name="restore_password" type="password" autocomplete="current-password" value={restorePassword()} onInput={(event) => setRestorePassword(event.currentTarget.value)} required/>
-    <Input label="账户密码" id="restore-account-password" name="restore_account_password" type="password" autocomplete="current-password" value={restoreAccountPassword()} onInput={(event) => setRestoreAccountPassword(event.currentTarget.value)} required/>
-    <label class="flex items-start gap-2 text-xs/5 text-muted"><input type="checkbox" class="mt-1 size-4 accent-brand" checked={restoreConfirmed()} onChange={(event) => setRestoreConfirmed(event.currentTarget.checked)}/><span>我明白恢复会替换这个浏览器里的 EdgeChat 消息和设备身份，并且不会同时使用旧副本。</span></label>
-    <Show when={restoreError()}><p role="alert" class="text-sm text-red-600">{restoreError()}</p></Show>
-    <div class="flex justify-end gap-2"><button type="button" disabled={restoreBusy()} class="h-10 rounded-lg px-3 text-sm font-medium text-ink hover:bg-white" onClick={() => setRestoreOpen(false)}>取消</button><button type="submit" disabled={!restoreFile() || !restorePassword() || !restoreAccountPassword() || !restoreConfirmed() || restoreBusy()} class="h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white disabled:bg-neutral-300">{restoreBusy() ? "正在验证…" : "验证并恢复"}</button></div>
-  </form>;
 
   const AppealForm = () => <div class="grid gap-5">
     <div><h1 class="text-2xl font-semibold tracking-tight text-ink">账户访问申诉</h1><p class="mt-2 text-sm/6 text-muted">申诉只处理服务器账户访问限制，无法恢复已丢失的设备密钥或聊天记录。我们不收集自由文本、邮箱或电话。</p></div>
@@ -122,7 +100,7 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
   return <main class="isolate grid min-h-dvh place-items-center bg-white px-6 py-10 antialiased"><section class="w-full max-w-xs">
     <header class="mb-10 flex justify-center"><Brand/></header>
     <Show when={!appealOpen()} fallback={<AppealForm/>}>
-    <Show when={!restoreOpen()} fallback={<RestoreForm/>}>
+    <Show when={!restoreOpen()} fallback={<BackupRestoreForm onRestore={props.onRestoreBackup} onCancel={() => setRestoreOpen(false)}/>}>
     <Show when={mode() === "link"} fallback={<>
     <Show when={!finishingRestore}><div class="mb-8 grid grid-cols-2 rounded-lg bg-neutral-100 p-1" role="tablist" aria-label="账户操作">
       <button type="button" role="tab" aria-selected={mode() === "register"} class="h-9 rounded-md text-sm font-medium text-muted aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-sm" onClick={() => setMode("register")}>创建账户</button>
