@@ -295,7 +295,8 @@ export class ApiClient {
     });
   }
   async uploadSegment(roomId: RoomId, segmentId: string, leaseToken: string, startSeq: number, endSeq: number, bytes: ArrayBuffer): Promise<{ segment_id: string }> {
-    return this.request(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, { method: "POST", headers: { "x-segment-id": segmentId, "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq) }, body: bytes });
+    const digest = base64Url(await crypto.subtle.digest("SHA-256", bytes));
+    return this.request(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, { method: "POST", headers: { "x-segment-id": segmentId, "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq), "x-content-sha256": digest }, body: bytes });
   }
   async segmentRange(roomId: RoomId, segmentId: string, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>> {
     const maximumRangeBytes = 16 * 1024 * 1024;

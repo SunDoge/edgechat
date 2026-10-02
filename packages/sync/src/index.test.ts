@@ -617,6 +617,18 @@ describe("ApiClient attachment uploads", () => {
       expect(init.body).toBe(ciphertext);
     } finally { vi.unstubAllGlobals(); }
   });
+
+  it("sends the client-computed archive checksum with a segment upload", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ segment_id: "segment-1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const ciphertext = new Uint8Array([11, 22, 33, 44]).buffer;
+      await new ApiClient("https://edgechat.test", "token").uploadSegment("!room:example.com", "segment-1", "lease-1", 1, 4, ciphertext);
+      const init = fetchMock.mock.calls[0]![1]!; const headers = new Headers(init.headers);
+      expect(headers.get("x-content-sha256")).toBe("vb3OMS9XYlcfqhfz9HgCNe0sVPlmwPYNrOHN3SY09PM");
+      expect(init.body).toBe(ciphertext);
+    } finally { vi.unstubAllGlobals(); }
+  });
 });
 
 describe("ApiClient archive ranges", () => {

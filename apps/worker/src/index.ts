@@ -57,7 +57,7 @@ const UNCOMMITTED_ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const PENDING_R2_WRITE_TTL_MS = 15 * 60 * 1_000;
 const visibleMessageEventTypes = new Set(["message.text", "message.file", "message.image", "message.contact"]);
 
-function validateArchiveV3Envelope(bytes: Uint8Array, startSeq: number, endSeq: number, uploaderDeviceId: string, activeDeviceIds: Set<string>): void {
+function validateArchiveV3Envelope(bytes: Uint8Array, totalBytes: number, startSeq: number, endSeq: number, uploaderDeviceId: string, activeDeviceIds: Set<string>): void {
   const invalid = () => { throw new HttpError(400, "Invalid archive segment v3 envelope", "invalid_segment_envelope"); };
   const exactBase64Url = (value: unknown, byteLength: number): value is string => {
     if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
@@ -69,7 +69,7 @@ function validateArchiveV3Envelope(bytes: Uint8Array, startSeq: number, endSeq: 
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const envelopeOffset = view.getUint32(8); const envelopeLength = view.getUint32(12); const indexOffset = view.getUint32(16); const indexLength = view.getUint32(20);
     if (envelopeOffset !== ARCHIVE_V3_HEADER_BYTES || envelopeLength < 64 || envelopeLength > ARCHIVE_KEY_ENVELOPE_MAX_BYTES
-      || indexOffset !== envelopeOffset + envelopeLength || indexLength < 32 || indexOffset + indexLength > bytes.length
+      || indexOffset !== envelopeOffset + envelopeLength || indexLength < 32 || indexOffset + indexLength > totalBytes
       || view.getUint32(28) !== startSeq || view.getUint32(32) !== endSeq) return invalid();
     const manifest = JSON.parse(new TextDecoder().decode(bytes.subarray(envelopeOffset, indexOffset))) as Record<string, unknown>;
     const ephemeral = manifest.ephemeral_key as Partial<JsonWebKey> | undefined;
@@ -92,13 +92,67 @@ function validateArchiveV3Envelope(bytes: Uint8Array, startSeq: number, endSeq: 
   }
 }
 
-function requestContentSha256(request: Request): { bytes: Uint8Array<ArrayBuffer>; text: string } | null {
+function requestContentSha256(request: Request, errorCode = "invalid_attachment_digest"): { bytes: Uint8Array<ArrayBuffer>; text: string } | null {
   const text = request.headers.get("x-content-sha256");
   if (text === null) return null;
-  if (!/^[A-Za-z0-9_-]{43}$/.test(text)) throw new HttpError(400, "Invalid ciphertext SHA-256", "invalid_attachment_digest");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(text)) throw new HttpError(400, "Invalid ciphertext SHA-256", errorCode);
   const bytes = fromB64url(text);
-  if (bytes.byteLength !== 32 || b64url(bytes) !== text) throw new HttpError(400, "Invalid ciphertext SHA-256", "invalid_attachment_digest");
+  if (bytes.byteLength !== 32 || b64url(bytes) !== text) throw new HttpError(400, "Invalid ciphertext SHA-256", errorCode);
   return { bytes, text };
+}
+
+async function archiveEnvelopePrefix(body: ReadableStream<Uint8Array>, totalBytes: number): Promise<{
+  bytes: Uint8Array<ArrayBuffer>;
+  body: ReadableStream<Uint8Array>;
+}> {
+  const reader = body.getReader(); const chunks: Uint8Array[] = []; let received = 0;
+  const readThrough = async (target: number) => {
+    while (received < target) {
+      const next = await reader.read();
+      if (next.done) throw new HttpError(400, "Archive segment is truncated", "invalid_segment_length");
+      chunks.push(next.value); received += next.value.byteLength;
+    }
+  };
+  try {
+    await readThrough(ARCHIVE_V3_HEADER_BYTES);
+    const header = new Uint8Array(ARCHIVE_V3_HEADER_BYTES); let offset = 0;
+    for (const chunk of chunks) {
+      const length = Math.min(chunk.byteLength, header.byteLength - offset);
+      header.set(chunk.subarray(0, length), offset); offset += length;
+      if (offset === header.byteLength) break;
+    }
+    const view = new DataView(header.buffer);
+    const envelopeOffset = view.getUint32(8); const envelopeLength = view.getUint32(12);
+    const prefixLength = envelopeOffset + envelopeLength;
+    if (header[0] !== 0x45 || header[1] !== 0x43 || header[2] !== 0x41 || header[3] !== 0x52 || header[4] !== 3 || header[5] !== 1
+      || envelopeOffset !== ARCHIVE_V3_HEADER_BYTES || envelopeLength < 64 || envelopeLength > ARCHIVE_KEY_ENVELOPE_MAX_BYTES
+      || prefixLength > totalBytes) throw new HttpError(400, "Invalid archive segment v3 envelope", "invalid_segment_envelope");
+    await readThrough(prefixLength);
+    const bytes = new Uint8Array(prefixLength); offset = 0;
+    for (const chunk of chunks) {
+      const length = Math.min(chunk.byteLength, bytes.byteLength - offset);
+      bytes.set(chunk.subarray(0, length), offset); offset += length;
+      if (offset === bytes.byteLength) break;
+    }
+    let replayIndex = 0;
+    return {
+      bytes,
+      body: new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (replayIndex < chunks.length) {
+            const chunk = chunks[replayIndex]!; chunks[replayIndex] = new Uint8Array(0); replayIndex += 1;
+            controller.enqueue(chunk); return;
+          }
+          const next = await reader.read();
+          if (next.done) controller.close(); else controller.enqueue(next.value);
+        },
+        cancel(reason) { return reader.cancel(reason); },
+      }),
+    };
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
 }
 
 function exactLengthUploadStream(body: ReadableStream<Uint8Array>, expectedBytes: number): {
@@ -3801,9 +3855,15 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
   const start = Number(request.headers.get("x-start-seq"));
   const end = Number(request.headers.get("x-end-seq"));
   const declaredSize = Number(request.headers.get("content-length"));
+  const suppliedDigest = requestContentSha256(request, "invalid_archive_digest");
   const id = request.headers.get("x-segment-id") ?? "";
   const leaseToken = request.headers.get("x-compaction-token") ?? "";
   if (!request.body || !Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > MAX_SEGMENT || !/^[A-Za-z0-9_-]{16,64}$/.test(id) || !/^[A-Za-z0-9_-]{16,128}$/.test(leaseToken)) throw new HttpError(400, "Invalid archive segment", "invalid_segment");
+  if (!suppliedDigest) throw new HttpError(400, "Ciphertext SHA-256 required for archive uploads", "archive_digest_required");
+  if (declaredSize < ARCHIVE_V3_HEADER_BYTES) {
+    await request.body.cancel().catch(() => undefined);
+    throw new HttpError(400, "Invalid archive segment v3 envelope", "invalid_segment_envelope");
+  }
   const db = createDatabase(env.DB);
   const existing = await db.selectFrom("archive_segments").select(["segment_id", "start_seq", "end_seq", "byte_size"]).where("segment_id", "=", id).where("room_id", "=", roomId).executeTakeFirst();
   if (existing) {
@@ -3816,22 +3876,33 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
   if (!room || start <= room.retention_floor_seq || end > room.current_seq) throw new HttpError(409, "Segment is outside the durable room history", "invalid_segment_range");
   const overlap = await db.selectFrom("archive_segments").select("segment_id").where("room_id", "=", roomId).where("start_seq", "<=", end).where("end_seq", ">=", start).executeTakeFirst();
   if (overlap) throw new HttpError(409, "Segment overlaps archived history", "segment_overlap");
-  const bytes = await request.arrayBuffer();
-  const size = bytes.byteLength;
-  if (size < 1 || size > MAX_SEGMENT || size !== declaredSize) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
   const activeDevices = await db.selectFrom("room_devices as rd").innerJoin("devices as d", "d.device_id", "rd.device_id")
     .select("rd.device_id").where("rd.room_id", "=", roomId).where("rd.removed_at", "is", null).where("d.revoked_at", "is", null).limit(1_001).execute();
   if (activeDevices.length > 1_000) throw new HttpError(409, "Room has too many devices to archive", "archive_device_limit");
-  validateArchiveV3Envelope(new Uint8Array(bytes), start, end, auth.deviceId, new Set(activeDevices.map((device) => device.device_id)));
-  const digest = await crypto.subtle.digest("SHA-256", bytes); const digestText = b64url(digest);
   const owner = await db.selectFrom("rooms").select("created_by").where("room_id", "=", roomId).executeTakeFirstOrThrow();
+  const prefix = await archiveEnvelopePrefix(request.body, declaredSize);
+  try { validateArchiveV3Envelope(prefix.bytes, declaredSize, start, end, auth.deviceId, new Set(activeDevices.map((device) => device.device_id))); }
+  catch (error) { await prefix.body.cancel().catch(() => undefined); throw error; }
   const objectKey = `rooms/${encodeURIComponent(roomId)}/segments/${String(start).padStart(12, "0")}-${id}.bin`;
-  const pending = { object_key: objectKey, owner_user_id: owner.created_by, kind: "archive" as const, expected_bytes: size };
-  await stageR2Write(env, pending);
+  const pending = { object_key: objectKey, owner_user_id: owner.created_by, kind: "archive" as const, expected_bytes: declaredSize };
+  try { await stageR2Write(env, pending); }
+  catch (error) { await prefix.body.cancel().catch(() => undefined); throw error; }
   try {
-    await env.ARCHIVE.put(objectKey, bytes, { sha256: digest, httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId, start: String(start), end: String(end), sha256: digestText } });
+    const limited = exactLengthUploadStream(prefix.body, declaredSize);
+    let stored: R2Object | null;
+    try {
+      stored = (await Promise.all([
+        env.ARCHIVE.put(objectKey, limited.body, { sha256: suppliedDigest.bytes, httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId, start: String(start), end: String(end), sha256: suppliedDigest.text } }),
+        limited.completed,
+      ]))[0];
+    } catch (error) {
+      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
+      if (isFixedLengthMismatch(error)) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
+      throw error;
+    }
+    if (!stored || stored.size !== declaredSize) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
     await batch(env.DB, [
-      db.insertInto("archive_segments").values({ segment_id: id, room_id: roomId, start_seq: start, end_seq: end, object_key: objectKey, byte_size: size, ciphertext_sha256: digestText, created_at: Date.now() }),
+      db.insertInto("archive_segments").values({ segment_id: id, room_id: roomId, start_seq: start, end_seq: end, object_key: objectKey, byte_size: declaredSize, ciphertext_sha256: suppliedDigest.text, created_at: Date.now() }),
       db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey),
     ]);
   } catch (error) {
@@ -3839,7 +3910,7 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
     throw error;
   }
   await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
-  return json({ segment_id: id, start_seq: start, end_seq: end, byte_size: size }, 201);
+  return json({ segment_id: id, start_seq: start, end_seq: end, byte_size: declaredSize }, 201);
 }
 
 async function acknowledgeArchiveSegmentRetention(env: Env, auth: AuthContext, segmentId: string): Promise<Response> {

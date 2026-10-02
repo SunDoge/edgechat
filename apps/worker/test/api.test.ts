@@ -856,14 +856,28 @@ describe("single-server durable delivery", () => {
     expect(lease.acquired).toBe(true);
     const legacyUpload = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
       method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-segment-id": segmentId, "x-compaction-token": leaseToken,
-        "x-start-seq": "1", "x-end-seq": "1", "content-length": "5" }, body: new Uint8Array([1, 2, 3, 4, 5]),
+        "x-start-seq": "1", "x-end-seq": "1", "content-length": "5", "x-content-sha256": await ciphertextDigest(new Uint8Array([1, 2, 3, 4, 5])) }, body: new Uint8Array([1, 2, 3, 4, 5]),
     });
     expect(legacyUpload.status).toBe(400);
     expect(await legacyUpload.json()).toMatchObject({ code: "invalid_segment_envelope" });
     const ciphertext = archiveV3Ciphertext(account.device_id, 1, 1);
-    const upload = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
+    const missingDigest = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
       method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-segment-id": segmentId, "x-compaction-token": leaseToken,
         "x-start-seq": "1", "x-end-seq": "1", "content-length": String(ciphertext.byteLength) }, body: ciphertext,
+    });
+    expect(missingDigest.status).toBe(400);
+    expect(await missingDigest.json()).toMatchObject({ code: "archive_digest_required" });
+    const wrongDigest = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
+      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-segment-id": segmentId, "x-compaction-token": leaseToken,
+        "x-start-seq": "1", "x-end-seq": "1", "content-length": String(ciphertext.byteLength), "x-content-sha256": b64url(new Uint8Array(32).buffer) }, body: ciphertext,
+    });
+    expect(wrongDigest.status).toBe(400);
+    expect(await wrongDigest.json()).toMatchObject({ code: "invalid_archive_digest" });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+    expect((await env.DB.prepare("SELECT count(*) AS count FROM pending_r2_writes").first<{ count: number }>())?.count).toBe(0);
+    const upload = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
+      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-segment-id": segmentId, "x-compaction-token": leaseToken,
+        "x-start-seq": "1", "x-end-seq": "1", "content-length": String(ciphertext.byteLength), "x-content-sha256": await ciphertextDigest(ciphertext) }, body: ciphertext,
     });
     expect(upload.status, await upload.clone().text()).toBe(201);
     expect((await SELF.fetch(`https://edgechat.test/api/v1/archive-segments/${segmentId}/retention-ack`, { method: "POST", headers })).status).toBe(200);
