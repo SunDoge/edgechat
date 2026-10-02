@@ -3,9 +3,26 @@ import { LOCAL_SCHEMA } from "./schema";
 
 export type LocalSchemaMigration = Readonly<{ version: number; name: string; checksum: string; sql: string }>;
 
-export const LOCAL_SCHEMA_VERSION = 1;
+export const LOCAL_SCHEMA_V2 = `CREATE TABLE room_membership_outbox (
+  room_id TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK (operation IN ('add', 'remove')),
+  target_user_id TEXT NOT NULL,
+  target_device_ids JSONB NOT NULL,
+  event_json JSONB NOT NULL,
+  mls_welcome TEXT,
+  mls_ratchet_tree TEXT,
+  mls_claim_ids JSONB NOT NULL,
+  previous_mls_state BYTEA NOT NULL,
+  mls_state BYTEA NOT NULL,
+  last_error TEXT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+)`;
+
+export const LOCAL_SCHEMA_VERSION = 2;
 export const LOCAL_SCHEMA_MIGRATIONS: readonly LocalSchemaMigration[] = Object.freeze([
   { version: 1, name: "initial_local_schema", checksum: "f1e403a6e8c19ccd6943e34523664090f1a2aec623a88ea9d1588ef1278b9a69", sql: LOCAL_SCHEMA },
+  { version: 2, name: "room_membership_outbox", checksum: "c30cd87e8264841f9255936181a7ed428750d4d217f41f8633a2f93a07acdc59", sql: LOCAL_SCHEMA_V2 },
 ]);
 
 const LOCAL_SCHEMA_META = `CREATE TABLE IF NOT EXISTS local_schema_meta (

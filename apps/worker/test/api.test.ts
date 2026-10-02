@@ -580,6 +580,11 @@ describe("single-server durable delivery", () => {
     expect(await added.json()).toMatchObject({ room_id: groupRoom, user_id: carol.user_id, epoch: 2, event: { event_id: signed.event_id, seq: 1 } });
     expect(await env.DB.prepare("SELECT consumed_room_id FROM device_key_packages WHERE package_id = ?").bind(claimed.key_packages[0]!.claim_id).first()).toEqual({ consumed_room_id: groupRoom });
     expect(await env.DB.prepare("SELECT role,removed_at FROM room_members WHERE room_id = ? AND user_id = ?").bind(groupRoom, carol.user_id).first()).toEqual({ role: "member", removed_at: null });
+    const listedRooms = await SELF.fetch("https://edgechat.test/api/v1/rooms", { headers });
+    const listed = await listedRooms.json() as { rooms: Array<{ room_id: string; epoch: number }> };
+    expect(listed.rooms.find((room) => room.room_id === groupRoom)).toMatchObject({ room_id: groupRoom, epoch: 2 });
+    const roomDetail = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}`, { headers });
+    expect(await roomDetail.json()).toMatchObject({ room: { room_id: groupRoom, epoch: 2 } });
 
     const retry = await SELF.fetch(endpoint, { method: "POST", headers, body: JSON.stringify(payload) });
     expect(retry.status, await retry.clone().text()).toBe(200);

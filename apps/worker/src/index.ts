@@ -2125,7 +2125,7 @@ async function listRooms(env: Env, auth: AuthContext): Promise<Response> {
   let query = db.selectFrom("room_members as mine").innerJoin("rooms as r", "r.room_id", "mine.room_id")
     .innerJoin("room_devices as current_device", (join) => join.onRef("current_device.room_id", "=", "r.room_id").on("current_device.device_id", "=", auth.deviceId))
     .leftJoin("device_room_preferences as pref", (join) => join.onRef("pref.room_id", "=", "r.room_id").on("pref.device_id", "=", auth.deviceId))
-    .select(["r.room_id", "r.name", "r.kind", "r.purpose", "r.current_seq", "r.created_at", "r.home_server", "current_device.joined_seq", "pref.muted_until"])
+    .select(["r.room_id", "r.name", "r.kind", "r.purpose", "r.current_seq", "r.created_at", "r.home_server", "r.mls_epoch as epoch", "current_device.joined_seq", "pref.muted_until"])
     .where("mine.user_id", "=", auth.userId).where("mine.removed_at", "is", null).where("current_device.removed_at", "is", null);
   if (auth.actor === "bot") query = query.where("r.room_id", "=", auth.botRoomId ?? "");
   const rooms = await query.orderBy("r.created_at", "desc").execute();
@@ -2138,7 +2138,7 @@ async function listRooms(env: Env, auth: AuthContext): Promise<Response> {
     ]);
     const requestMessage = request ? await db.selectFrom("room_events").select("event_id").where("room_id", "=", room.room_id)
       .where("event_type", "in", [...visibleMessageEventTypes]).executeTakeFirst() : null;
-    return { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenByRoom.get(room.room_id) ?? [], encrypted_state: state?.encrypted_state ?? null, epoch: state?.epoch ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) };
+    return { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenByRoom.get(room.room_id) ?? [], encrypted_state: state?.encrypted_state ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) };
   }));
   return json({ rooms: result });
 }
@@ -2643,7 +2643,7 @@ async function getRoom(env: Env, auth: AuthContext, roomId: RoomId): Promise<Res
   const room = await db.selectFrom("rooms as r")
     .innerJoin("room_devices as current_device", (join) => join.onRef("current_device.room_id", "=", "r.room_id").on("current_device.device_id", "=", auth.deviceId))
     .leftJoin("device_room_preferences as pref", (join) => join.onRef("pref.room_id", "=", "r.room_id").on("pref.device_id", "=", auth.deviceId))
-    .select(["r.room_id", "r.home_server", "r.kind", "r.purpose", "r.name", "r.current_seq", "r.created_at", "current_device.joined_seq", "pref.muted_until"])
+    .select(["r.room_id", "r.home_server", "r.kind", "r.purpose", "r.name", "r.current_seq", "r.created_at", "r.mls_epoch as epoch", "current_device.joined_seq", "pref.muted_until"])
     .where("r.room_id", "=", roomId).where("current_device.removed_at", "is", null).executeTakeFirst();
   if (!room) throw new HttpError(404, "Room not found", "not_found");
   const [members, state, blockedRows, hiddenRows, request, requestMessage] = await Promise.all([
@@ -2656,7 +2656,7 @@ async function getRoom(env: Env, auth: AuthContext, roomId: RoomId): Promise<Res
     db.selectFrom("room_events").select("event_id").where("room_id", "=", roomId).where("event_type", "in", [...visibleMessageEventTypes]).executeTakeFirst(),
   ]);
   const blockedByMe = new Set(blockedRows.map((row) => row.blocked_user_id));
-  return json({ room: { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenRows.map((row) => row.hidden_user_id), encrypted_state: state?.encrypted_state ?? null, epoch: state?.epoch ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) } });
+  return json({ room: { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenRows.map((row) => row.hidden_user_id), encrypted_state: state?.encrypted_state ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) } });
 }
 
 async function setGroupMemberHidden(env: Env, auth: AuthContext, roomId: RoomId, targetUserId: UserId, hidden: boolean): Promise<Response> {

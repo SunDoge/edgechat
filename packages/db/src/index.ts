@@ -155,6 +155,26 @@ export type AccountRemovalOutboxItem = {
   updated_at: number;
 };
 type AccountRemovalOutboxRow = Omit<AccountRemovalOutboxItem, "event" | "target_device_ids"> & { event_json: ClientEvent | string; target_device_ids: string[] | string };
+export type RoomMembershipOutboxItem = {
+  room_id: RoomId;
+  operation: "add" | "remove";
+  target_user_id: string;
+  target_device_ids: string[];
+  event: ClientEvent;
+  mls_welcome: string | null;
+  mls_ratchet_tree: string | null;
+  mls_claim_ids: string[];
+  previous_mls_state: Uint8Array;
+  mls_state: Uint8Array;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+};
+type RoomMembershipOutboxRow = Omit<RoomMembershipOutboxItem, "event" | "target_device_ids" | "mls_claim_ids"> & {
+  event_json: ClientEvent | string;
+  target_device_ids: string[] | string;
+  mls_claim_ids: string[] | string;
+};
 
 function jsonValue<T>(value: T | string): T { return typeof value === "string" ? JSON.parse(value) as T : value; }
 
@@ -1042,6 +1062,37 @@ export class LocalDatabase {
 
   async removeAccountRemovalOutbox(deletionId: string, roomId: RoomId): Promise<void> {
     await this.query("DELETE FROM account_removal_outbox WHERE deletion_id = $1 AND room_id = $2", [deletionId, roomId]);
+  }
+
+  async saveRoomMembershipOutbox(item: Omit<RoomMembershipOutboxItem, "last_error" | "created_at" | "updated_at">): Promise<void> {
+    const now = Date.now();
+    await this.query(
+      `INSERT INTO room_membership_outbox (room_id,operation,target_user_id,target_device_ids,event_json,mls_welcome,mls_ratchet_tree,mls_claim_ids,previous_mls_state,mls_state,last_error,created_at,updated_at)
+       VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8::jsonb,$9,$10,NULL,$11,$11)
+       ON CONFLICT (room_id) DO UPDATE SET operation = EXCLUDED.operation, target_user_id = EXCLUDED.target_user_id, target_device_ids = EXCLUDED.target_device_ids,
+         event_json = EXCLUDED.event_json, mls_welcome = EXCLUDED.mls_welcome, mls_ratchet_tree = EXCLUDED.mls_ratchet_tree, mls_claim_ids = EXCLUDED.mls_claim_ids,
+         previous_mls_state = EXCLUDED.previous_mls_state, mls_state = EXCLUDED.mls_state, last_error = NULL, updated_at = EXCLUDED.updated_at`,
+      [item.room_id, item.operation, item.target_user_id, JSON.stringify(item.target_device_ids), JSON.stringify(item.event), item.mls_welcome,
+        item.mls_ratchet_tree, JSON.stringify(item.mls_claim_ids), item.previous_mls_state, item.mls_state, now],
+    );
+  }
+
+  async roomMembershipOutbox(roomId: RoomId): Promise<RoomMembershipOutboxItem | null> {
+    const [row] = await this.query<RoomMembershipOutboxRow>("SELECT room_id,operation,target_user_id,target_device_ids,event_json,mls_welcome,mls_ratchet_tree,mls_claim_ids,previous_mls_state,mls_state,last_error,created_at,updated_at FROM room_membership_outbox WHERE room_id = $1", [roomId]);
+    return row ? { ...row, event: jsonValue(row.event_json), target_device_ids: jsonValue(row.target_device_ids), mls_claim_ids: jsonValue(row.mls_claim_ids) } : null;
+  }
+
+  async pendingRoomMembershipChanges(): Promise<RoomMembershipOutboxItem[]> {
+    const rows = await this.query<RoomMembershipOutboxRow>("SELECT room_id,operation,target_user_id,target_device_ids,event_json,mls_welcome,mls_ratchet_tree,mls_claim_ids,previous_mls_state,mls_state,last_error,created_at,updated_at FROM room_membership_outbox ORDER BY created_at");
+    return rows.map((row) => ({ ...row, event: jsonValue(row.event_json), target_device_ids: jsonValue(row.target_device_ids), mls_claim_ids: jsonValue(row.mls_claim_ids) }));
+  }
+
+  async failRoomMembershipOutbox(roomId: RoomId, error: string): Promise<void> {
+    await this.query("UPDATE room_membership_outbox SET last_error = $2, updated_at = $3 WHERE room_id = $1", [roomId, error.slice(0, 500), Date.now()]);
+  }
+
+  async removeRoomMembershipOutbox(roomId: RoomId): Promise<void> {
+    await this.query("DELETE FROM room_membership_outbox WHERE room_id = $1", [roomId]);
   }
 
   async hasMessage(eventId: string): Promise<boolean> {
