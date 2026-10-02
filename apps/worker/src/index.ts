@@ -92,6 +92,31 @@ function validateArchiveV3Envelope(bytes: Uint8Array, startSeq: number, endSeq: 
   }
 }
 
+function requestContentSha256(request: Request): { bytes: Uint8Array<ArrayBuffer>; text: string } | null {
+  const text = request.headers.get("x-content-sha256");
+  if (text === null) return null;
+  if (!/^[A-Za-z0-9_-]{43}$/.test(text)) throw new HttpError(400, "Invalid ciphertext SHA-256", "invalid_attachment_digest");
+  const bytes = fromB64url(text);
+  if (bytes.byteLength !== 32 || b64url(bytes) !== text) throw new HttpError(400, "Invalid ciphertext SHA-256", "invalid_attachment_digest");
+  return { bytes, text };
+}
+
+function exactLengthUploadStream(body: ReadableStream<Uint8Array>, expectedBytes: number): {
+  body: ReadableStream<Uint8Array>;
+  completed: Promise<void>;
+} {
+  const fixedLength = new FixedLengthStream(expectedBytes);
+  return { body: fixedLength.readable, completed: body.pipeTo(fixedLength.writable) };
+}
+
+function isR2ChecksumMismatch(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("checksum you specified did not match");
+}
+
+function isFixedLengthMismatch(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("FixedLengthStream");
+}
+
 export function archiveCompactionEnabled(env: Pick<Env, "ARCHIVE_COMPACTION_ENABLED">): boolean {
   return env.ARCHIVE_COMPACTION_ENABLED === "true";
 }
@@ -3488,20 +3513,29 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
   const declaredSize = Number(request.headers.get("content-length"));
   if (!request.body || !Number.isSafeInteger(declaredSize) || declaredSize < 1) throw new HttpError(411, "Content-Length required", "length_required");
   if (declaredSize > MAX_ATTACHMENT) throw new HttpError(413, "Encrypted attachment is too large", "attachment_too_large");
-  const bytes = await request.arrayBuffer();
-  const size = bytes.byteLength;
-  if (size < 1 || size > MAX_ATTACHMENT || size !== declaredSize) throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  const digestText = b64url(digest);
+  const suppliedDigest = requestContentSha256(request);
+  if (!suppliedDigest) throw new HttpError(400, "Ciphertext SHA-256 required for attachment uploads", "attachment_digest_required");
   const id = randomId(24);
   const key = `attachments/${id}`;
-  const pending = { object_key: key, owner_user_id: auth.userId, kind: "attachment" as const, expected_bytes: size };
+  const pending = { object_key: key, owner_user_id: auth.userId, kind: "attachment" as const, expected_bytes: declaredSize };
   await stageR2Write(env, pending);
   try {
-    await env.ARCHIVE.put(key, bytes, { sha256: digest, httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId, sha256: digestText } });
+    const limited = exactLengthUploadStream(request.body, declaredSize);
+    const put = env.ARCHIVE.put(key, limited.body, { sha256: suppliedDigest.bytes, httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId, sha256: suppliedDigest.text } });
+    let stored: R2Object | null;
+    try {
+      stored = (await Promise.all([put, limited.completed]))[0];
+    } catch (error) {
+      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Attachment digest mismatch", "invalid_attachment_digest");
+      if (isFixedLengthMismatch(error)) throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
+      throw error;
+    }
+    if (!stored || stored.size !== declaredSize) {
+      throw new HttpError(400, "Attachment length or digest mismatch", "invalid_attachment_digest");
+    }
     const db = createDatabase(env.DB);
     await batch(env.DB, [
-      db.insertInto("attachments").values({ attachment_id: id, room_id: roomId, uploader_user_id: auth.userId, object_key: key, ciphertext_bytes: size, ciphertext_sha256: digestText, created_at: Date.now(), committed_event_id: null, committed_at: null, source_deleted_at: null }),
+      db.insertInto("attachments").values({ attachment_id: id, room_id: roomId, uploader_user_id: auth.userId, object_key: key, ciphertext_bytes: declaredSize, ciphertext_sha256: suppliedDigest.text, created_at: Date.now(), committed_event_id: null, committed_at: null, source_deleted_at: null }),
       attachmentRetentionRequirement(db, id, roomId),
       db.deleteFrom("pending_r2_writes").where("object_key", "=", key),
     ]);
@@ -3509,7 +3543,7 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
     await abandonPendingR2Write(env, pending);
     throw error;
   }
-  return json({ attachment_id: id, ciphertext_bytes: size }, 201);
+  return json({ attachment_id: id, ciphertext_bytes: declaredSize }, 201);
 }
 
 async function abandonAttachments(request: Request, env: Env, auth: AuthContext): Promise<Response> {

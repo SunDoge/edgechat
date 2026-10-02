@@ -605,6 +605,20 @@ describe("ApiClient protocol negotiation", () => {
   });
 });
 
+describe("ApiClient attachment uploads", () => {
+  it("sends the client-computed ciphertext checksum with the fixed-length body", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ attachment_id: "attachment-1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const ciphertext = new Uint8Array([11, 22, 33, 44]).buffer;
+      await new ApiClient("https://edgechat.test", "token").uploadAttachment("!room:example.com", ciphertext);
+      const init = fetchMock.mock.calls[0]![1]!; const headers = new Headers(init.headers);
+      expect(headers.get("x-content-sha256")).toBe("vb3OMS9XYlcfqhfz9HgCNe0sVPlmwPYNrOHN3SY09PM");
+      expect(init.body).toBe(ciphertext);
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
 describe("ApiClient archive ranges", () => {
   it("accepts only an exact partial-content response", async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(new Uint8Array([2, 3]), {

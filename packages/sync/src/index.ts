@@ -265,7 +265,8 @@ export class ApiClient {
   }
 
   async uploadAttachment(roomId: RoomId, ciphertext: ArrayBuffer): Promise<{ attachment_id: string }> {
-    return this.request("/api/v1/attachments", { method: "POST", headers: { "x-room-id": roomId }, body: ciphertext });
+    const digest = base64Url(await crypto.subtle.digest("SHA-256", ciphertext));
+    return this.request("/api/v1/attachments", { method: "POST", headers: { "x-room-id": roomId, "x-content-sha256": digest }, body: ciphertext });
   }
   async abandonAttachments(attachmentIds: string[]): Promise<{ abandoned: number }> {
     return this.request("/api/v1/attachments/abandon", { method: "POST", body: JSON.stringify({ attachment_ids: attachmentIds }) });
