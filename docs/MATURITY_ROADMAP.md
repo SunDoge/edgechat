@@ -36,7 +36,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] Persist-before-publish KeyPackage replenishment, low-water monitoring, claim-context idempotency and expired-claim cleanup.
 - [x] Device-removal Commit workflow with durable per-room progress, explicit pending/complete states, stale-epoch rejection, session/ticket invalidation, and WebSocket closure.
 - [x] Owner-only SolidJS group-member management with signed exact-device Add/Remove Commits, target-only one-time KeyPackage claims, a pre/post-MLS PGlite retry outbox, startup/reconnect recovery, and no R2/S3 objects.
-- [x] Owner-only MLS-encrypted group-name updates with ordered PGlite projection, durable outbox retry, post-join refresh for newly added members, and no dedicated R2/S3 objects. The initial creation name remains server-visible metadata.
+- [x] MLS-encrypted group names from initial creation onward, with server-side plaintext rejection, owner-only updates, ordered PGlite projection, durable outbox retry, post-join refresh for newly added members, and no dedicated R2/S3 objects.
 - [x] MLS-encrypted cross-device read state.
 - [x] Device-level peer identity verification with out-of-band comparable fingerprints, local trust persistence, automatic downgrade for new/changed keys, conversation-header warnings, and no server-side trust graph or R2 objects.
 - [x] First-class cross-device saved messages through an owner-only MLS room, with immutable membership and zero-copy R2 attachment references.

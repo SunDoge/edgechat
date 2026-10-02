@@ -1512,15 +1512,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setNotice(seconds === null ? "关闭设置已加入发送队列" : "自动消失设置已加入发送队列，仅影响之后的新消息");
   }
 
-  async function updateRoomProfile(roomId: RoomId, name: string, announce = true): Promise<void> {
+  async function updateRoomProfile(roomId: RoomId, name: string, announce = true, allowUnlistedRoom = false): Promise<void> {
     const room = rooms().find((candidate) => candidate.room_id === roomId);
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     const normalizedName = name.trim();
-    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new Error("群聊状态尚未就绪");
+    if ((!room && !allowUnlistedRoom) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new Error("群聊状态尚未就绪");
     if (!serverSupports(currentSession.protocol, "rooms.profile.v1")) throw new Error("当前服务器不支持加密群聊资料");
-    if (room.kind !== "group" || room.purpose !== "chat" || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner")) throw new Error("只有群主可以修改群聊名称");
+    if (room && (room.kind !== "group" || room.purpose !== "chat" || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner"))) throw new Error("只有群主可以修改群聊名称");
     if (!normalizedName || normalizedName.length > 100 || /[\u0000-\u001f\u007f]/u.test(normalizedName)) throw new Error("群聊名称应为 1–100 个可见字符");
-    if (historyRecoveryRooms().has(roomId)) throw new Error("请先恢复此群聊");
+    if (!allowUnlistedRoom && historyRecoveryRooms().has(roomId)) throw new Error("请先恢复此群聊");
     const updatedAt = Date.now();
     const payload: RoomProfilePayload = { version: 1, kind: "room.profile", name: normalizedName, updated_at: updatedAt };
     await mutateMls(async () => {
@@ -1537,6 +1537,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     });
     setPendingMessages(await db.outbox(roomId));
     if (announce) setNotice("群聊名称已加入发送队列");
+  }
+
+  async function finishCreatedRoom(roomId: RoomId, encryptedName: string | null, profileQueued: boolean): Promise<void> {
+    try { await loadRooms(mlsRef); }
+    catch (cause) {
+      setNotice(cause instanceof Error ? `群聊已建立，但暂时无法刷新列表：${cause.message}` : "群聊已建立，但暂时无法刷新列表");
+      return;
+    }
+    setSelectedId(roomId);
+    if (!encryptedName || profileQueued) return;
+    try { await updateRoomProfile(roomId, encryptedName); }
+    catch (cause) { setNotice(cause instanceof Error ? `群聊已建立，但名称尚未同步：${cause.message}` : "群聊已建立，但名称尚未同步；可在群设置中重试"); }
   }
 
   async function toggleHiddenGroupMember(roomId: RoomId, userId: UserId, hidden: boolean): Promise<void> {
@@ -2819,7 +2831,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           }}/></label></div>}/>
         </div>}/>}</Show></section>
       <Show when={selectedMessageIds().size > 0}><div class="fixed inset-x-0 bottom-0 z-20 flex min-h-16 items-center gap-3 border-t border-black/8 bg-white px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] md:left-[360px] sm:px-5"><button type="button" class="min-h-11 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={cancelMessageSelection}>取消</button><span class="min-w-0 flex-1 truncate text-center text-sm font-medium text-ink">已选择 {selectedMessages().length} 条</span><button type="button" disabled={!selectedMessages().length} class="flex min-h-11 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => setForwardingMessages(selectedMessages())}><IconArrowForwardUp class="size-4 stroke-white"/>转发 {selectedMessages().length} 条</button></div></Show>
-      <Show when={newRoom()}><NewRoomDialog api={api} createGroup={(roomId, packages) => mutateMls(async () => { const created = mls()!.createGroup(roomId, packages); await persistMls(mls()!); return created; })} serverName={currentSession().server_name ?? location.hostname} initialContact={newRoomContact()} onClose={() => { setNewRoom(false); setNewRoomContact(null); }} onCreated={(id) => { setNewRoom(false); setNewRoomContact(null); void loadRooms(mls()!).then(() => setSelectedId(id)); }}/></Show>
+      <Show when={newRoom()}><NewRoomDialog api={api} createGroup={(roomId, packages) => mutateMls(async () => { const created = mls()!.createGroup(roomId, packages); await persistMls(mls()!); return created; })} queueInitialProfile={(roomId, name) => updateRoomProfile(roomId, name, false, true)} serverName={currentSession().server_name ?? location.hostname} initialContact={newRoomContact()} onClose={() => { setNewRoom(false); setNewRoomContact(null); }} onCreated={(id, encryptedName, profileQueued) => { setNewRoom(false); setNewRoomContact(null); void finishCreatedRoom(id, encryptedName, profileQueued); }}/></Show>
       <Show when={contactShareOpen() && selected()}>{(room) => <ContactShareDialog contacts={shareableContacts(room())} onSend={sendContactCard} onClose={() => setContactShareOpen(false)}/>}</Show>
       <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms()} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
       <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms()} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>

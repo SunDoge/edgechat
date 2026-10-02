@@ -2462,7 +2462,10 @@ async function createRoom(request: Request, env: Env, auth: AuthContext): Promis
   if (kind !== "direct" && kind !== "group") throw new HttpError(400, "Invalid room kind", "invalid_room");
   const purpose = body.purpose === undefined ? "chat" : body.purpose;
   if (purpose !== "chat" && purpose !== "saved") throw new HttpError(400, "Invalid room purpose", "invalid_room_purpose");
-  const name = purpose === "saved" ? null : typeof body.name === "string" ? body.name.slice(0, 100) : null;
+  if (kind === "group" && body.name !== undefined && body.name !== null) {
+    throw new HttpError(400, "Group names must be sent as encrypted room profile events", "plaintext_group_name_forbidden");
+  }
+  const name = purpose === "saved" || kind === "group" ? null : typeof body.name === "string" ? body.name.slice(0, 100) : null;
   const requested = Array.isArray(body.members) ? body.members : [];
   const members = Array.from(new Set([auth.userId, ...requested.filter((id): id is string => typeof id === "string")])) as UserId[];
   if (purpose === "saved") {

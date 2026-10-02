@@ -276,6 +276,19 @@ async function acceptRequest(roomId: RoomId, accessToken: string): Promise<void>
 }
 
 describe("single-server durable delivery", () => {
+  it("rejects plaintext group names before room or R2 allocation", async () => {
+    const owner = await register("plaintext_group_name", await device("plaintext-group-name-device"));
+    const roomId = "!plaintext-name-room:localhost";
+    const response = await SELF.fetch("https://edgechat.test/api/v1/rooms", {
+      method: "POST", headers: { authorization: `Bearer ${owner.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, kind: "group", name: "server must not see this", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "plaintext_group_name_forbidden" });
+    expect(await env.DB.prepare("SELECT room_id FROM rooms WHERE room_id = ?").bind(roomId).first()).toBeNull();
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+  });
+
   it("updates D1-only profiles and projects display names into rooms and durable sync", async () => {
     const aliceDevice = await device("profile-alice-device"); const bobDevice = await device("profile-bob-device");
     const alice = await register("profile_alice", aliceDevice); const bob = await register("profile_bob", bobDevice);
