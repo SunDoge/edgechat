@@ -71,6 +71,7 @@ import { activateLocalProfile, bindLocalProfile, clearLocalProfileToken, createL
 import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE, type StartupFailure } from "./startup-recovery";
 import { StartupRecoveryScreen } from "./components/StartupRecoveryScreen";
 import { inspectLocalStorageHealth, requestPersistentLocalStorage, type LocalStorageHealth, type PersistenceRequestResult } from "./local-storage-health";
+import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, isAccountExportStorageError, type AccountExportStaging } from "./account-export-staging";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -844,7 +845,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   onMount(() => {
     void (async () => {
       try {
-        await clearPortableBackupRestoreStaging(profileId).catch(() => undefined);
+        await Promise.all([clearPortableBackupRestoreStaging(profileId), clearAccountExportStaging(profileId)]).catch(() => undefined);
         if (startupFailure()) return;
         if (sessionStorage.getItem(restoreCheckpointKey)) { api.setToken(null); return; }
         const storedIdentity = await loadIdentity(profileId);
@@ -1937,6 +1938,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (accountExportBusy()) return;
     setAccountExportBusy(true);
     let writable: ExportWritable | null = null;
+    let staging: AccountExportStaging | null = null;
+    let stagedCleanup: (() => Promise<void>) | null = null;
     try {
       const filename = `edgechat-account-${new Date().toISOString().slice(0, 10)}.ndjson`;
       const pickerWindow = window as ExportPickerWindow;
@@ -1944,10 +1947,19 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: "EdgeChat NDJSON export", accept: { "application/x-ndjson": [".ndjson"] } }] });
         writable = await handle.createWritable();
       }
-      const parts: BlobPart[] = [];
+      let memory = writable ? null : createBoundedAccountExportBuffer();
+      if (!writable) {
+        const localStorageManager = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
+        if (localStorageManager?.getDirectory) {
+          try { staging = await createAccountExportStaging(profileId); memory = null; }
+          catch (cause) { if (!isAccountExportStorageError(cause)) throw cause; }
+        }
+      }
       const append = async (type: string, value: unknown) => {
         const line = `${JSON.stringify({ type, value })}\n`;
-        if (writable) await writable.write(line); else parts.push(line);
+        if (writable) await writable.write(line);
+        else if (staging) await staging.write(line);
+        else memory!.write(line);
       };
       await append("manifest", await api.accountExport());
       for (const [type, fetchPage] of [
@@ -1965,15 +1977,26 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       if (writable) { await writable.close(); writable = null; }
       else {
-        const url = URL.createObjectURL(new Blob(parts, { type: "application/x-ndjson" }));
+        let file: Blob;
+        if (staging) {
+          file = await staging.close(); stagedCleanup = staging.cleanup; staging = null;
+        } else file = memory!.blob();
+        const url = URL.createObjectURL(file);
         const anchor = document.createElement("a");
         anchor.href = url; anchor.download = filename; anchor.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        const cleanup = stagedCleanup;
+        window.setTimeout(() => { URL.revokeObjectURL(url); if (cleanup) void cleanup().catch(() => undefined); }, 5 * 60_000);
+        stagedCleanup = null;
       }
       setNotice("账户数据清单已导出；消息和附件内容仍是端到端加密密文");
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined); writable = null;
-      if (!(cause instanceof DOMException && cause.name === "AbortError")) setNotice(cause instanceof Error ? `无法导出账户数据：${cause.message}` : "无法导出账户数据");
+      await staging?.abort(cause).catch(() => undefined); staging = null;
+      await stagedCleanup?.().catch(() => undefined); stagedCleanup = null;
+      if (!(cause instanceof DOMException && cause.name === "AbortError")) {
+        const reason = isAccountExportStorageError(cause) ? "本机可用空间不足，请释放一些设备空间后重试" : cause instanceof Error ? cause.message : null;
+        setNotice(reason ? `无法导出账户数据：${reason}` : "无法导出账户数据");
+      }
     }
     finally { setAccountExportBusy(false); }
   }
@@ -2091,7 +2114,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const registration = await navigator.serviceWorker.ready.catch(() => null);
       await registration?.pushManager.getSubscription().then((subscription) => subscription?.unsubscribe()).catch(() => undefined);
       await clearPushConfig().catch(() => undefined);
-      await Promise.all([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId)]);
+      await Promise.all([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId)]);
     } catch { localCleanupFailed = true; }
     semanticRef?.close(); semanticRef = null;
     mlsRef?.destroy(); mlsRef = null; identityRef = null;
@@ -2533,7 +2556,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function removeCurrentLocalProfile(): Promise<void> {
     syncRef?.stop(); outboxRef?.stop(); archiveRef?.close();
     await disablePush(api).catch(() => clearPushConfig());
-    const cleanup = await Promise.allSettled([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearIdentity(profileId)]);
+    const cleanup = await Promise.allSettled([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId), clearIdentity(profileId)]);
     if (cleanup.some((result) => result.status === "rejected")) throw new Error("未能完全删除该身份的本机数据；身份仍保留，请重试或清除本站数据");
     clearPendingDeviceLink(profileId);
     localStorage.removeItem(profileSessionKey(profileId, "account-appeal-receipt"));
