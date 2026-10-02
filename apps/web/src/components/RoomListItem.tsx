@@ -1,11 +1,12 @@
 import { Show, createEffect, createSignal, createUniqueId, onCleanup } from "solid-js";
-import { IconAlertTriangle, IconArchive, IconArchiveOff, IconBell, IconBellOff, IconDotsVertical, IconPin, IconPinnedOff, IconUserCheck, IconUserOff } from "@tabler/icons-solidjs";
+import { IconAlertTriangle, IconArchive, IconArchiveOff, IconBell, IconBellOff, IconDotsVertical, IconMail, IconMailOpened, IconPin, IconPinnedOff, IconUserCheck, IconUserOff } from "@tabler/icons-solidjs";
 import type { LocalRoomPreference } from "@edgechat/db";
 import type { RoomProfileAvatar } from "@edgechat/protocol";
 import type { ServerRoom } from "@edgechat/sync";
 import { Avatar } from "./primitives";
 import { EncryptedRoomAvatar } from "./EncryptedRoomAvatar";
 import { handleMenuNavigation, openMenuFromTrigger } from "../menu-navigation";
+import { MuteDurationDialog } from "./MuteDurationDialog";
 
 export function RoomListItem(props: {
   room: ServerRoom;
@@ -22,21 +23,31 @@ export function RoomListItem(props: {
   recoveryRequired?: boolean;
   onOpen: () => void;
   onTogglePinned: () => void;
-  onToggleMuted: () => void;
+  onSetMutedUntil: (mutedUntil: number | null) => void;
+  onSetReadState: (markedUnread: boolean) => void;
   onToggleArchived: () => void;
   blockable: boolean;
   blockedByMe: boolean;
   onToggleBlocked: () => void;
 }) {
   const [menuOpen, setMenuOpen] = createSignal(false);
+  const [muteDialogOpen, setMuteDialogOpen] = createSignal(false);
+  const [clock, setClock] = createSignal(Date.now());
   let root: HTMLDivElement | undefined;
   let menuButton: HTMLButtonElement | undefined;
   let menu: HTMLDivElement | undefined;
   let focusLastOnOpen = false;
   const menuId = createUniqueId();
   const pinned = () => props.preference.pinned_at !== null;
-  const muted = () => props.preference.muted_until !== null && Number(props.preference.muted_until) > Date.now();
+  const muted = () => props.preference.muted_until !== null && Number(props.preference.muted_until) > clock();
   const archived = () => props.preference.archived_at !== null;
+
+  createEffect(() => {
+    const until = Number(props.preference.muted_until ?? 0); const now = Date.now(); setClock(now);
+    if (!Number.isSafeInteger(until) || until <= now || until === Number.MAX_SAFE_INTEGER) return;
+    const timer = window.setTimeout(() => setClock(Date.now()), Math.min(until - now + 50, 2_147_483_647));
+    onCleanup(() => window.clearTimeout(timer));
+  });
 
   createEffect(() => {
     if (!menuOpen()) return;
@@ -65,7 +76,7 @@ export function RoomListItem(props: {
         <EncryptedRoomAvatar class="size-11" avatar={props.groupAvatar} label={props.avatarLabel} color={props.avatarColor} load={load()}/>
       }</Show>
       <span class="min-w-0">
-        <span class="flex items-center gap-1.5"><strong class="min-w-0 truncate text-sm font-semibold text-ink">{props.title}</strong><Show when={props.recoveryRequired}><IconAlertTriangle aria-label="需要恢复" class="size-3.5 shrink-0 stroke-amber-600"/></Show><Show when={pinned()}><IconPin aria-label="已置顶" class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={muted()}><IconBellOff aria-label="已静音" class="size-3.5 shrink-0 stroke-muted"/></Show></span>
+        <span class="flex items-center gap-1.5"><strong class="min-w-0 truncate text-sm font-semibold text-ink">{props.title}</strong><Show when={props.recoveryRequired}><IconAlertTriangle aria-label="需要恢复" class="size-3.5 shrink-0 stroke-amber-600"/></Show><Show when={pinned()}><IconPin aria-label="已置顶" class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={muted()}><IconBellOff aria-label={props.preference.muted_until === Number.MAX_SAFE_INTEGER ? "已一直静音" : `已静音至 ${new Date(Number(props.preference.muted_until)).toLocaleString("zh-CN")}`} class="size-3.5 shrink-0 stroke-muted"/></Show></span>
         <small class={`mt-1 block truncate text-sm ${props.recoveryRequired ? "font-medium text-amber-700" : "text-muted"}`}>{props.recoveryRequired ? "需要从另一台设备恢复" : props.preview}</small>
       </span>
       <Show when={props.unread > 0} fallback={<span/>}><span aria-label={`${props.unread} 条未读消息`} class="grid min-w-5 place-items-center self-center rounded-full bg-brand px-1.5 py-0.5 text-[0.6875rem] font-semibold tabular-nums text-white">{Math.min(props.unread, 99)}{props.unread > 99 ? "+" : ""}</span></Show>
@@ -75,9 +86,11 @@ export function RoomListItem(props: {
     </button>
     <Show when={menuOpen()}><div ref={menu} id={menuId} role="menu" aria-label={`${props.title} 的对话操作`} class="absolute right-2 top-[58px] z-20 min-w-44 rounded-xl border border-black/8 bg-white p-1 text-sm text-ink shadow-xl" onKeyDown={menuKeyDown}>
       <button type="button" role="menuitem" class="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 hover:bg-neutral-100" onClick={() => action(props.onTogglePinned)}>{pinned() ? <IconPinnedOff class="size-4 stroke-muted"/> : <IconPin class="size-4 stroke-muted"/>}{pinned() ? "取消置顶" : "置顶"}</button>
-      <button type="button" role="menuitem" class="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 hover:bg-neutral-100" onClick={() => action(props.onToggleMuted)}>{muted() ? <IconBell class="size-4 stroke-muted"/> : <IconBellOff class="size-4 stroke-muted"/>}{muted() ? "取消静音" : "静音"}</button>
+      <button type="button" role="menuitem" class="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 hover:bg-neutral-100" onClick={() => muted() ? action(() => props.onSetMutedUntil(null)) : action(() => setMuteDialogOpen(true))}>{muted() ? <IconBell class="size-4 shrink-0 stroke-muted"/> : <IconBellOff class="size-4 shrink-0 stroke-muted"/>}{muted() ? "取消静音" : "静音…"}</button>
+      <button type="button" role="menuitem" class="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 hover:bg-neutral-100" onClick={() => action(() => props.onSetReadState(props.unread === 0))}>{props.unread > 0 ? <IconMailOpened class="size-4 shrink-0 stroke-muted"/> : <IconMail class="size-4 shrink-0 stroke-muted"/>}{props.unread > 0 ? "标为已读" : "标为未读"}</button>
       <button type="button" role="menuitem" class="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 hover:bg-neutral-100" onClick={() => action(props.onToggleArchived)}>{archived() ? <IconArchiveOff class="size-4 stroke-muted"/> : <IconArchive class="size-4 stroke-muted"/>}{archived() ? "移出归档" : "归档"}</button>
       <Show when={props.blockable}><div class="my-1 border-t border-black/5"/><button type="button" role="menuitem" class={`flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 ${props.blockedByMe ? "hover:bg-neutral-100" : "text-red-600 hover:bg-red-50"}`} onClick={() => action(props.onToggleBlocked)}>{props.blockedByMe ? <IconUserCheck class="size-4 stroke-muted"/> : <IconUserOff class="size-4 stroke-red-500"/>}{props.blockedByMe ? "取消屏蔽" : "屏蔽用户"}</button></Show>
     </div></Show>
+    <Show when={muteDialogOpen()}><MuteDurationDialog roomTitle={props.title} onSelect={(mutedUntil) => { setMuteDialogOpen(false); props.onSetMutedUntil(mutedUntil); }} onClose={() => setMuteDialogOpen(false)}/></Show>
   </div>;
 }

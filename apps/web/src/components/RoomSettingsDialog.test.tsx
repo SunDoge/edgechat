@@ -9,7 +9,7 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
   const root = document.createElement("div"); root.id = "root"; document.body.append(root);
   const props: Parameters<typeof RoomSettingsDialog>[0] = {
     roomTitle: "Weekend",
-    preference: { room_id: "!room:example.com", pinned_at: null, archived_at: null, muted_until: null, local_retention_days: null, updated_at: 1 },
+    preference: { room_id: "!room:example.com", pinned_at: null, archived_at: null, muted_until: null, local_retention_days: null, manually_unread: false, updated_at: 1 },
     messageExpirySeconds: null,
     messageExpirySupported: true,
     roomProfileSupported: true,

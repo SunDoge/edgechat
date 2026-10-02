@@ -74,6 +74,16 @@ export const ROOM_ATTACHMENTS_BEFORE_SQL = `SELECT a.attachment_id, m.message_id
     AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
   ORDER BY m.seq DESC, p.position DESC LIMIT $4`;
 
+export const ROOM_UNREAD_COUNTS_SQL = `SELECT r.room_id,
+       CASE WHEN COALESCE(p.manually_unread,FALSE) THEN GREATEST(1,count(m.event_id) FILTER (WHERE m.seq > COALESCE(s.last_read_seq, 0) AND m.sender <> $1 AND m.deleted_at IS NULL)::int)
+            ELSE count(m.event_id) FILTER (WHERE m.seq > COALESCE(s.last_read_seq, 0) AND m.sender <> $1 AND m.deleted_at IS NULL)::int END AS unread_count,
+       COALESCE(s.last_read_seq, 0) AS last_read_seq
+  FROM rooms r
+  LEFT JOIN room_read_state s ON s.room_id = r.room_id
+  LEFT JOIN room_preferences p ON p.room_id = r.room_id
+  LEFT JOIN messages m ON m.room_id = r.room_id AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
+  GROUP BY r.room_id, s.last_read_seq, p.manually_unread`;
+
 export const APPLY_ROOM_PROFILE_SQL = `INSERT INTO room_profiles (room_id,event_id,event_seq,name,avatar,updated_by,updated_at)
   VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
   ON CONFLICT (room_id) DO UPDATE SET event_id = EXCLUDED.event_id, event_seq = EXCLUDED.event_seq,
@@ -121,7 +131,7 @@ export type LocalReactionSummary = { message_id: string; reaction: string; count
 export type LocalReadReceipt = { room_id: RoomId; user_id: string; last_read_seq: number; read_at: number };
 export type LocalDeliveryReceipt = { room_id: RoomId; user_id: string; last_delivered_seq: number; delivered_at: number };
 export type RoomUnreadCount = { room_id: RoomId; unread_count: number; last_read_seq: number };
-export type LocalRoomPreference = { room_id: RoomId; pinned_at: number | null; archived_at: number | null; muted_until: number | null; local_retention_days: LocalRetentionDays | null; updated_at: number };
+export type LocalRoomPreference = { room_id: RoomId; pinned_at: number | null; archived_at: number | null; muted_until: number | null; local_retention_days: LocalRetentionDays | null; manually_unread: boolean; updated_at: number };
 export type LocalMessageExpiryPolicy = { room_id: RoomId; event_id: string; effective_after_seq: number; expires_in_seconds: MessageExpirySeconds | null; updated_by: string; updated_at: number };
 export type LocalRoomProfile = { room_id: RoomId; event_id: string; event_seq: number; name: string; avatar: RoomProfileAvatar | null; updated_by: string; updated_at: number };
 export type LocalComposerDraft = { room_id: RoomId; text_content: string; mode: "message" | "reply" | "quote" | "edit"; target_message_id: string | null; quote_text: string | null; updated_at: number };
@@ -662,6 +672,15 @@ export class LocalDatabase {
     return Number(row?.seq ?? 0);
   }
 
+  async latestIncomingVisibleMessageSeq(roomId: RoomId, currentUserId: string): Promise<number> {
+    const [row] = await this.query<{ seq: number | string | null }>(
+      `SELECT MAX(seq) AS seq FROM messages m WHERE room_id = $1 AND sender <> $2 AND deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)`,
+      [roomId, currentUserId],
+    );
+    return Number(row?.seq ?? 0);
+  }
+
   async markRoomRead(roomId: RoomId, upToSeq: number): Promise<void> {
     if (!Number.isSafeInteger(upToSeq) || upToSeq < 0) throw new Error("Invalid read sequence");
     await this.query(
@@ -669,6 +688,19 @@ export class LocalDatabase {
        VALUES ($1,$2,0,$3)
        ON CONFLICT (room_id) DO UPDATE SET last_read_seq = GREATEST(room_read_state.last_read_seq, EXCLUDED.last_read_seq), updated_at = EXCLUDED.updated_at`,
       [roomId, upToSeq, Date.now()],
+    );
+    await this.query(
+      `INSERT INTO room_preferences (room_id,manually_unread,updated_at) VALUES ($1,FALSE,$2)
+       ON CONFLICT (room_id) DO UPDATE SET manually_unread = FALSE, updated_at = GREATEST(room_preferences.updated_at, EXCLUDED.updated_at)`,
+      [roomId, Date.now()],
+    );
+  }
+
+  async setRoomMarkedUnread(roomId: RoomId, marked: boolean): Promise<void> {
+    await this.query(
+      `INSERT INTO room_preferences (room_id,manually_unread,updated_at) VALUES ($1,$2,$3)
+       ON CONFLICT (room_id) DO UPDATE SET manually_unread = EXCLUDED.manually_unread, updated_at = EXCLUDED.updated_at`,
+      [roomId, marked, Date.now()],
     );
   }
 
@@ -741,16 +773,7 @@ export class LocalDatabase {
   }
 
   async unreadCounts(currentUserId: string): Promise<RoomUnreadCount[]> {
-    return this.query<RoomUnreadCount>(
-      `SELECT r.room_id,
-              count(m.event_id) FILTER (WHERE m.seq > COALESCE(s.last_read_seq, 0) AND m.sender <> $1 AND m.deleted_at IS NULL)::int AS unread_count,
-              COALESCE(s.last_read_seq, 0) AS last_read_seq
-       FROM rooms r
-       LEFT JOIN room_read_state s ON s.room_id = r.room_id
-       LEFT JOIN messages m ON m.room_id = r.room_id AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
-       GROUP BY r.room_id, s.last_read_seq`,
-      [currentUserId],
-    );
+    return this.query<RoomUnreadCount>(ROOM_UNREAD_COUNTS_SQL, [currentUserId]);
   }
 
   async readState(roomId: RoomId): Promise<{ last_read_seq: number; last_receipt_sent_seq: number }> {
@@ -762,7 +785,7 @@ export class LocalDatabase {
   }
 
   async roomPreferences(): Promise<LocalRoomPreference[]> {
-    return this.query<LocalRoomPreference>("SELECT room_id, pinned_at, archived_at, muted_until, local_retention_days, updated_at FROM room_preferences");
+    return this.query<LocalRoomPreference>("SELECT room_id, pinned_at, archived_at, muted_until, local_retention_days, manually_unread, updated_at FROM room_preferences");
   }
 
   async linkPreviewsEnabled(): Promise<boolean> {
@@ -873,15 +896,15 @@ export class LocalDatabase {
   }
 
   async roomPreference(roomId: RoomId): Promise<LocalRoomPreference> {
-    const [row] = await this.query<LocalRoomPreference>("SELECT room_id, pinned_at, archived_at, muted_until, local_retention_days, updated_at FROM room_preferences WHERE room_id = $1", [roomId]);
-    return row ?? { room_id: roomId, pinned_at: null, archived_at: null, muted_until: null, local_retention_days: null, updated_at: 0 };
+    const [row] = await this.query<LocalRoomPreference>("SELECT room_id, pinned_at, archived_at, muted_until, local_retention_days, manually_unread, updated_at FROM room_preferences WHERE room_id = $1", [roomId]);
+    return row ?? { room_id: roomId, pinned_at: null, archived_at: null, muted_until: null, local_retention_days: null, manually_unread: false, updated_at: 0 };
   }
 
   async saveRoomPreference(preference: LocalRoomPreference): Promise<void> {
     await this.query(
-      `INSERT INTO room_preferences (room_id, pinned_at, archived_at, muted_until, local_retention_days, updated_at) VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (room_id) DO UPDATE SET pinned_at = EXCLUDED.pinned_at, archived_at = EXCLUDED.archived_at, muted_until = EXCLUDED.muted_until, local_retention_days = EXCLUDED.local_retention_days, updated_at = EXCLUDED.updated_at`,
-      [preference.room_id, preference.pinned_at, preference.archived_at, preference.muted_until, preference.local_retention_days, preference.updated_at],
+      `INSERT INTO room_preferences (room_id, pinned_at, archived_at, muted_until, local_retention_days, manually_unread, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (room_id) DO UPDATE SET pinned_at = EXCLUDED.pinned_at, archived_at = EXCLUDED.archived_at, muted_until = EXCLUDED.muted_until, local_retention_days = EXCLUDED.local_retention_days, manually_unread = EXCLUDED.manually_unread, updated_at = EXCLUDED.updated_at`,
+      [preference.room_id, preference.pinned_at, preference.archived_at, preference.muted_until, preference.local_retention_days, preference.manually_unread, preference.updated_at],
     );
   }
 

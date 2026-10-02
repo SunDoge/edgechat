@@ -2,10 +2,10 @@ import type { LocalRoomPreference } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
 
 export const MUTE_FOREVER = Number.MAX_SAFE_INTEGER;
-export type RoomPreferenceAction = "pin" | "mute" | "archive";
+export type RoomPreferenceAction = "pin" | "archive";
 
 export function defaultRoomPreference(roomId: RoomId): LocalRoomPreference {
-  return { room_id: roomId, pinned_at: null, archived_at: null, muted_until: null, local_retention_days: null, updated_at: 0 };
+  return { room_id: roomId, pinned_at: null, archived_at: null, muted_until: null, local_retention_days: null, manually_unread: false, updated_at: 0 };
 }
 
 export function applyRoomPreferenceAction(current: LocalRoomPreference, action: RoomPreferenceAction, now: number): LocalRoomPreference {
@@ -15,11 +15,12 @@ export function applyRoomPreferenceAction(current: LocalRoomPreference, action: 
     next.archived_at = current.archived_at === null ? now : null;
     if (next.archived_at !== null) next.pinned_at = null;
   }
-  if (action === "mute") {
-    const muted = current.muted_until !== null && Number(current.muted_until) > now;
-    next.muted_until = muted ? null : MUTE_FOREVER;
-  }
   return next;
+}
+
+export function applyRoomMute(current: LocalRoomPreference, mutedUntil: number | null, now: number): LocalRoomPreference {
+  const normalized = mutedUntil !== null && Number.isSafeInteger(mutedUntil) && mutedUntil > now ? mutedUntil : null;
+  return { ...current, muted_until: normalized, updated_at: now };
 }
 
 export function organizedRooms<T extends { room_id: RoomId }>(rooms: T[], preferences: Record<string, LocalRoomPreference>, archived: boolean): T[] {

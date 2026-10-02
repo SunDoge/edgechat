@@ -35,7 +35,7 @@ import { avatarColor, initials, memberName, roomTitle, userName } from "./presen
 import { attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, messageAttachments, messageContacts, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot, readImageDimensions, type AttachmentMetadata, type ContactIdentity, type MessagePayload } from "./media";
 import { LocalImageSemanticSearch } from "./semantic-search";
 import { replenishMlsKeyPackages } from "./key-package-replenishment";
-import { applyRoomPreferenceAction, defaultRoomPreference, organizedRooms, type RoomPreferenceAction } from "./room-preferences";
+import { applyRoomMute, applyRoomPreferenceAction, defaultRoomPreference, organizedRooms, type RoomPreferenceAction } from "./room-preferences";
 import { createPortableBackupBlob, readPortableBackup, writePortableBackup } from "./portable-backup";
 import { canCreateMemoryPortableBackup, clearPortableBackupRestoreStaging, clearPortableBackupStaging, isPortableBackupStorageError, stagePortableBackup, stagePortableBackupRestore } from "./portable-backup-staging";
 import { DeviceLinkApprovalDialog } from "./components/DeviceLinkApprovalDialog";
@@ -1495,11 +1495,38 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function updateRoomPreference(roomId: RoomId, action: RoomPreferenceAction): Promise<void> {
     const next = applyRoomPreferenceAction(preferenceFor(roomId), action, Date.now());
     try {
-      if (action === "mute") await api.setRoomNotificationPreference(roomId, next.muted_until);
       await db.saveRoomPreference(next);
       setRoomPreferences((value) => ({ ...value, [roomId]: next }));
       if (action === "archive" && next.archived_at !== null && selectedRef === roomId) setSelectedId(null);
     } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法更新对话设置"); }
+  }
+
+  async function setRoomMute(roomId: RoomId, mutedUntil: number | null): Promise<void> {
+    const now = Date.now(); const next = applyRoomMute(preferenceFor(roomId), mutedUntil, now);
+    try {
+      await api.setRoomNotificationPreference(roomId, next.muted_until);
+      await db.saveRoomPreference(next);
+      setRoomPreferences((value) => ({ ...value, [roomId]: next }));
+      setNotice(next.muted_until === null ? "已恢复这段对话的通知" : next.muted_until === Number.MAX_SAFE_INTEGER ? "已一直静音这段对话" : `已静音至 ${new Date(next.muted_until).toLocaleString("zh-CN")}`);
+    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法更新静音设置"); }
+  }
+
+  async function setRoomReadState(roomId: RoomId, markedUnread: boolean): Promise<void> {
+    const currentSession = session(); if (!currentSession) return;
+    try {
+      if (markedUnread) {
+        if (await db.latestIncomingVisibleMessageSeq(roomId, currentSession.user_id) < 1) { setNotice("这段对话还没有可标记的收到消息"); return; }
+        await db.setRoomMarkedUnread(roomId, true);
+      } else {
+        const latestSeq = await db.latestVisibleMessageSeq(roomId);
+        await db.markRoomRead(roomId, latestSeq);
+      }
+      const now = Date.now();
+      setRoomPreferences((value) => ({ ...value, [roomId]: { ...(value[roomId] ?? defaultRoomPreference(roomId)), manually_unread: markedUnread, updated_at: now } }));
+      await refreshUnreadCounts();
+      if (!markedUnread) void sendReadReceipt(roomId, true).catch(() => undefined);
+      setNotice(markedUnread ? "已标为未读" : "已标为已读");
+    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法更新未读状态"); }
   }
 
   async function updateLocalRetention(roomId: RoomId, days: LocalRetentionDays | null): Promise<number> {
@@ -1716,6 +1743,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const latestSeq = await db.latestVisibleMessageSeq(roomId);
     if (latestSeq < 1) return;
     await db.markRoomRead(roomId, latestSeq);
+    setRoomPreferences((value) => value[roomId]?.manually_unread
+      ? { ...value, [roomId]: { ...value[roomId]!, manually_unread: false, updated_at: Date.now() } }
+      : value);
     await refreshUnreadCounts();
     window.clearTimeout(readReceiptTimer);
     readReceiptTimer = window.setTimeout(() => void sendReadReceipt(roomId), 750);
@@ -1762,9 +1792,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     typingStopTimer = window.setTimeout(() => stopTyping(roomId), 4_000);
   }
 
-  async function sendReadReceipt(roomId: RoomId): Promise<void> {
+  async function sendReadReceipt(roomId: RoomId, explicit = false): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
-    if (document.visibilityState !== "visible" || selectedRef !== roomId || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)
+    if ((!explicit && (document.visibilityState !== "visible" || selectedRef !== roomId)) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)
       || rooms().find((room) => room.room_id === roomId)?.leave_status === "pending") return;
     const latestSeq = await db.latestVisibleMessageSeq(roomId);
     const [state, queuedSeq] = await Promise.all([db.readState(roomId), db.latestQueuedReadReceiptSeq(roomId)]);
@@ -2900,7 +2930,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             <div class="flex items-center justify-between px-1"><h1 class="text-xl font-semibold tracking-tight text-ink">消息</h1><IconButton label="新建对话" class="text-brand hover:bg-brand-soft" onClick={() => setNewRoom(true)}><IconPlus class="size-4 stroke-brand" stroke-width={2.2}/></IconButton></div>
             <button type="button" class="flex h-10 items-center gap-2 rounded-lg bg-neutral-100 px-3 text-left text-sm text-muted hover:bg-neutral-200" onClick={() => setSearchOpen(true)}><IconSearch class="size-4 shrink-0 stroke-muted"/><span class="min-w-0 flex-1">搜索本机消息</span><kbd class="text-xs text-neutral-400">⌘K</kbd></button>
           </div>
-          <div class="overflow-y-auto p-2"><Show when={rooms().some((room) => room.request_status !== "rejected")} fallback={<div class="grid h-full place-content-center justify-items-center px-8 text-center"><IconMessageCircle class="size-8 stroke-neutral-300"/><h2 class="mt-4 text-base font-semibold text-ink">还没有对话</h2><p class="mt-1 text-sm/5 text-muted">添加同一服务器上的用户开始聊天。</p><button type="button" class="mt-4 text-sm font-semibold text-brand" onClick={() => setNewRoom(true)}>新建对话</button></div>}><Show when={showArchived()}><button type="button" class="mb-1 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-brand hover:bg-brand-soft" onClick={() => setShowArchived(false)}><IconChevronLeft class="size-4 stroke-brand"/>返回消息</button></Show><Show when={!showArchived() && incomingRequests().length}><section class="mb-3" aria-labelledby="message-requests-heading"><div class="flex items-center justify-between px-3 py-2"><h2 id="message-requests-heading" class="text-xs font-semibold uppercase tracking-wide text-muted">消息请求</h2><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">{incomingRequests().length}</span></div><div role="list"><For each={incomingRequests()}>{(room) => <div role="listitem"><button type="button" aria-current={selectedId() === room.room_id ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)] items-center gap-3 rounded-xl px-2.5 text-left ${selectedId() === room.room_id ? "bg-amber-50" : "hover:bg-neutral-100"}`} onClick={() => setSelectedId(room.room_id)}><Avatar class="size-11" label={initials(roomTitle(room, currentSession().user_id))} color={avatarColor(room.room_id)}/><span class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{roomTitle(room, currentSession().user_id)}</strong><small class="mt-1 block truncate text-sm text-amber-700">想给你发送消息</small></span></button></div>}</For></div></section></Show><div role="list"><For each={listedRooms()}>{(room) => { const peer = () => room.kind === "direct" ? room.members.find((member) => member.user_id !== currentSession().user_id) : undefined; return <RoomListItem room={room} title={roomTitle(room, currentSession().user_id)} avatarLabel={initials(roomTitle(room, currentSession().user_id))} avatarColor={avatarColor(room.room_id)} groupAvatar={roomProfileAvatars()[room.room_id]} decryptGroupAvatar={decryptRoomProfileAvatar} preview={roomPreview(room)} selected={selectedId() === room.room_id} unread={unreadCounts()[room.room_id] ?? 0} preference={preferenceFor(room.room_id)} recoveryRequired={historyRecoveryRooms().has(room.room_id)} onOpen={() => setSelectedId(room.room_id)} onTogglePinned={() => void updateRoomPreference(room.room_id, "pin")} onToggleMuted={() => void updateRoomPreference(room.room_id, "mute")} onToggleArchived={() => void updateRoomPreference(room.room_id, "archive")} blockable={Boolean(peer())} blockedByMe={room.blocked_by_me} onToggleBlocked={() => void toggleRoomBlock(room)}/>; }}</For></div><Show when={!listedRooms().length && !incomingRequests().length}><div class="grid place-content-center justify-items-center px-8 py-12 text-center"><IconArchive class="size-7 stroke-neutral-300"/><p class="mt-3 text-sm text-muted">{showArchived() ? "没有已归档的对话" : "所有对话都已归档"}</p></div></Show><Show when={!showArchived() && archivedRoomCount() > 0}><button type="button" class="mt-2 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted hover:bg-neutral-100" onClick={() => setShowArchived(true)}><IconArchive class="size-4 stroke-muted"/><span class="flex-1 text-left">已归档</span><span class="text-xs tabular-nums text-neutral-400">{archivedRoomCount()}</span></button></Show></Show></div>
+          <div class="overflow-y-auto p-2"><Show when={rooms().some((room) => room.request_status !== "rejected")} fallback={<div class="grid h-full place-content-center justify-items-center px-8 text-center"><IconMessageCircle class="size-8 stroke-neutral-300"/><h2 class="mt-4 text-base font-semibold text-ink">还没有对话</h2><p class="mt-1 text-sm/5 text-muted">添加同一服务器上的用户开始聊天。</p><button type="button" class="mt-4 text-sm font-semibold text-brand" onClick={() => setNewRoom(true)}>新建对话</button></div>}><Show when={showArchived()}><button type="button" class="mb-1 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-brand hover:bg-brand-soft" onClick={() => setShowArchived(false)}><IconChevronLeft class="size-4 stroke-brand"/>返回消息</button></Show><Show when={!showArchived() && incomingRequests().length}><section class="mb-3" aria-labelledby="message-requests-heading"><div class="flex items-center justify-between px-3 py-2"><h2 id="message-requests-heading" class="text-xs font-semibold uppercase tracking-wide text-muted">消息请求</h2><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">{incomingRequests().length}</span></div><div role="list"><For each={incomingRequests()}>{(room) => <div role="listitem"><button type="button" aria-current={selectedId() === room.room_id ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)] items-center gap-3 rounded-xl px-2.5 text-left ${selectedId() === room.room_id ? "bg-amber-50" : "hover:bg-neutral-100"}`} onClick={() => setSelectedId(room.room_id)}><Avatar class="size-11" label={initials(roomTitle(room, currentSession().user_id))} color={avatarColor(room.room_id)}/><span class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{roomTitle(room, currentSession().user_id)}</strong><small class="mt-1 block truncate text-sm text-amber-700">想给你发送消息</small></span></button></div>}</For></div></section></Show><div role="list"><For each={listedRooms()}>{(room) => { const peer = () => room.kind === "direct" ? room.members.find((member) => member.user_id !== currentSession().user_id) : undefined; return <RoomListItem room={room} title={roomTitle(room, currentSession().user_id)} avatarLabel={initials(roomTitle(room, currentSession().user_id))} avatarColor={avatarColor(room.room_id)} groupAvatar={roomProfileAvatars()[room.room_id]} decryptGroupAvatar={decryptRoomProfileAvatar} preview={roomPreview(room)} selected={selectedId() === room.room_id} unread={unreadCounts()[room.room_id] ?? 0} preference={preferenceFor(room.room_id)} recoveryRequired={historyRecoveryRooms().has(room.room_id)} onOpen={() => setSelectedId(room.room_id)} onTogglePinned={() => void updateRoomPreference(room.room_id, "pin")} onSetMutedUntil={(mutedUntil) => void setRoomMute(room.room_id, mutedUntil)} onSetReadState={(markedUnread) => void setRoomReadState(room.room_id, markedUnread)} onToggleArchived={() => void updateRoomPreference(room.room_id, "archive")} blockable={Boolean(peer())} blockedByMe={room.blocked_by_me} onToggleBlocked={() => void toggleRoomBlock(room)}/>; }}</For></div><Show when={!listedRooms().length && !incomingRequests().length}><div class="grid place-content-center justify-items-center px-8 py-12 text-center"><IconArchive class="size-7 stroke-neutral-300"/><p class="mt-3 text-sm text-muted">{showArchived() ? "没有已归档的对话" : "所有对话都已归档"}</p></div></Show><Show when={!showArchived() && archivedRoomCount() > 0}><button type="button" class="mt-2 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted hover:bg-neutral-100" onClick={() => setShowArchived(true)}><IconArchive class="size-4 stroke-muted"/><span class="flex-1 text-left">已归档</span><span class="text-xs tabular-nums text-neutral-400">{archivedRoomCount()}</span></button></Show></Show></div>
           <footer role="status" aria-live="polite" class="flex items-center gap-2 border-t border-black/5 px-4 text-xs text-muted"><span aria-hidden="true" class={`size-1.5 rounded-full ${connectionState() === "online" ? "bg-emerald-500" : connectionState() === "syncing" ? "animate-pulse bg-amber-500" : "bg-neutral-400"}`}/>{connectionState() === "online" ? "已连接" : connectionState() === "syncing" ? "正在同步" : "离线，可查看和发送"}</footer>
         </div>
       </aside>

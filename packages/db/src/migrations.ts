@@ -29,13 +29,15 @@ export const LOCAL_SCHEMA_V3 = `CREATE TABLE room_profiles (
 )`;
 
 export const LOCAL_SCHEMA_V4 = `ALTER TABLE room_profiles ADD COLUMN avatar JSONB`;
+export const LOCAL_SCHEMA_V5 = `ALTER TABLE room_preferences ADD COLUMN manually_unread BOOLEAN NOT NULL DEFAULT FALSE`;
 
-export const LOCAL_SCHEMA_VERSION = 4;
+export const LOCAL_SCHEMA_VERSION = 5;
 export const LOCAL_SCHEMA_MIGRATIONS: readonly LocalSchemaMigration[] = Object.freeze([
   { version: 1, name: "initial_local_schema", checksum: "f1e403a6e8c19ccd6943e34523664090f1a2aec623a88ea9d1588ef1278b9a69", sql: LOCAL_SCHEMA },
   { version: 2, name: "room_membership_outbox", checksum: "c30cd87e8264841f9255936181a7ed428750d4d217f41f8633a2f93a07acdc59", sql: LOCAL_SCHEMA_V2 },
   { version: 3, name: "encrypted_room_profiles", checksum: "a966c145856ad22b2a5d4befe73d1a176fc9ddfe52738a912e3878a45dffe0ee", sql: LOCAL_SCHEMA_V3 },
   { version: 4, name: "encrypted_room_avatars", checksum: "c062245235620d3a3e91df9997f73322e7c90acaf65b1fbbe00a189bbd67c896", sql: LOCAL_SCHEMA_V4 },
+  { version: 5, name: "manual_unread_reminders", checksum: "1429804b589dae5923898b3d694895ab93bf0f47b4dca702f4961bc1681fecc2", sql: LOCAL_SCHEMA_V5 },
 ]);
 
 const LOCAL_SCHEMA_META = `CREATE TABLE IF NOT EXISTS local_schema_meta (
