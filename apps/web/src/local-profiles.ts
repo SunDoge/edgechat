@@ -11,7 +11,12 @@ export type LocalProfile = {
   device_id: string | null;
   created_at: number;
   last_used_at: number;
+  last_backup_at: number | null;
+  last_backup_delivery: LocalBackupDelivery | null;
 };
+
+export type LocalBackupDelivery = "confirmed_file" | "download_started";
+export type LocalBackupExport = { created_at: number; delivery: LocalBackupDelivery };
 
 type LocalProfileRecord = LocalProfile & { access_token: string | null };
 type ProfileSetting = { id: string; value: string };
@@ -35,13 +40,17 @@ export function assertLocalProfileId(profileId: string): string {
 
 function publicProfile(record: LocalProfileRecord): LocalProfile {
   const { access_token: _token, ...profile } = record;
-  return profile;
+  return {
+    ...profile,
+    last_backup_at: profile.last_backup_at ?? null,
+    last_backup_delivery: profile.last_backup_delivery ?? null,
+  };
 }
 
 function pendingRecord(now = Date.now()): LocalProfileRecord {
   return {
     profile_id: crypto.randomUUID(), user_id: null, display_name: "新身份", device_id: null,
-    access_token: null, created_at: now, last_used_at: now,
+    access_token: null, created_at: now, last_used_at: now, last_backup_at: null, last_backup_delivery: null,
   };
 }
 
@@ -111,6 +120,21 @@ export async function localProfileToken(profileId: string): Promise<string | nul
 
 export async function clearLocalProfileToken(profileId: string): Promise<void> {
   await database.profiles.update(assertLocalProfileId(profileId), { access_token: null });
+}
+
+export function localBackupExport(profile: LocalProfile): LocalBackupExport | null {
+  if (!Number.isSafeInteger(profile.last_backup_at) || profile.last_backup_at! <= 0 || !profile.last_backup_delivery) return null;
+  return { created_at: profile.last_backup_at!, delivery: profile.last_backup_delivery };
+}
+
+export async function recordLocalBackupExport(profileId: string, value: LocalBackupExport): Promise<LocalBackupExport> {
+  const id = assertLocalProfileId(profileId);
+  if (!Number.isSafeInteger(value.created_at) || value.created_at <= 0 || !["confirmed_file", "download_started"].includes(value.delivery)) {
+    throw new Error("Invalid local backup record");
+  }
+  const updated = await database.profiles.update(id, { last_backup_at: value.created_at, last_backup_delivery: value.delivery });
+  if (updated !== 1) throw new Error("本机身份不存在");
+  return value;
 }
 
 export async function removeLocalProfile(profileId: string): Promise<LocalProfile | null> {

@@ -7,7 +7,9 @@ import {
   createLocalProfile,
   ensureActiveLocalProfile,
   listLocalProfiles,
+  localBackupExport,
   localProfileToken,
+  recordLocalBackupExport,
   removeLocalProfile,
 } from "./local-profiles";
 
@@ -39,6 +41,16 @@ describe("local profile registry", () => {
     await bindLocalProfile(profile.profile_id, { user_id: "@alice:example.com", display_name: "Alice", device_id: "phone", access_token: "first" });
     await expect(bindLocalProfile(profile.profile_id, { user_id: "@bob:example.com", display_name: "Bob", device_id: "phone", access_token: "second" })).rejects.toThrow("另一个账户");
     await expect(bindLocalProfile(profile.profile_id, { user_id: "@alice:example.com", display_name: "Alice", device_id: "laptop", access_token: "second" })).rejects.toThrow("另一个账户");
+  });
+
+  it("keeps backup health metadata isolated to the local profile", async () => {
+    const first = await ensureActiveLocalProfile();
+    const second = await createLocalProfile();
+    expect(localBackupExport(first)).toBeNull();
+    await recordLocalBackupExport(first.profile_id, { created_at: 123_456, delivery: "download_started" });
+    const profiles = await listLocalProfiles();
+    expect(localBackupExport(profiles.find((profile) => profile.profile_id === first.profile_id)!)).toEqual({ created_at: 123_456, delivery: "download_started" });
+    expect(localBackupExport(profiles.find((profile) => profile.profile_id === second.profile_id)!)).toBeNull();
   });
 
   it("selects another profile after removing the active one", async () => {
