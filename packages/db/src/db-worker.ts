@@ -4,6 +4,7 @@ import { LOCAL_PREPARE_LINKED_DEVICE_HISTORY } from "./schema";
 import { migrateLocalSchema } from "./migrations";
 import { purgeRoomBefore, setRoomRetention, type LocalRetentionDays } from "./retention";
 import { purgeExpiredMessages } from "./expiry";
+import { clearRoomHistory } from "./local-history";
 
 type ProfileRequest = { id: number; profileId: string };
 type DbRequest = ProfileRequest & (
@@ -12,6 +13,7 @@ type DbRequest = ProfileRequest & (
   | { kind: "purge-room"; roomId: string; cutoff: number }
   | { kind: "set-room-retention"; roomId: string; days: LocalRetentionDays | null; now: number }
   | { kind: "purge-expired-messages"; now: number }
+  | { kind: "clear-room-history"; roomId: string; throughSeq: number; now: number }
   | { kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string }
 );
 type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
@@ -143,6 +145,11 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
     if (request.kind === "purge-expired-messages") {
       const deleted = await purgeExpiredMessages(db, request.now);
       self.postMessage({ id: request.id, rows: [{ deleted }], storage } satisfies DbResponse);
+      return;
+    }
+    if (request.kind === "clear-room-history") {
+      const result = await clearRoomHistory(db, request.roomId, request.throughSeq, request.now);
+      self.postMessage({ id: request.id, rows: [result], storage } satisfies DbResponse);
       return;
     }
     if (!("sql" in request)) throw new Error("Invalid database request");

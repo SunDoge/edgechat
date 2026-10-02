@@ -35,6 +35,8 @@ export function RoomSettingsDialog(props: {
   onToggleMember: (userId: string, hidden: boolean) => Promise<void>;
   onSaveRoomProfile: (name: string, avatar: RoomProfileAvatarChange) => Promise<void>;
   onSaveRetention: (days: LocalRetentionDays | null) => Promise<number>;
+  clearHistoryBusy: boolean;
+  onClearHistory: () => Promise<void>;
   onSaveMessageExpiry: (seconds: MessageExpirySeconds | null) => Promise<void>;
   onRequestLeave: () => Promise<void>;
   onCancelLeave: () => Promise<void>;
@@ -65,7 +67,7 @@ export function RoomSettingsDialog(props: {
   const changed = () => selectedDays() !== props.preference.local_retention_days;
   const selectedExpiry = (): MessageExpirySeconds | null => expiryValue() === "off" ? null : Number(expiryValue()) as MessageExpirySeconds;
   const expiryChanged = () => selectedExpiry() !== props.messageExpirySeconds;
-  const anyBusy = () => busy() || expiryBusy() || roomNameBusy() || avatarEncoding() || leaveBusy() || props.exportBusy || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId) || Boolean(props.ownershipBusyUserId);
+  const anyBusy = () => busy() || expiryBusy() || roomNameBusy() || avatarEncoding() || leaveBusy() || props.exportBusy || props.clearHistoryBusy || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId) || Boolean(props.ownershipBusyUserId);
   const hasDisplayedAvatar = () => Boolean(avatarPreview() || (props.roomAvatar && avatarChange().kind !== "remove"));
 
   onCleanup(() => { const url = avatarPreview(); if (url) URL.revokeObjectURL(url); });
@@ -99,6 +101,13 @@ export function RoomSettingsDialog(props: {
     try { await props.onSaveMessageExpiry(selectedExpiry()); props.onClose(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "无法更新自动消失设置"); }
     finally { setExpiryBusy(false); }
+  }
+
+  async function clearHistory() {
+    if (anyBusy() || !confirm(`清空“${props.roomTitle}”在这台设备上的聊天记录？\n\n消息文字、搜索索引和本机媒体记录会被移除，无法撤销。云端密文、其他设备副本、草稿和待发送消息不会删除；之后收到的新消息仍会正常保留。`)) return;
+    setError("");
+    try { await props.onClearHistory(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "无法清空本机聊天记录"); }
   }
 
   async function toggleMember(userId: string, hidden: boolean) {
@@ -184,6 +193,7 @@ export function RoomSettingsDialog(props: {
       </div>
       <Show when={selectedDays() !== null}><div class="rounded-lg bg-amber-50 px-3 py-3 text-sm/6 text-amber-900">保存后会立即清理已经到期的本机副本。它不会删除其他人的副本，也不保证旧消息以后还能恢复。</div></Show>
       <div class="flex justify-end gap-2"><button type="button" disabled={anyBusy()} class="h-10 rounded-lg px-4 text-sm font-medium text-ink hover:bg-neutral-100 disabled:opacity-50" onClick={props.onClose}>取消</button><button type="submit" disabled={!changed() || anyBusy()} class="h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:bg-brand-strong disabled:bg-neutral-300">{busy() ? "正在清理…" : selectedDays() === null ? "保存" : "保存并清理"}</button></div>
+      <div class="border-t border-black/5 pt-4"><h3 class="text-sm font-medium text-ink">清空这台设备上的记录</h3><p class="mt-1 text-xs/5 text-muted">移除当前已保存的消息和搜索内容，不影响云端或其他设备；以后收到的新消息仍会保留。</p><button type="button" disabled={anyBusy()} class="mt-3 min-h-10 rounded-lg px-3 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50" onClick={() => void clearHistory()}>{props.clearHistoryBusy ? "正在清空…" : "清空本机聊天记录"}</button></div>
     </form>
     <form class="order-3 grid gap-4 p-5" onSubmit={submitExpiry}>
       <div>

@@ -9,7 +9,7 @@ describe("versioned local PGlite migrations", () => {
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await expect(migrateLocalSchema(db)).resolves.toBe(LOCAL_SCHEMA_VERSION);
     expect((await db.query("SELECT version,migration_name FROM local_schema_meta WHERE id = 1")).rows)
-      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "manual_unread_reminders" }]);
+      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "local_history_floor" }]);
     expect((await db.query("SELECT user_id FROM users")).rows).toEqual([{ user_id: "@alice:example.com" }]);
     await db.close();
   });
@@ -37,6 +37,13 @@ describe("versioned local PGlite migrations", () => {
     const db = new PGlite(); await migrateLocalSchema(db);
     await db.query("INSERT INTO room_preferences (room_id,manually_unread,updated_at) VALUES ('!room:example.com',TRUE,1)");
     expect((await db.query("SELECT manually_unread FROM room_preferences")).rows).toEqual([{ manually_unread: true }]);
+    await db.close();
+  });
+
+  it("adds a monotonic device-local history visibility floor", async () => {
+    const db = new PGlite(); await migrateLocalSchema(db);
+    await db.query("INSERT INTO room_local_history_floor VALUES ('!room:example.com',42,100)");
+    expect((await db.query("SELECT cleared_through_seq,cleared_at FROM room_local_history_floor")).rows).toEqual([{ cleared_through_seq: 42, cleared_at: 100 }]);
     await db.close();
   });
 

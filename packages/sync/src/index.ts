@@ -1061,8 +1061,13 @@ export class ProgressiveHistoryIndexer {
   }
 
   async indexSegment(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences?: number[]): Promise<number> {
+    const floor = await this.db.localHistoryFloor(roomId);
+    if (segment.end_seq <= floor) return 0;
+    const wanted = sequences?.filter((sequence) => sequence > floor)
+      ?? Array.from({ length: segment.end_seq - Math.max(segment.start_seq, floor + 1) + 1 }, (_, index) => Math.max(segment.start_seq, floor + 1) + index);
+    if (!wanted.length) return 0;
     let inserted = 0;
-    for (const event of await this.reader.read(roomId, segment, sequences)) {
+    for (const event of await this.reader.read(roomId, segment, wanted)) {
         if (await this.db.hasMessage(event.event_id)) continue;
         const result = await this.processEvent(event);
         if (result) { await this.db.saveDecryptedEvent(event, result.plaintext, result.payload); inserted++; }

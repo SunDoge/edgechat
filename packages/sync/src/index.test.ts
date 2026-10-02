@@ -681,6 +681,7 @@ describe("ProgressiveHistoryIndexer", () => {
     }) } as unknown as ApiClient;
     const saved: number[] = [];
     const db = {
+      localHistoryFloor: vi.fn(async () => 0),
       hasMessage: vi.fn(async () => false),
       markProcessed: vi.fn(async () => undefined),
       saveDecryptedEvent: vi.fn(async (event: RoomEvent) => { saved.push(event.seq); }),
@@ -693,6 +694,15 @@ describe("ProgressiveHistoryIndexer", () => {
     expect(resolveKey).toHaveBeenCalledOnce();
     expect(ranges[0]).toEqual([0, 40]);
     expect(ranges[1][1]).toBeGreaterThan(envelope.length);
+  });
+
+  it("does not read or re-project history at or below the device-local clear floor", async () => {
+    const roomId = "!archive-floor:example.com" as const;
+    const api = { segmentRange: vi.fn() } as unknown as ApiClient;
+    const db = { localHistoryFloor: vi.fn(async () => 4), hasMessage: vi.fn(), markProcessed: vi.fn(), saveDecryptedEvent: vi.fn() } as unknown as LocalDatabase;
+    const indexer = new ProgressiveHistoryIndexer(api, db, vi.fn(), vi.fn());
+    await expect(indexer.indexSegment(roomId, { segment_id: "cleared-segment", start_seq: 1, end_seq: 4, byte_size: 100 })).resolves.toBe(0);
+    expect(api.segmentRange).not.toHaveBeenCalled(); expect(db.hasMessage).not.toHaveBeenCalled();
   });
 });
 

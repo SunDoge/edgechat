@@ -2,6 +2,7 @@ import { isMessageExpiryPolicyPayload, isNamespacedUserId, isRoomProfilePayload,
 import { LOCAL_CLEAR_ACCOUNT_DATA } from "./schema";
 import { isLocalRetentionDays, type LocalRetentionDays } from "./retention";
 import { messageExpiryAt } from "./expiry";
+import type { LocalHistoryClearResult } from "./local-history";
 
 type Pending = { resolve: (value: DbResponse) => void; reject: (error: Error) => void };
 type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
@@ -491,6 +492,7 @@ export class LocalDatabase {
 
   async saveDecryptedEvent(event: RoomEvent, plaintext: string, payload: Record<string, unknown>): Promise<void> {
     await this.markProcessed(event);
+    if (event.seq <= await this.localHistoryFloor(event.room_id)) return;
     const messageId = typeof payload.message_id === "string" && payload.message_id ? payload.message_id : event.event_id;
     const [expired] = await this.query<{ present: boolean }>("SELECT EXISTS(SELECT 1 FROM expired_messages WHERE message_id = $1) AS present", [messageId]);
     if (expired?.present) return;
@@ -583,6 +585,18 @@ export class LocalDatabase {
     return this.query<LocalMessage>(MESSAGES_AFTER_SQL, [roomId, afterSeq, safeLimit]);
   }
 
+  async localHistoryFloor(roomId: RoomId): Promise<number> {
+    const [row] = await this.query<{ cleared_through_seq: number | string }>("SELECT cleared_through_seq FROM room_local_history_floor WHERE room_id = $1", [roomId]);
+    return Number(row?.cleared_through_seq ?? 0);
+  }
+
+  async clearRoomHistory(roomId: RoomId, throughSeq: number, now = Date.now()): Promise<LocalHistoryClearResult> {
+    const response = await this.request({ kind: "clear-room-history", roomId, throughSeq, now });
+    const result = response.rows?.[0] as LocalHistoryClearResult | undefined;
+    if (!result || !Array.isArray(result.attachment_ids) || !Array.isArray(result.segment_ids)) throw new Error("Local history clear result is invalid");
+    return { ...result, deleted: Number(result.deleted), cleared_through_seq: Number(result.cleared_through_seq) };
+  }
+
   async roomAttachments(roomId: RoomId, cursor: LocalRoomAttachmentCursor | null = null, limit = 48): Promise<LocalRoomAttachmentPage> {
     const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
     const rows = await this.query<LocalRoomAttachmentRow>(
@@ -623,6 +637,7 @@ export class LocalDatabase {
 
   async applyMessageEdit(event: RoomEvent, payload: MessageEditPayload): Promise<void> {
     await this.markProcessed(event);
+    if (event.seq <= await this.localHistoryFloor(event.room_id)) return;
     if ((await this.query<{ present: boolean }>("SELECT EXISTS(SELECT 1 FROM expired_messages WHERE message_id = $1) AS present", [payload.target.message_id]))[0]?.present) return;
     await this.query(
       `INSERT INTO message_edits (edit_event_id, target_message_id, room_id, edit_seq, sender, text_content, edited_at)
@@ -634,6 +649,7 @@ export class LocalDatabase {
 
   async applyMessageReaction(event: RoomEvent, payload: MessageReactionPayload): Promise<void> {
     await this.markProcessed(event);
+    if (event.seq <= await this.localHistoryFloor(event.room_id)) return;
     if ((await this.query<{ present: boolean }>("SELECT EXISTS(SELECT 1 FROM expired_messages WHERE message_id = $1) AS present", [payload.target.message_id]))[0]?.present) return;
     await this.query(
       `INSERT INTO message_reactions (reaction_event_id, target_message_id, room_id, reaction_seq, sender, reaction, updated_at)
@@ -1040,6 +1056,7 @@ export class LocalDatabase {
 
   async applyMessageTombstone(event: RoomEvent, targetMessageId: MessageId): Promise<void> {
     await this.markProcessed(event);
+    if (event.seq <= await this.localHistoryFloor(event.room_id)) return;
     const [target] = await this.query<{ sender: string }>("SELECT sender FROM messages WHERE message_id = $1 AND room_id = $2", [targetMessageId, event.room_id]);
     if (target && target.sender !== event.sender) return;
     await this.query(
@@ -1340,6 +1357,7 @@ export class LocalDatabase {
   }
 
   async saveArchiveKey(roomId: RoomId, segmentId: string, key: Uint8Array<ArrayBuffer>, startSeq: number, endSeq: number): Promise<void> {
+    if (endSeq <= await this.localHistoryFloor(roomId)) return;
     await this.query(
       `INSERT INTO archive_keys (segment_id, room_id, segment_key, start_seq, end_seq, received_at) VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (segment_id) DO UPDATE SET segment_key = EXCLUDED.segment_key, start_seq = EXCLUDED.start_seq, end_seq = EXCLUDED.end_seq, received_at = EXCLUDED.received_at`,
@@ -1361,6 +1379,7 @@ export class LocalDatabase {
   }
 
   async saveArchiveSegmentMetadata(value: LocalArchiveSegmentMetadata): Promise<void> {
+    if (value.end_seq <= await this.localHistoryFloor(value.room_id)) return;
     await this.query(
       `INSERT INTO archive_segment_metadata (segment_id, room_id, start_seq, end_seq, byte_size, header_bytes, envelope_index_bytes, verified_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -1469,6 +1488,7 @@ function floatVector(bytes: Uint8Array): Float32Array {
 }
 
 export { LOCAL_RETENTION_DAY_OPTIONS, type LocalRetentionDays } from "./retention";
+export type { LocalHistoryClearResult } from "./local-history";
 
 export function rankImageEmbeddings(rows: ImageEmbeddingRow[], query: Float32Array, limit = 30): ImageSearchResult[] {
   const normalizedQuery = normalizeVector(query);

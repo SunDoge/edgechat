@@ -33,6 +33,8 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     onToggleMember: vi.fn(async () => undefined),
     onSaveRoomProfile: vi.fn(async () => undefined),
     onSaveRetention: vi.fn(async () => 0),
+    clearHistoryBusy: false,
+    onClearHistory: vi.fn(async () => undefined),
     onSaveMessageExpiry: vi.fn(async () => undefined),
     onRequestLeave: vi.fn(async () => undefined),
     onCancelLeave: vi.fn(async () => undefined),
@@ -67,6 +69,13 @@ describe("RoomSettingsDialog group membership", () => {
     const cancel = [...document.querySelectorAll("button")].find((button) => button.textContent === "取消导出") as HTMLButtonElement;
     expect(cancel.disabled).toBe(false); cancel.click();
     expect(props.onCancelExport).toHaveBeenCalledOnce(); expect(props.onExportConversation).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit confirmation before clearing only this device's history", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true); const props = mount();
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "清空本机聊天记录")?.click();
+    await vi.waitFor(() => expect(props.onClearHistory).toHaveBeenCalledOnce());
+    expect(confirm.mock.calls[0]?.[0]).toContain("云端密文、其他设备副本、草稿和待发送消息不会删除");
   });
 
   it("lets an owner search only non-members and add one", async () => {
