@@ -18,7 +18,7 @@ import {
 } from "@tabler/icons-solidjs";
 import { LocalDatabase, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
-import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
 import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
@@ -1339,7 +1339,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (share) void deleteStagedShare(share.id).catch(() => setNotice("共享内容已关闭；残留的本机暂存会在下次分享时清理"));
   }
 
-  async function forwardMessage(source: LocalMessage, targetRoomId: RoomId, successNotice?: string | false): Promise<void> {
+  async function forwardMessage(source: LocalMessage, targetRoomId: RoomId, successNotice?: string | false, savedFrom?: MessageReference): Promise<void> {
     const targetRoom = rooms().find((room) => room.room_id === targetRoomId);
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!targetRoom || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
@@ -1354,7 +1354,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const domain = currentSession.server_name ?? location.hostname;
     const eventId = `$${crypto.randomUUID()}:${domain}` as EventId;
     const attachmentAliases = attachments.map(() => encodeBase64Url(crypto.getRandomValues(new Uint8Array(18))));
-    const payload = createForwardPayload(eventId as MessageId, sourcePayload, attachmentAliases);
+    const payload = createForwardPayload(eventId as MessageId, sourcePayload, attachmentAliases, savedFrom);
     const createdAt = Date.now();
     await mutateMls(async () => {
       const ciphertext = encodeBase64Url(currentMls.encryptMessage(targetRoomId, encoder.encode(JSON.stringify(payload))));
@@ -1483,7 +1483,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setSavingMessageId(source.message_id);
     try {
       const saved = await ensureSavedRoom();
-      await forwardMessage(source, saved.room_id, "已保存到“已保存消息”");
+      await forwardMessage(source, saved.room_id, "已保存到“已保存消息”", {
+        kind: "message", message_id: source.message_id as MessageId, room_id: source.room_id,
+      });
     } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法保存消息"); }
     finally { setSavingMessageId(null); }
   }
@@ -2010,6 +2012,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         setNotice(cause instanceof Error ? cause.message : "无法打开搜索结果");
       });
     }, 0);
+  }
+
+  function openMessageReference(reference: MessageReference) {
+    if (!rooms().some((room) => room.room_id === reference.room_id)) {
+      setNotice("原对话已不可用，保存的副本仍会保留"); return;
+    }
+    openSearchResult(reference.room_id, reference.message_id);
   }
 
   async function returnToLatestMessages(): Promise<void> {
@@ -2903,13 +2912,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           </>}
           render={(index) => {
             const entry = timelineEntries()[index]!;
-            if (entry.kind === "pending") return <PendingMessageBubble message={entry.message} onRetry={() => void retryMessage(entry.message.event_id)}/>;
+            if (entry.kind === "pending") return <PendingMessageBubble message={entry.message} onRetry={() => void retryMessage(entry.message.event_id)} openMessageReference={openMessageReference}/>;
             const message = entry.message;
             const payload = () => normalizeMessagePayload((message.payload ?? {}) as MessagePayload, message.event_id);
             const target = () => payload().relation?.target.message_id ? messages().find((candidate) => candidate.message_id === payload().relation?.target.message_id) : undefined;
             const readBy = () => readReceipts().filter((receipt) => receipt.user_id !== currentSession().user_id && Number(receipt.last_read_seq) >= Number(message.seq)).length;
             const deliveredBy = () => deliveryReceipts().filter((receipt) => receipt.user_id !== currentSession().user_id && Number(receipt.last_delivered_seq) >= Number(message.seq)).length;
-            return <MessageBubble message={message} currentUserId={currentSession().user_id} group={room().kind === "group" && room().purpose === "chat"} displayName={(userId) => memberName(room(), userId)} linkPreviews={linkPreviews()} retracting={pendingDeleteTargets().has(message.event_id)} readBy={readBy()} deliveredBy={deliveredBy()} relationPreview={target() ? { sender: target()!.sender, text: target()!.plaintext, deleted: Boolean(target()!.deleted_at) } : undefined} reactions={reactions().filter((reaction) => reaction.message_id === message.message_id)} downloadAttachment={(attachment) => void downloadAttachment(attachment)} decryptAttachment={decryptAttachment} indexImage={indexImage} retract={(item) => void retractMessage(item)} reply={beginReply} quote={beginQuote} forward={(item) => setForwardingMessages([item])} save={(item) => void saveMessage(item)} canSave={room().purpose !== "saved"} saving={savingMessageId() === message.message_id} selecting={selectedMessageIds().size > 0} selected={selectedMessageIds().has(message.message_id)} select={toggleMessageSelection} edit={beginEdit} react={(item, reaction) => void reactToMessage(item, reaction)} jumpToMessage={jumpToMessage} openContact={openSharedContact}/>;
+            return <MessageBubble message={message} currentUserId={currentSession().user_id} group={room().kind === "group" && room().purpose === "chat"} displayName={(userId) => memberName(room(), userId)} linkPreviews={linkPreviews()} retracting={pendingDeleteTargets().has(message.event_id)} readBy={readBy()} deliveredBy={deliveredBy()} relationPreview={target() ? { sender: target()!.sender, text: target()!.plaintext, deleted: Boolean(target()!.deleted_at) } : undefined} reactions={reactions().filter((reaction) => reaction.message_id === message.message_id)} downloadAttachment={(attachment) => void downloadAttachment(attachment)} decryptAttachment={decryptAttachment} indexImage={indexImage} retract={(item) => void retractMessage(item)} reply={beginReply} quote={beginQuote} forward={(item) => setForwardingMessages([item])} save={(item) => void saveMessage(item)} canSave={room().purpose !== "saved"} saving={savingMessageId() === message.message_id} selecting={selectedMessageIds().size > 0} selected={selectedMessageIds().has(message.message_id)} select={toggleMessageSelection} edit={beginEdit} react={(item, reaction) => void reactToMessage(item, reaction)} jumpToMessage={jumpToMessage} openMessageReference={openMessageReference} openContact={openSharedContact}/>;
           }}
         /><Show when={historyFocus()?.roomId === room().room_id ? historyFocus() : null}>{(focus) => <div class="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-4"><Show when={focus().status === "ready"} fallback={<div class="rounded-full bg-neutral-900/90 px-4 py-2 text-sm font-medium text-white shadow-lg" role="status">正在打开历史消息…</div>}><button type="button" class="pointer-events-auto flex min-h-10 items-center gap-1.5 rounded-full bg-neutral-900 px-4 text-sm font-semibold text-white shadow-lg hover:bg-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => void returnToLatestMessages()}><IconChevronDown class="size-4 stroke-white"/>{focus().hasNewer ? "回到最新消息" : "退出历史查看"}</button></Show></div>}</Show></div>}
         composer={<div>

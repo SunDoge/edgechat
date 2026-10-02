@@ -116,7 +116,9 @@ This integration still uses ACLs, but the policy is deliberately small. A bot to
 
 Choosing **保存** from a message menu creates one `purpose=saved` MLS room for the account on first use. It is a real encrypted room containing only that user, while all active devices are included as separate MLS members through their normal KeyPackages. D1 enforces one saved room per owner and the membership endpoint rejects additions or removals. The PWA labels it **已保存消息** and hides the save action while already inside it.
 
-Saving text creates a normal encrypted event. Saving an image, voice note, or file uses the existing destination-scoped attachment grant: the saved event receives a new opaque attachment reference, but its grant points to the original ciphertext object. No second R2 upload or storage-quota charge is created. Deleting the original message does not remove the underlying object while a saved/forwarded grant still references it.
+Saving text creates a normal encrypted event. Its MLS-encrypted payload carries a stable `room_id + message_id` source reference, so every device can jump from the saved copy back to the exact original when that room and message remain available locally. Ordinary forwarding deliberately omits this source location. If the original room is no longer accessible or its history is absent from the device, the saved copy remains readable and the client reports that limitation without issuing a speculative archive read.
+
+Saving an image, voice note, or file uses the existing destination-scoped attachment grant: the saved event receives a new opaque attachment reference, but its grant points to the original ciphertext object. No second R2 upload, object, read, or storage-quota charge is created. Deleting the original message does not remove the underlying object while a saved/forwarded grant still references it.
 
 ## User blocking
 

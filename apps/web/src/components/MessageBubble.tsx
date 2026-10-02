@@ -1,9 +1,10 @@
 import { For, Show, createEffect, createSignal, createUniqueId, onCleanup } from "solid-js";
-import { IconArrowBackUp, IconArrowForwardUp, IconBookmark, IconChecks, IconCircleCheck, IconCircleCheckFilled, IconDotsVertical, IconEdit, IconMoodSmile, IconPaperclip, IconQuote, IconTrash } from "@tabler/icons-solidjs";
+import { IconArrowBackUp, IconArrowForwardUp, IconArrowRight, IconBookmark, IconChecks, IconCircleCheck, IconCircleCheckFilled, IconDotsVertical, IconEdit, IconMoodSmile, IconPaperclip, IconQuote, IconTrash } from "@tabler/icons-solidjs";
 import type { LocalMessage, LocalReactionSummary } from "@edgechat/db";
+import type { MessageReference } from "@edgechat/protocol";
 import { EncryptedImage } from "./EncryptedImage";
 import { EncryptedAudio } from "./EncryptedAudio";
-import { isPreviewableImage, messageAttachments, messageContacts, messageQuote, messageText, normalizeMessagePayload, quoteTextSnapshot, type AttachmentMetadata, type AttachmentPart, type ContactIdentity, type MessagePayload } from "../media";
+import { isPreviewableImage, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextSnapshot, type AttachmentMetadata, type AttachmentPart, type ContactIdentity, type MessagePayload } from "../media";
 import { outgoingReceiptLabel } from "../message-status";
 import { ContactCard } from "./ContactCard";
 import { firstMessageLink, messageTextSegments } from "../message-links";
@@ -38,6 +39,7 @@ export function MessageBubble(props: {
   edit: (message: LocalMessage) => void;
   react: (message: LocalMessage, reaction: string | null) => void;
   jumpToMessage: (messageId: string) => void;
+  openMessageReference: (reference: MessageReference) => void;
   openContact: (contact: ContactIdentity) => void;
   relationPreview?: { sender: string; text: string | null; deleted: boolean };
   reactions: LocalReactionSummary[];
@@ -60,6 +62,7 @@ export function MessageBubble(props: {
   const isImageAlbum = () => attachments().length > 1 && attachments().every((part) => part.kind === "image" && isPreviewableImage(part.attachment.type));
   const relationTarget = () => payload().relation?.target.message_id ?? null;
   const quoteSnapshot = () => messageQuote(payload());
+  const savedFrom = () => messageSavedFrom(payload());
   const botOrigin = () => payload().origin?.kind === "bot" ? payload().origin : undefined;
   const mine = () => props.message.sender === props.currentUserId && !botOrigin();
   const linkPreview = () => props.linkPreviews && props.message.plaintext ? firstMessageLink(props.message.plaintext) : null;
@@ -112,7 +115,8 @@ export function MessageBubble(props: {
         {(origin) => <div class="mb-1 text-xs font-semibold text-brand">{origin().display_name} · Bot</div>}
       </Show>
       <Show when={props.message.deleted_at} fallback={<>
-        <Show when={payload().forwarded}><div class={`mb-1 flex items-center gap-1 text-xs ${mine() ? "text-white/70" : "text-muted"}`}><IconArrowForwardUp class="size-3 stroke-current"/>已转发</div></Show>
+        <Show when={payload().forwarded && !savedFrom()}><div class={`mb-1 flex items-center gap-1 text-xs ${mine() ? "text-white/70" : "text-muted"}`}><IconArrowForwardUp class="size-3 shrink-0 stroke-current"/>已转发</div></Show>
+        <Show when={savedFrom()}>{(reference) => <button type="button" class={`relative -mx-1 mb-1 flex min-h-8 items-center gap-1 rounded-md px-1 text-xs font-semibold ${mine() ? "text-white/80 hover:bg-white/10 focus-visible:outline-white" : "text-brand hover:bg-brand-soft focus-visible:outline-brand"} focus-visible:outline-2 focus-visible:outline-offset-1`} onClick={() => props.openMessageReference(reference())}><span class="absolute left-1/2 top-1/2 size-[max(100%,3rem)] -translate-1/2 pointer-fine:hidden" aria-hidden="true"/><IconBookmark class="size-4 shrink-0 stroke-current"/><span>已保存 · 查看原消息</span><IconArrowRight class="size-4 shrink-0 stroke-current"/></button>}</Show>
         <Show when={payload().relation?.type === "reply" && relationTarget()}>{(target) => <button type="button" class={`mb-2 block w-full rounded-lg border-l-2 px-2.5 py-1.5 text-left ${mine() ? "border-white/70 bg-white/10" : "border-brand bg-neutral-50"}`} onClick={() => props.jumpToMessage(target())}><span class={`block truncate text-xs font-semibold ${mine() ? "text-white/85" : "text-brand"}`}>{props.relationPreview ? props.displayName(props.relationPreview.sender) : "回复消息"}</span><span class={`mt-0.5 block max-w-64 truncate text-xs ${mine() ? "text-white/70" : "text-muted"}`}>{props.relationPreview?.deleted ? "此消息已撤回" : props.relationPreview?.text || "较早的消息"}</span></button>}</Show>
         <Show when={quoteSnapshot()}>{(quote) => <button type="button" class={`mb-2 block w-full rounded-lg border-l-2 px-2.5 py-1.5 text-left ${mine() ? "border-white/70 bg-white/10" : "border-brand bg-neutral-50"}`} onClick={() => relationTarget() && props.jumpToMessage(relationTarget()!)}><span class={`block truncate text-xs font-semibold ${mine() ? "text-white/85" : "text-brand"}`}>引用 {props.relationPreview ? props.displayName(props.relationPreview.sender) : quote().display_name || props.displayName(quote().sender)}</span><span class={`mt-0.5 line-clamp-3 max-w-64 whitespace-pre-wrap break-words text-xs ${mine() ? "text-white/70" : "text-muted"}`}>{quote().text}</span></button>}</Show>
         <Show when={props.message.plaintext}>{(plaintext) => <><p class="whitespace-pre-wrap break-words text-base/6"><For each={messageTextSegments(plaintext())}>{(segment) => <Show when={segment.kind === "link"} fallback={segment.value}>{segment.kind === "link" ? <a href={segment.href} target="_blank" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer" class={`break-all underline decoration-current/40 underline-offset-2 hover:decoration-current focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 ${mine() ? "focus-visible:outline-white" : "text-brand focus-visible:outline-brand"}`}>{segment.value}</a> : null}</Show>}</For></p><Show when={linkPreview()}>{(link) => <LinkCard link={link()} outgoing={mine()}/>}</Show></>}</Show>

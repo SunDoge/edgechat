@@ -1,4 +1,4 @@
-import { isNamespacedUserId, type MessageId, type MessagePartId, type MessageReference, type UserId } from "@edgechat/protocol";
+import { isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, type MessageId, type MessagePartId, type MessageReference, type UserId } from "@edgechat/protocol";
 
 export const PREVIEWABLE_IMAGE_TYPES = new Set([
   "image/avif",
@@ -38,6 +38,7 @@ export type MessagePayload = {
   origin?: { kind: "bot"; bot_id: string; display_name: string };
   relation?: MessageRelation;
   forwarded?: true;
+  saved_from?: MessageReference;
 };
 
 type LegacyMessagePayload = { text?: string; attachment?: AttachmentMetadata };
@@ -66,7 +67,7 @@ export function normalizeMessagePayload(payload: MessagePayload | LegacyMessageP
   return { version: 2, message_id: fallbackId as MessageId, parts };
 }
 
-export function createForwardPayload(messageId: MessageId, source: MessagePayload, attachmentAliases: readonly string[] = []): MessagePayload {
+export function createForwardPayload(messageId: MessageId, source: MessagePayload, attachmentAliases: readonly string[] = [], savedFrom?: MessageReference): MessagePayload {
   const attachments = messageAttachments(source);
   if (attachments.length !== attachmentAliases.length) throw new Error("转发附件缺少新的引用");
   let attachmentIndex = 0;
@@ -78,7 +79,7 @@ export function createForwardPayload(messageId: MessageId, source: MessagePayloa
     }
     return [{ ...part, part_id: crypto.randomUUID(), attachment: { ...part.attachment, id: attachmentAliases[attachmentIndex++]! } }];
   });
-  return { version: 2, message_id: messageId, parts, forwarded: true };
+  return { version: 2, message_id: messageId, parts, forwarded: true, ...(savedFrom ? { saved_from: savedFrom } : {}) };
 }
 
 export function messageText(payload: MessagePayload): string {
@@ -126,6 +127,13 @@ export function messageQuote(payload: MessagePayload): QuoteSnapshot | null {
     ? relation.snapshot.display_name.trim()
     : undefined;
   return text && sender ? { text, sender, ...(displayName ? { display_name: displayName } : {}) } : null;
+}
+
+export function messageSavedFrom(payload: MessagePayload): MessageReference | null {
+  const reference = payload.saved_from;
+  return reference?.kind === "message" && isNamespacedMessageId(reference.message_id) && isNamespacedRoomId(reference.room_id)
+    ? { kind: "message", message_id: reference.message_id, room_id: reference.room_id }
+    : null;
 }
 
 export function isVoiceAttachment(attachment: Pick<AttachmentMetadata, "type" | "duration_ms">): boolean {

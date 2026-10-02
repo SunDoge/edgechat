@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attachmentEventType, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, isPreviewableImage, isVoiceAttachment, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
+import { attachmentEventType, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, isPreviewableImage, isVoiceAttachment, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
 
 describe("image message classification", () => {
   it("uses image events only for safely previewable raster formats", () => {
@@ -51,6 +51,15 @@ describe("image message classification", () => {
     expect(messageText(forwarded)).toBe("caption");
     expect(messageAttachments(forwarded)[0].attachment).toMatchObject({ id: "forward-alias", key: "key", nonce: "nonce" });
     expect(forwarded.parts.map((part) => part.part_id)).not.toEqual(source.parts.map((part) => part.part_id));
+  });
+
+  it("keeps a validated encrypted backlink only for saved-message copies", () => {
+    const source = createMessagePayload("$source123:example.com", "remember me");
+    const reference = { kind: "message" as const, message_id: source.message_id, room_id: "!0123456789abcdef:example.com" as const };
+    const saved = createForwardPayload("$saved123:example.com", source, [], reference);
+    expect(messageSavedFrom(saved)).toEqual(reference);
+    expect(messageSavedFrom(createForwardPayload("$forward123:example.com", source))).toBeNull();
+    expect(messageSavedFrom({ ...saved, saved_from: { ...reference, room_id: "local-room" as never } })).toBeNull();
   });
 
   it("keeps contact cards inside the encrypted message payload and forwards them without an object alias", () => {
