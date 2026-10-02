@@ -477,6 +477,14 @@ export interface RoomPeerRecoveries {
   user_id: string;
 }
 
+export interface RoomProfileAttachments {
+  attachment_id: string | null;
+  profile_event_id: string | null;
+  profile_seq: Generated<number>;
+  room_id: string;
+  updated_at: number;
+}
+
 export interface RoomReports {
   category: string;
   created_at: number;
@@ -630,6 +638,7 @@ export interface DB {
   room_events: RoomEvents;
   room_members: RoomMembers;
   room_peer_recoveries: RoomPeerRecoveries;
+  room_profile_attachments: RoomProfileAttachments;
   room_reports: RoomReports;
   room_retention_acks: RoomRetentionAcks;
   rooms: Rooms;

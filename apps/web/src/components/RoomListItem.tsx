@@ -1,8 +1,10 @@
 import { Show, createEffect, createSignal, createUniqueId, onCleanup } from "solid-js";
 import { IconAlertTriangle, IconArchive, IconArchiveOff, IconBell, IconBellOff, IconDotsVertical, IconPin, IconPinnedOff, IconUserCheck, IconUserOff } from "@tabler/icons-solidjs";
 import type { LocalRoomPreference } from "@edgechat/db";
+import type { RoomProfileAvatar } from "@edgechat/protocol";
 import type { ServerRoom } from "@edgechat/sync";
 import { Avatar } from "./primitives";
+import { EncryptedRoomAvatar } from "./EncryptedRoomAvatar";
 import { handleMenuNavigation, openMenuFromTrigger } from "../menu-navigation";
 
 export function RoomListItem(props: {
@@ -11,6 +13,8 @@ export function RoomListItem(props: {
   avatarLabel: string;
   avatarColor: string;
   avatarUrl?: string | null;
+  groupAvatar?: RoomProfileAvatar | null;
+  decryptGroupAvatar?: (avatar: RoomProfileAvatar) => Promise<ArrayBuffer>;
   preview: string;
   selected: boolean;
   unread: number;
@@ -57,7 +61,9 @@ export function RoomListItem(props: {
 
   return <div ref={root} role="listitem" class="group relative" onFocusOut={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMenuOpen(false); }}>
     <button type="button" aria-current={props.selected ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-3 rounded-xl px-2.5 pr-14 text-left ${props.selected ? "bg-brand-soft" : "hover:bg-neutral-100"}`} onClick={props.onOpen}>
-      <Avatar class="size-11" src={props.avatarUrl ?? (props.room.kind === "direct" ? props.room.members.find((member) => member.display_name === props.title)?.avatar_url : null)} saved={props.room.purpose === "saved"} group={props.room.kind === "group"} label={props.avatarLabel} color={props.avatarColor}/>
+      <Show when={props.room.kind === "group" && props.room.purpose === "chat" && props.decryptGroupAvatar} fallback={<Avatar class="size-11" src={props.avatarUrl ?? (props.room.kind === "direct" ? props.room.members.find((member) => member.display_name === props.title)?.avatar_url : null)} saved={props.room.purpose === "saved"} group={props.room.kind === "group"} label={props.avatarLabel} color={props.avatarColor}/>}>{(load) =>
+        <EncryptedRoomAvatar class="size-11" avatar={props.groupAvatar} label={props.avatarLabel} color={props.avatarColor} load={load()}/>
+      }</Show>
       <span class="min-w-0">
         <span class="flex items-center gap-1.5"><strong class="min-w-0 truncate text-sm font-semibold text-ink">{props.title}</strong><Show when={props.recoveryRequired}><IconAlertTriangle aria-label="需要恢复" class="size-3.5 shrink-0 stroke-amber-600"/></Show><Show when={pinned()}><IconPin aria-label="已置顶" class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={muted()}><IconBellOff aria-label="已静音" class="size-3.5 shrink-0 stroke-muted"/></Show></span>
         <small class={`mt-1 block truncate text-sm ${props.recoveryRequired ? "font-medium text-amber-700" : "text-muted"}`}>{props.recoveryRequired ? "需要从另一台设备恢复" : props.preview}</small>

@@ -146,7 +146,16 @@ export type RoomProfilePayload = {
   version: 1;
   kind: "room.profile";
   name: string;
+  avatar: RoomProfileAvatar | null;
   updated_at: number;
+};
+
+export type RoomProfileAvatar = {
+  attachment_id: AttachmentId;
+  mime_type: "image/webp";
+  plaintext_bytes: number;
+  key: string;
+  nonce: string;
 };
 
 export const roomEventTypes = [
@@ -350,9 +359,17 @@ export function isMessageExpiryPolicyPayload(value: unknown): value is MessageEx
 export function isRoomProfilePayload(value: unknown): value is RoomProfilePayload {
   if (!value || typeof value !== "object") return false;
   const payload = value as Partial<RoomProfilePayload>;
+  const avatar = payload.avatar as Partial<RoomProfileAvatar> | null | undefined;
+  const validAvatar = avatar === null || Boolean(avatar && typeof avatar === "object"
+    && typeof avatar.attachment_id === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(avatar.attachment_id)
+    && avatar.mime_type === "image/webp"
+    && Number.isSafeInteger(avatar.plaintext_bytes) && Number(avatar.plaintext_bytes) >= 1 && Number(avatar.plaintext_bytes) <= 128 * 1024
+    && typeof avatar.key === "string" && /^[A-Za-z0-9_-]{43}$/.test(avatar.key)
+    && typeof avatar.nonce === "string" && /^[A-Za-z0-9_-]{16}$/.test(avatar.nonce));
   return payload.version === 1 && payload.kind === "room.profile" && typeof payload.name === "string"
     && payload.name === payload.name.trim() && payload.name.length >= 1 && payload.name.length <= 100
     && !/[\u0000-\u001f\u007f]/u.test(payload.name)
+    && validAvatar
     && Number.isSafeInteger(payload.updated_at) && Number(payload.updated_at) >= 0;
 }
 export function canonicalEventBytes(event: Omit<ClientEvent, "signature">): Uint8Array<ArrayBuffer> {

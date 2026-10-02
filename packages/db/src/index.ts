@@ -1,4 +1,4 @@
-import { isMessageExpiryPolicyPayload, isNamespacedUserId, isRoomProfilePayload, type ClientEvent, type DeliveryReceiptPayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomProfilePayload } from "@edgechat/protocol";
+import { isMessageExpiryPolicyPayload, isNamespacedUserId, isRoomProfilePayload, type ClientEvent, type DeliveryReceiptPayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomProfileAvatar, type RoomProfilePayload } from "@edgechat/protocol";
 import { LOCAL_CLEAR_ACCOUNT_DATA } from "./schema";
 import { isLocalRetentionDays, type LocalRetentionDays } from "./retention";
 import { messageExpiryAt } from "./expiry";
@@ -51,10 +51,10 @@ export const SET_HIDDEN_ROOM_MEMBERS_SQL = `WITH desired(user_id) AS (SELECT jso
     SELECT $1,user_id,$3 FROM desired ON CONFLICT DO NOTHING RETURNING user_id)
   SELECT count(*) FROM desired`;
 
-export const APPLY_ROOM_PROFILE_SQL = `INSERT INTO room_profiles (room_id,event_id,event_seq,name,updated_by,updated_at)
-  VALUES ($1,$2,$3,$4,$5,$6)
+export const APPLY_ROOM_PROFILE_SQL = `INSERT INTO room_profiles (room_id,event_id,event_seq,name,avatar,updated_by,updated_at)
+  VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
   ON CONFLICT (room_id) DO UPDATE SET event_id = EXCLUDED.event_id, event_seq = EXCLUDED.event_seq,
-    name = EXCLUDED.name, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
+    name = EXCLUDED.name, avatar = EXCLUDED.avatar, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
   WHERE room_profiles.event_seq < EXCLUDED.event_seq`;
 
 function isStoredRoomEvent(value: unknown, roomId: RoomId, seq: number, eventId: string): value is RoomEvent {
@@ -100,7 +100,7 @@ export type LocalDeliveryReceipt = { room_id: RoomId; user_id: string; last_deli
 export type RoomUnreadCount = { room_id: RoomId; unread_count: number; last_read_seq: number };
 export type LocalRoomPreference = { room_id: RoomId; pinned_at: number | null; archived_at: number | null; muted_until: number | null; local_retention_days: LocalRetentionDays | null; updated_at: number };
 export type LocalMessageExpiryPolicy = { room_id: RoomId; event_id: string; effective_after_seq: number; expires_in_seconds: MessageExpirySeconds | null; updated_by: string; updated_at: number };
-export type LocalRoomProfile = { room_id: RoomId; event_id: string; event_seq: number; name: string; updated_by: string; updated_at: number };
+export type LocalRoomProfile = { room_id: RoomId; event_id: string; event_seq: number; name: string; avatar: RoomProfileAvatar | null; updated_by: string; updated_at: number };
 export type LocalComposerDraft = { room_id: RoomId; text_content: string; mode: "message" | "reply" | "quote" | "edit"; target_message_id: string | null; quote_text: string | null; updated_at: number };
 export type LocalComposerDraftOutbox = { room_id: RoomId; draft: LocalComposerDraft | null; client_updated_at: number; attempts: number; next_attempt_at: number | null; last_error: string | null };
 export type LocalDeviceVerification = { user_id: string; device_id: string; fingerprint: string; verified_at: number };
@@ -577,20 +577,20 @@ export class LocalDatabase {
     await this.markProcessed(event);
     await this.query(
       APPLY_ROOM_PROFILE_SQL,
-      [event.room_id, event.event_id, event.seq, payload.name, event.sender, payload.updated_at],
+      [event.room_id, event.event_id, event.seq, payload.name, payload.avatar === null ? null : JSON.stringify(payload.avatar), event.sender, payload.updated_at],
     );
   }
 
   async roomProfile(roomId: RoomId): Promise<LocalRoomProfile | null> {
     const [row] = await this.query<LocalRoomProfile>(
-      "SELECT room_id,event_id,event_seq,name,updated_by,updated_at FROM room_profiles WHERE room_id = $1",
+      "SELECT room_id,event_id,event_seq,name,avatar,updated_by,updated_at FROM room_profiles WHERE room_id = $1",
       [roomId],
     );
     return row ?? null;
   }
 
   async roomProfiles(): Promise<LocalRoomProfile[]> {
-    return this.query<LocalRoomProfile>("SELECT room_id,event_id,event_seq,name,updated_by,updated_at FROM room_profiles");
+    return this.query<LocalRoomProfile>("SELECT room_id,event_id,event_seq,name,avatar,updated_by,updated_at FROM room_profiles");
   }
 
   async roomReactions(roomId: RoomId, currentUserId: string): Promise<LocalReactionSummary[]> {

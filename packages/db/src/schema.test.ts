@@ -3,18 +3,21 @@ import { PGlite } from "@electric-sql/pglite";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
 import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, MARK_EVENT_PROCESSED_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
 import { LOCAL_CLEAR_ACCOUNT_DATA, LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
-import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3 } from "./migrations";
+import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4 } from "./migrations";
 import { purgeRoomBefore, setRoomRetention } from "./retention";
 import { messageExpiryAt, purgeExpiredMessages } from "./expiry";
 
 describe("PGlite local full-text index", () => {
   it("keeps the newest encrypted room profile by authoritative room sequence", async () => {
-    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3);
+    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4);
     const room = "!profile:example.com";
-    await db.query(APPLY_ROOM_PROFILE_SQL, [room, "newer", 5, "New name", "@alice:example.com", 20]);
-    await db.query(APPLY_ROOM_PROFILE_SQL, [room, "older", 4, "Old name", "@alice:example.com", 30]);
+    const avatar = { attachment_id: "avatar-0123456789", mime_type: "image/webp", plaintext_bytes: 100,
+      key: "A".repeat(43), nonce: "B".repeat(16) };
+    await db.query(APPLY_ROOM_PROFILE_SQL, [room, "newer", 5, "New name", JSON.stringify(avatar), "@alice:example.com", 20]);
+    await db.query(APPLY_ROOM_PROFILE_SQL, [room, "older", 4, "Old name", null, "@alice:example.com", 30]);
     expect((await db.query("SELECT event_id,event_seq,name,updated_at FROM room_profiles")).rows)
       .toEqual([{ event_id: "newer", event_seq: 5, name: "New name", updated_at: 20 }]);
+    expect((await db.query("SELECT avatar FROM room_profiles")).rows).toEqual([{ avatar }]);
     await db.close();
   });
 
@@ -130,7 +133,7 @@ describe("PGlite local full-text index", () => {
   });
 
   it("keeps searchable history and archive keys but strips source-device queues from a linked-device snapshot", async () => {
-    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3);
+    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4);
     await db.query("INSERT INTO account_state VALUES (1,'@linked:example.com','Linked',1)");
     await db.query("INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload,search_vector) VALUES ('event','$message:example.com','!room:example.com',1,'@linked:example.com','old-device','message.text',1,'cipher','kept history','{}',to_tsvector('simple','kept history'))");
     await db.query("INSERT INTO archive_keys VALUES ('segment','!room:example.com',$1,1,10,1)", [new Uint8Array(32)]);
@@ -147,7 +150,7 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO room_snapshots VALUES ('!room:example.com',$1::jsonb,1)", [JSON.stringify({ room_id: "!room:example.com" })]);
     await db.query("INSERT INTO compaction_jobs VALUES ('!room:example.com','segment','lease',1,10,99,'building',NULL,1)");
     await db.query("INSERT INTO device_verifications VALUES ('@bob:example.com','bob-phone','AAAA BBBB CCCC DDDD EEEE FFFF 0000 1111',1)");
-    await db.query("INSERT INTO room_profiles VALUES ('!room:example.com','profile-event',4,'Weekend plans','@alice:example.com',1)");
+    await db.query("INSERT INTO room_profiles VALUES ('!room:example.com','profile-event',4,'Weekend plans','@alice:example.com',1,NULL)");
     await db.query(`INSERT INTO room_membership_outbox (room_id,operation,target_user_id,target_device_ids,event_json,mls_claim_ids,previous_mls_state,mls_state,created_at,updated_at)
       VALUES ('!room:example.com','remove','@bob:example.com','["bob-phone"]','{"event_id":"membership"}','[]',$1,$2,1,1)`, [new Uint8Array([1]), new Uint8Array([2])]);
     await db.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
@@ -350,7 +353,7 @@ describe("PGlite local full-text index", () => {
 
   it("clears plaintext, crypto state, queues, and cursors for account deletion", async () => {
     const db = new PGlite();
-    await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3);
+    await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4);
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await db.query("INSERT INTO crypto_state VALUES ('!room:example.com',1,$1,'openmls',1)", [new Uint8Array([1, 2, 3])]);
     await db.query("INSERT INTO archive_segment_metadata VALUES ('segment','!room:example.com',1,10,100,$1,$2,1)", [new Uint8Array([1]), new Uint8Array([2])]);
@@ -360,7 +363,7 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO room_snapshots VALUES ('!room:example.com',$1::jsonb,1)", [JSON.stringify({ room_id: "!room:example.com" })]);
     await db.query("INSERT INTO device_verifications VALUES ('@bob:example.com','bob-phone','AAAA BBBB CCCC DDDD EEEE FFFF 0000 1111',1)");
     await db.query("INSERT INTO device_preferences (id,link_previews,share_presence,updated_at) VALUES (1,FALSE,TRUE,1)");
-    await db.query("INSERT INTO room_profiles VALUES ('!room:example.com','profile-event',4,'Weekend plans','@alice:example.com',1)");
+    await db.query("INSERT INTO room_profiles VALUES ('!room:example.com','profile-event',4,'Weekend plans','@alice:example.com',1,NULL)");
     await db.query(`INSERT INTO room_membership_outbox (room_id,operation,target_user_id,target_device_ids,event_json,mls_claim_ids,previous_mls_state,mls_state,created_at,updated_at)
       VALUES ('!room:example.com','remove','@bob:example.com','["bob-phone"]','{"event_id":"membership"}','[]',$1,$2,1,1)`, [new Uint8Array([1]), new Uint8Array([2])]);
     await db.query("UPDATE sync_state SET cursor = 99, updated_at = 99 WHERE id = 1");

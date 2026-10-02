@@ -13,6 +13,8 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     messageExpirySeconds: null,
     messageExpirySupported: true,
     roomProfileSupported: true,
+    roomAvatar: null,
+    decryptRoomAvatar: vi.fn(async () => new ArrayBuffer(1)),
     identityMemberCount: 1,
     currentUserId: "@alice:example.com",
     canManageMembers: true,
@@ -22,7 +24,7 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     onAddMember: vi.fn(async () => undefined),
     onRemoveMember: vi.fn(async () => undefined),
     onToggleMember: vi.fn(async () => undefined),
-    onSaveRoomName: vi.fn(async () => undefined),
+    onSaveRoomProfile: vi.fn(async () => undefined),
     onSaveRetention: vi.fn(async () => 0),
     onSaveMessageExpiry: vi.fn(async () => undefined),
     onVerifyIdentity: vi.fn(), onClose: vi.fn(),
@@ -54,6 +56,15 @@ describe("RoomSettingsDialog group membership", () => {
     const input = document.querySelector("#room-profile-name") as HTMLInputElement;
     input.value = "  Hiking club  "; input.dispatchEvent(new InputEvent("input", { bubbles: true }));
     (input.closest("form") as HTMLFormElement).dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(props.onSaveRoomName).toHaveBeenCalledWith("Hiking club"));
+    await vi.waitFor(() => expect(props.onSaveRoomProfile).toHaveBeenCalledWith("Hiking club", { kind: "keep" }));
+  });
+
+  it("queues removal of the encrypted current group avatar without changing the name", async () => {
+    const props = mount({ roomAvatar: { attachment_id: "avatar-0123456789", mime_type: "image/webp", plaintext_bytes: 10,
+      key: "A".repeat(43), nonce: "B".repeat(16) } });
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "移除")?.click();
+    const input = document.querySelector("#room-profile-name") as HTMLInputElement;
+    (input.closest("form") as HTMLFormElement).dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(props.onSaveRoomProfile).toHaveBeenCalledWith("Weekend", { kind: "remove" }));
   });
 });

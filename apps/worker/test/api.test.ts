@@ -1,7 +1,7 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, type ClientEvent, type DraftEnvelope, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
-import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
+import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, processPendingAttachmentDeletions, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
 import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push";
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
 import type { Env } from "../src/env";
@@ -561,6 +561,7 @@ describe("single-server durable delivery", () => {
       env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'owner', ?, NULL)").bind(relationshipRoom, alice.user_id, now),
       env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'member', ?, NULL)").bind(relationshipRoom, carol.user_id, now),
       env.DB.prepare("INSERT INTO rooms (room_id,home_server,kind,name,current_seq,created_by,created_at,mls_epoch) VALUES (?, 'localhost', 'group', 'Team', 0, ?, ?, 1)").bind(groupRoom, alice.user_id, now),
+      env.DB.prepare("INSERT INTO room_profile_attachments (room_id,attachment_id,profile_event_id,profile_seq,updated_at) VALUES (?,NULL,NULL,0,?)").bind(groupRoom, now),
       env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'owner', ?, NULL)").bind(groupRoom, alice.user_id, now),
       env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'member', ?, NULL)").bind(groupRoom, bob.user_id, now),
       env.DB.prepare("INSERT INTO room_devices (room_id,device_id,user_id,joined_epoch,joined_seq,removed_epoch,created_at,removed_at) VALUES (?,?,?,1,0,NULL,?,NULL)").bind(groupRoom, alice.device_id, alice.user_id, now),
@@ -612,12 +613,64 @@ describe("single-server durable delivery", () => {
 
     const profileUnsigned: Omit<ClientEvent, "signature"> = {
       event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
-      type: "control.room.profile", created_at: Date.now(), ciphertext: "opaque-encrypted-room-profile", metadata: { mls_epoch: 2 },
+      type: "control.room.profile", created_at: Date.now(), ciphertext: "opaque-encrypted-room-profile",
+      metadata: { mls_epoch: 2, room_profile_avatar_id: null, room_profile_previous_avatar_id: null },
     };
     const profileEvent = { ...profileUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(profileUnsigned))) };
     const profileResponse = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(profileEvent) });
     expect(profileResponse.status, await profileResponse.clone().text()).toBe(201);
     expect(await profileResponse.json()).toMatchObject({ event: { event_id: profileEvent.event_id, type: "control.room.profile", seq: 2 } });
+
+    const avatarBody = new Uint8Array([11, 22, 33, 44]);
+    const avatarUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
+      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": groupRoom,
+        "content-length": String(avatarBody.byteLength), "x-content-sha256": await ciphertextDigest(avatarBody) }, body: avatarBody,
+    });
+    expect(avatarUpload.status, await avatarUpload.clone().text()).toBe(201);
+    const avatarId = (await avatarUpload.json() as { attachment_id: string }).attachment_id;
+    const avatarUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(),
+      metadata: { mls_epoch: 2, room_profile_avatar_id: avatarId, room_profile_previous_avatar_id: null } };
+    const avatarEvent = { ...avatarUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(avatarUnsigned))) };
+    const avatarResponse = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(avatarEvent) });
+    expect(avatarResponse.status, await avatarResponse.clone().text()).toBe(201);
+    expect(await env.DB.prepare("SELECT attachment_id,profile_event_id,profile_seq FROM room_profile_attachments WHERE room_id = ?").bind(groupRoom).first())
+      .toEqual({ attachment_id: avatarId, profile_event_id: avatarEvent.event_id, profile_seq: 3 });
+    expect(await env.DB.prepare("SELECT committed_event_id FROM attachments WHERE attachment_id = ?").bind(avatarId).first()).toEqual({ committed_event_id: avatarEvent.event_id });
+    const avatarObject = await env.DB.prepare("SELECT object_key,uploader_user_id,ciphertext_bytes FROM attachments WHERE attachment_id = ?").bind(avatarId)
+      .first<{ object_key: string; uploader_user_id: string; ciphertext_bytes: number }>();
+    await env.DB.prepare(`INSERT INTO retention_object_deletions
+      (object_key,object_type,object_id,owner_user_id,ciphertext_bytes,requested_at,attempts,last_error)
+      VALUES (?,'attachment',?,?,?,?,0,NULL)`).bind(avatarObject!.object_key, avatarId, avatarObject!.uploader_user_id, avatarObject!.ciphertext_bytes, Date.now()).run();
+    expect(await processRetentionObjectDeletions(env as unknown as Env)).toBe(0);
+    expect(await env.DB.prepare("SELECT object_key FROM retention_object_deletions WHERE object_key = ?").bind(avatarObject!.object_key).first()).toBeNull();
+    expect(await env.ARCHIVE.get(avatarObject!.object_key)).not.toBeNull();
+    await env.DB.prepare(`INSERT INTO attachment_deletions
+      (attachment_id,object_key,uploader_user_id,ciphertext_bytes,delete_event_id,requested_at,attempts,last_error)
+      VALUES (?,?,?,?,?,?,0,NULL)`).bind(avatarId, avatarObject!.object_key, avatarObject!.uploader_user_id,
+        avatarObject!.ciphertext_bytes, avatarEvent.event_id, Date.now()).run();
+    expect(await processPendingAttachmentDeletions(env as unknown as Env)).toBe(0);
+    expect(await env.DB.prepare("SELECT attachment_id FROM attachment_deletions WHERE attachment_id = ?").bind(avatarId).first()).toBeNull();
+    expect(await env.ARCHIVE.get(avatarObject!.object_key)).not.toBeNull();
+
+    const renameUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(),
+      metadata: { mls_epoch: 2, room_profile_avatar_id: avatarId, room_profile_previous_avatar_id: avatarId } };
+    const renameEvent = { ...renameUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(renameUnsigned))) };
+    const renamed = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(renameEvent) });
+    expect(renamed.status, await renamed.clone().text()).toBe(201);
+    expect(await env.DB.prepare("SELECT attachment_id,profile_seq FROM room_profile_attachments WHERE room_id = ?").bind(groupRoom).first()).toEqual({ attachment_id: avatarId, profile_seq: 4 });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
+
+    const removeAvatarUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(),
+      metadata: { mls_epoch: 2, room_profile_avatar_id: null, room_profile_previous_avatar_id: avatarId } };
+    const removeAvatarEvent = { ...removeAvatarUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(removeAvatarUnsigned))) };
+    const removedAvatar = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(removeAvatarEvent) });
+    expect(removedAvatar.status, await removedAvatar.clone().text()).toBe(201);
+    expect(await env.DB.prepare("SELECT attachment_id,profile_seq FROM room_profile_attachments WHERE room_id = ?").bind(groupRoom).first()).toEqual({ attachment_id: null, profile_seq: 5 });
+    expect(await env.DB.prepare("SELECT attachment_id FROM attachment_deletions WHERE attachment_id = ?").bind(avatarId).first()).toEqual({ attachment_id: avatarId });
+    expect(await processPendingAttachmentDeletions(env as unknown as Env)).toBe(1);
+    expect(await env.DB.prepare("SELECT attachment_id FROM attachments WHERE attachment_id = ?").bind(avatarId).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT attachment_bytes,attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(alice.user_id).first())
+      .toEqual({ attachment_bytes: 0, attachment_objects: 0 });
 
     const memberProfileUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), sender: carol.user_id, device_id: carol.device_id, created_at: Date.now() };
     const memberProfile = { ...memberProfileUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, carolDevice.signing.privateKey, canonicalEventBytes(memberProfileUnsigned))) };

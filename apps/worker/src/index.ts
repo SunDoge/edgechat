@@ -2396,6 +2396,9 @@ export async function stageRetentionObjectDeletions(env: Env, now = Date.now()):
       .where((eb) => eb.not(eb.exists(
         eb.selectFrom("attachment_grants as g").select("g.grant_id").whereRef("g.source_attachment_id", "=", "a.attachment_id"),
       )))
+      .where((eb) => eb.not(eb.exists(
+        eb.selectFrom("room_profile_attachments as profile").select("profile.room_id").whereRef("profile.attachment_id", "=", "a.attachment_id"),
+      )))
       .orderBy("a.committed_seq").limit(50).execute(),
     db.selectFrom("archive_segments as s")
       .innerJoin("rooms as r", "r.room_id", "s.room_id")
@@ -2422,7 +2425,13 @@ export async function stageRetentionObjectDeletions(env: Env, now = Date.now()):
 
 export async function processRetentionObjectDeletions(env: Env): Promise<number> {
   const db = createDatabase(env.DB);
-  const pending = await db.selectFrom("retention_object_deletions").selectAll().orderBy("requested_at").limit(50).execute();
+  const candidates = await db.selectFrom("retention_object_deletions").selectAll().orderBy("requested_at").limit(50).execute();
+  const candidateAttachmentIds = candidates.filter((item) => item.object_type === "attachment").map((item) => item.object_id);
+  const activeProfileAttachments = candidateAttachmentIds.length ? new Set((await db.selectFrom("room_profile_attachments").select("attachment_id")
+    .where("attachment_id", "in", candidateAttachmentIds).execute()).map((item) => item.attachment_id)) : new Set<string>();
+  const protectedObjectKeys = candidates.filter((item) => item.object_type === "attachment" && activeProfileAttachments.has(item.object_id)).map((item) => item.object_key);
+  if (protectedObjectKeys.length) await db.deleteFrom("retention_object_deletions").where("object_key", "in", protectedObjectKeys).execute();
+  const pending = candidates.filter((item) => item.object_type !== "attachment" || !activeProfileAttachments.has(item.object_id));
   if (!pending.length) return 0;
   try {
     await env.ARCHIVE.delete(pending.map((item) => item.object_key));
@@ -2528,6 +2537,7 @@ async function createRoom(request: Request, env: Env, auth: AuthContext): Promis
   try {
     await batch(env.DB, [
       db.insertInto("rooms").values({ room_id: roomId, home_server: env.SERVER_NAME, kind, purpose, name, current_seq: 0, mls_epoch: epoch, created_by: auth.userId, created_at: now }),
+      ...(kind === "group" && purpose === "chat" ? [db.insertInto("room_profile_attachments").values({ room_id: roomId, attachment_id: null, profile_event_id: null, profile_seq: 0, updated_at: now })] : []),
       ...members.map((userId) => db.insertInto("room_members").values({ room_id: roomId, user_id: userId, role: userId === auth.userId ? "owner" as const : "member" as const, joined_at: now, removed_at: null })),
       ...recipients.map((deviceId) => db.insertInto("room_device_keys").values({ room_id: roomId, device_id: deviceId, encrypted_state: joinState, epoch, created_at: now })),
       ...roomDevices.map((device) => db.insertInto("room_devices").values({ room_id: roomId, device_id: device.device_id, user_id: device.user_id, joined_epoch: epoch, joined_seq: 0, removed_epoch: null, created_at: now, removed_at: null })),
@@ -2869,6 +2879,18 @@ async function resolveForwardAttachment(env: Env, userId: string, referenceId: s
 }
 
 type EventAttachmentReference = { attachmentId: string; sourceAttachmentId: string | null };
+type RoomProfileAvatarTransition = { attachmentId: string | null; previousAttachmentId: string | null };
+
+function roomProfileAvatarTransition(event: ClientEvent): RoomProfileAvatarTransition | null {
+  if (event.type !== "control.room.profile") return null;
+  const attachmentId = event.metadata.room_profile_avatar_id;
+  const previousAttachmentId = event.metadata.room_profile_previous_avatar_id;
+  const valid = (value: unknown) => value === null || (typeof value === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(value));
+  if (!valid(attachmentId) || !valid(previousAttachmentId)) {
+    throw new HttpError(400, "Invalid encrypted room profile avatar metadata", "invalid_room_profile_avatar");
+  }
+  return { attachmentId: attachmentId as string | null, previousAttachmentId: previousAttachmentId as string | null };
+}
 
 function eventAttachmentReferences(event: ClientEvent): EventAttachmentReference[] {
   const pluralIds = event.metadata.attachment_ids;
@@ -2920,6 +2942,22 @@ async function sendEvent(request: Request, env: Env, ctx: ExecutionContext, auth
   if (!duplicate && event.type === "control.room.profile"
     && (roomEpoch.kind !== "group" || roomEpoch.purpose !== "chat" || roomEpoch.role !== "owner" || roomEpoch.removed_at !== null)) {
     throw new HttpError(403, "Only the group owner may update the room profile", "room_profile_forbidden");
+  }
+  const profileAvatar = roomProfileAvatarTransition(event);
+  if (!duplicate && profileAvatar) {
+    const current = await db.selectFrom("room_profile_attachments").select(["attachment_id", "profile_seq"])
+      .where("room_id", "=", roomId).executeTakeFirst();
+    if ((current?.attachment_id ?? null) !== profileAvatar.previousAttachmentId) {
+      throw new HttpError(409, "The encrypted room profile changed on another device", "room_profile_conflict");
+    }
+    if (profileAvatar.attachmentId !== null && profileAvatar.attachmentId !== profileAvatar.previousAttachmentId) {
+      const uploaded = await db.selectFrom("attachments").select(["attachment_id", "committed_event_id", "ciphertext_bytes"])
+        .where("attachment_id", "=", profileAvatar.attachmentId).where("room_id", "=", roomId)
+        .where("uploader_user_id", "=", auth.userId).executeTakeFirst();
+      if (!uploaded || uploaded.committed_event_id !== null || uploaded.ciphertext_bytes > MAX_PROFILE_AVATAR_BYTES + 16) {
+        throw new HttpError(409, "Room profile avatar is missing or already committed", "invalid_room_profile_avatar");
+      }
+    }
   }
   if (!duplicate && roomEpoch.kind === "direct") {
     const requestState = await directRequestState(env, roomId);
@@ -2996,6 +3034,54 @@ async function sendEvent(request: Request, env: Env, ctx: ExecutionContext, auth
   ]));
   else if (attachmentReferences.length) await batch(env.DB, attachmentReferences.map((reference) => db.updateTable("attachments").set({ committed_event_id: accepted.event_id, committed_seq: accepted.seq, committed_at: Date.now() })
     .where("attachment_id", "=", reference.attachmentId).where("committed_event_id", "is", null)));
+  if (!duplicate && profileAvatar) {
+    await db.updateTable("room_profile_attachments").set({
+      attachment_id: profileAvatar.attachmentId, profile_event_id: accepted.event_id, profile_seq: accepted.seq, updated_at: Date.now(),
+    }).where("room_id", "=", roomId).where("profile_seq", "<", accepted.seq).execute();
+    const projected = await db.selectFrom("room_profile_attachments").select(["attachment_id", "profile_event_id"])
+      .where("room_id", "=", roomId).executeTakeFirst();
+    if (projected?.profile_event_id === accepted.event_id) {
+      const statements = [];
+      if (profileAvatar.attachmentId) {
+        const committed = await db.updateTable("attachments")
+          .set({ committed_event_id: accepted.event_id, committed_seq: accepted.seq, committed_at: Date.now(), source_deleted_at: null })
+          .where("attachment_id", "=", profileAvatar.attachmentId)
+          .where((eb) => eb.exists(eb.selectFrom("room_profile_attachments as profile").select("profile.room_id")
+            .where("profile.room_id", "=", roomId).where("profile.profile_event_id", "=", accepted.event_id)
+            .whereRef("profile.attachment_id", "=", "attachments.attachment_id")))
+          .executeTakeFirst();
+        if (committed.numUpdatedRows > 0n) {
+          const currentAttachment = await db.selectFrom("attachments").select("object_key").where("attachment_id", "=", profileAvatar.attachmentId).executeTakeFirst();
+          if (currentAttachment) statements.push(
+            db.deleteFrom("attachment_deletions").where("attachment_id", "=", profileAvatar.attachmentId),
+            db.deleteFrom("retention_object_deletions").where("object_key", "=", currentAttachment.object_key),
+          );
+        }
+      }
+      const obsoleteProfileAttachments = await db.selectFrom("attachments as a")
+        .leftJoin("room_events as event", "event.event_id", "a.committed_event_id")
+        .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes"])
+        .where("a.room_id", "=", roomId).where("a.committed_at", "is not", null)
+        .where((eb) => eb.or([
+          eb("event.event_type", "=", "control.room.profile"),
+          ...(profileAvatar.previousAttachmentId ? [eb("a.attachment_id", "=", profileAvatar.previousAttachmentId)] : []),
+        ]))
+        .where((eb) => eb.not(eb.exists(eb.selectFrom("room_profile_attachments as profile").select("profile.room_id")
+          .whereRef("profile.attachment_id", "=", "a.attachment_id"))))
+        .execute();
+      if (obsoleteProfileAttachments.length) {
+        const obsoleteIds = obsoleteProfileAttachments.map((item) => item.attachment_id);
+        const grantedIds = new Set((await db.selectFrom("attachment_grants").select("source_attachment_id")
+          .where("source_attachment_id", "in", obsoleteIds).execute()).map((item) => item.source_attachment_id));
+        for (const previous of obsoleteProfileAttachments) {
+          statements.push(db.updateTable("attachments").set({ source_deleted_at: accepted.created_at }).where("attachment_id", "=", previous.attachment_id));
+          if (!grantedIds.has(previous.attachment_id)) statements.push(db.insertInto("attachment_deletions").values({ ...previous, delete_event_id: accepted.event_id, requested_at: Date.now(), attempts: 0, last_error: null })
+            .onConflict((conflict) => conflict.column("attachment_id").doNothing()));
+        }
+      }
+      if (statements.length) await batch(env.DB, statements);
+    }
+  }
   if (deleteTargetEventId) {
     const db = createDatabase(env.DB);
     const originals = await db.selectFrom("attachments").select("attachment_id")
@@ -3025,7 +3111,13 @@ export async function processPendingAttachmentDeletions(env: Env, deleteEventId?
   const db = createDatabase(env.DB);
   let query = db.selectFrom("attachment_deletions").selectAll().orderBy("requested_at").limit(100);
   if (deleteEventId) query = query.where("delete_event_id", "=", deleteEventId);
-  const pending = await query.execute();
+  const candidates = await query.execute();
+  const activeProfileAttachments = candidates.length ? new Set((await db.selectFrom("room_profile_attachments").select("attachment_id")
+    .where("attachment_id", "in", candidates.map((item) => item.attachment_id)).execute()).map((item) => item.attachment_id)) : new Set<string>();
+  if (activeProfileAttachments.size) {
+    await db.deleteFrom("attachment_deletions").where("attachment_id", "in", Array.from(activeProfileAttachments)).execute();
+  }
+  const pending = candidates.filter((item) => !activeProfileAttachments.has(item.attachment_id));
   if (!pending.length) return 0;
   try {
     await env.ARCHIVE.delete(pending.map((item) => item.object_key));

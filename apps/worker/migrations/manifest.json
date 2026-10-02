@@ -160,6 +160,10 @@
     {
       "file": "0040_account_appeals.sql",
       "sha256": "75255307069b82fd961a7154549614b68f8e9a1fb7e7a8e7832e61b76ac98e71"
+    },
+    {
+      "file": "0041_room_profile_attachments.sql",
+      "sha256": "9d52f7ff0406eb36b26bfa822192c34c3725d6dc8d0e474dc93b24726670f9ac"
     }
   ]
 }

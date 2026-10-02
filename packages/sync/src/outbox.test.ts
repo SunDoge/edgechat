@@ -117,7 +117,7 @@ describe("OutboxEngine", () => {
 
   it("projects an accepted encrypted room profile without creating a timeline row", async () => {
     const profileEvent = { ...event, event_id: "profile-1", type: "control.room.profile" as const };
-    const profilePayload = { version: 1 as const, kind: "room.profile" as const, name: "Weekend plans", updated_at: 4 };
+    const profilePayload = { version: 1 as const, kind: "room.profile" as const, name: "Weekend plans", avatar: null, updated_at: 4 };
     const db = database([{ ...item, event_id: profileEvent.event_id, event: profileEvent, payload: profilePayload }]);
     const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...profileEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);
     await engine.start(); engine.stop();

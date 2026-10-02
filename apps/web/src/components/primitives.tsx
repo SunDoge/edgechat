@@ -34,7 +34,7 @@ export function Avatar(props: { label: string; color: string; src?: string | nul
   const [failed, setFailed] = createSignal(false);
   createEffect(() => { props.src; setFailed(false); });
   return <span class={clsx("grid size-10 shrink-0 place-items-center overflow-hidden rounded-full text-sm font-semibold text-white outline-1 -outline-offset-1 outline-black/10", props.class)} style={{ background: props.color }}>
-    <Show when={!props.saved && !props.group && !failed() ? props.src : null} fallback={props.saved ? <IconBookmark class="size-4 stroke-white"/> : props.group ? <IconUsers class="size-4 stroke-white"/> : props.label}>
+    <Show when={!props.saved && !failed() ? props.src : null} fallback={props.saved ? <IconBookmark class="size-4 stroke-white"/> : props.group ? <IconUsers class="size-4 stroke-white"/> : props.label}>
       {(src) => <img src={src()} alt="" class="size-full object-cover" referrerpolicy="no-referrer" onError={() => setFailed(true)}/>}
     </Show>
   </span>;
