@@ -347,7 +347,7 @@ pnpm test
 pnpm run build
 ```
 
-`pnpm run db:types` rebuilds `apps/worker/src/database.generated.ts` from all D1 migrations through `kysely-codegen`; the full check verifies that the committed type file is current. `pnpm run build` compiles the Rust crate for `wasm32`, builds the PWA, and performs a Wrangler deployment dry run.
+`pnpm run db:types` rebuilds `apps/worker/src/database.generated.ts` from all D1 migrations through `kysely-codegen`; the full check verifies that the committed type file is current. It also verifies the immutable migration SHA-256 manifest, contiguous numbering, and explicit rollout policy for newly recorded expand/data/contract migrations. `pnpm run build` compiles the Rust crate for `wasm32`, builds the PWA, and performs a Wrangler deployment dry run.
 
 ## Cloudflare deployment
 

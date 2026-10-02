@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "migrations": [
+    {
+      "file": "0001_initial.sql",
+      "sha256": "5d20f2e00714a436b689f0cac96bcaba3056b5000a1d15d77627977836a2d245"
+    },
+    {
+      "file": "0002_mls_key_packages.sql",
+      "sha256": "5e6690fd1057b19f4b39311ce824a5fc572b6b430ea4ebc6f2da3a6296b80702"
+    },
+    {
+      "file": "0003_mls_claim_consumption.sql",
+      "sha256": "c456c48a4c606c6668fe6bb429bceb04aed6236a1f9a77d8ce0d94ec19c235bf"
+    },
+    {
+      "file": "0004_bot_integrations.sql",
+      "sha256": "be18f03e134cd0b263e0799bd21922271b5db5b90718d6d6fac41c815391ea0c"
+    },
+    {
+      "file": "0005_storage_usage.sql",
+      "sha256": "6cddbf232f61e653251c13af04090b401906f24c57ebdb865a8179df0e9c8061"
+    },
+    {
+      "file": "0006_attachment_commit.sql",
+      "sha256": "a2b059055ebd6fd8cf5ea513d74fa0b2f95cb1937f895a698bc663b40f932cc1"
+    },
+    {
+      "file": "0007_bot_capabilities.sql",
+      "sha256": "765a6e7381e1232e400b4fc1e71186687f0509461013a83df58fbd8967f85e26"
+    },
+    {
+      "file": "0008_attachment_deletions.sql",
+      "sha256": "20636ed3a7c20d3e828ad103acf5d8a0b556746288ba94b8e553fe9c26397c4c"
+    },
+    {
+      "file": "0009_mls_key_package_replenishment.sql",
+      "sha256": "026712d5ae31808c5399e0860aaf5e3cbde2dac8f0fb9165fec24586f8359022"
+    },
+    {
+      "file": "0010_mls_claim_context.sql",
+      "sha256": "772f9fa09d9b5fd8f150fa9fe0d13520601156df29ba06886f57ec80b8b0c5e0"
+    },
+    {
+      "file": "0011_device_revocation.sql",
+      "sha256": "9cc7ed19bf022becd3908667af82d47515f7de21cdf9250d5609f8794bbc60ab"
+    },
+    {
+      "file": "0012_device_room_preferences.sql",
+      "sha256": "9b63a359e0e147b1f16780e698c493447cc84823ce3789732739c7128a7ea6f8"
+    },
+    {
+      "file": "0013_user_blocks.sql",
+      "sha256": "7ed526952caad7b426ad0191026836ac1e4af8010f19f6106daf807fccfbe4bd"
+    },
+    {
+      "file": "0014_pending_r2_writes.sql",
+      "sha256": "ce506fdc8e7018378e391f8de635fe8715be736591a0a7799619dc05a03329ed"
+    },
+    {
+      "file": "0015_attachment_forward_grants.sql",
+      "sha256": "ee3bb66e5f7ccc396ecd7540a3799d436b87f23c3bb27f2f83e190c3c0f376b3"
+    },
+    {
+      "file": "0016_user_storage_limits.sql",
+      "sha256": "9c55dbb676f643fdceea6b72da4821ede337e3f76a9d1b6dfd5d9dfde5a250a2"
+    },
+    {
+      "file": "0017_account_lifecycle.sql",
+      "sha256": "a8628db653e15677384ab5d9e453d2eba299e635cbc130b6232b932e792a0385"
+    },
+    {
+      "file": "0018_device_backup_checkpoints.sql",
+      "sha256": "182a0e9d08ba407b5220e64c723690a301e7df343fba1a20816fc07e1461095f"
+    },
+    {
+      "file": "0019_device_linking.sql",
+      "sha256": "164312d6a54c236f6301cd61afc41b5073debd109708fe27128b0794489be019"
+    },
+    {
+      "file": "0020_device_link_history.sql",
+      "sha256": "bb94515de8684281f9cafc92179def7c4588b19cd90bbf6177def47edc79c00f"
+    },
+    {
+      "file": "0021_device_link_history_shards.sql",
+      "sha256": "90ca8763c2fb4898f844f8f44d9a859a6e83884d9b1e3fed76340f10affb617a"
+    },
+    {
+      "file": "0022_invitation_policy.sql",
+      "sha256": "d4d3aff4d7308ed436d9b25a33ab689236b535f8077d778f2e894dda39137582"
+    },
+    {
+      "file": "0023_saved_rooms.sql",
+      "sha256": "27590bff6f71b0894da78cbcea6c68a750cc456ce4c1d20f46816895d509b267"
+    },
+    {
+      "file": "0024_multi_attachment_grants.sql",
+      "sha256": "3a57440a5935fba14b58143792bcc751915d85503bfa7c0225095b7eb68eeee3"
+    },
+    {
+      "file": "0025_retention_repair.sql",
+      "sha256": "d286170339fc74e9c480989613c04211100dc129e08d8241094411d1d32a8935"
+    },
+    {
+      "file": "0026_event_retention.sql",
+      "sha256": "6382fc082102ffb2bb279bb4b986dc88dedacaeab3beea84b55e2b2db15d2645"
+    },
+    {
+      "file": "0027_retention_objects.sql",
+      "sha256": "812d04347316626ee6b82f22b8c0c56957d3408cab9268ae3abfec176f2b3357"
+    },
+    {
+      "file": "0028_attachment_retention_ack.sql",
+      "sha256": "754294df7b7ccc7c88d0c15623d1e19f3e005fb4365418581a9feba8c700a1e0"
+    },
+    {
+      "file": "0029_room_retention_ack.sql",
+      "sha256": "4f9b5f7ddb6c767b26b0217e23ae683c9afecaddb02c1cb54743827f73841e0d"
+    },
+    {
+      "file": "0030_attachment_retention_requirements.sql",
+      "sha256": "478e49961d193322141d4f06c9c56cbc4c99fad3476244a301ebb08b5850377e"
+    },
+    {
+      "file": "0031_history_repair_audit.sql",
+      "sha256": "7873ca374c3d69d6957393cf801c54e2482652e53ece7abf4547a5729d7c2204"
+    },
+    {
+      "file": "0032_repair_safe_attachment_grants.sql",
+      "sha256": "d3ddf22a957ce87f10e3cdb83f31b629d449966c7608c046d9cc96fcbe290c3f"
+    },
+    {
+      "file": "0033_attachment_object_repair.sql",
+      "sha256": "cd39f2a57d7dc1b1b5bfd0b78c6aa33b84f72294fdf9b6d454d4556cc2cb8b9b"
+    },
+    {
+      "file": "0034_archive_segment_object_repair.sql",
+      "sha256": "31720bcdb758046a97180469aecff69560351ba09d9f5b5895eba53e3d24b8a0"
+    },
+    {
+      "file": "0035_room_peer_recovery.sql",
+      "sha256": "899bb405423b769782dbf8a9c955f2e262b409ae0b1cc2c890e9c0af9adfa532"
+    },
+    {
+      "file": "0036_device_drafts.sql",
+      "sha256": "0a7d348e922b52732b87d9409adfe4c05949b1bdf035834d86e89735dd5d135d"
+    },
+    {
+      "file": "0037_message_requests.sql",
+      "sha256": "b06705abc134b93ab5f33cf2c247fbfa72870d134b3535b5702b885a6fa6b1cf"
+    },
+    {
+      "file": "0038_group_hidden_members.sql",
+      "sha256": "3211367b666a3ea3292b5be05bba9f8b2388b109437fb6c752dc45d8c94fc2d0"
+    },
+    {
+      "file": "0039_login_abuse.sql",
+      "sha256": "e50c892e2c28e3a58de2feab198120936163d412990ecc507a8a90c7118ed8a1"
+    },
+    {
+      "file": "0040_account_appeals.sql",
+      "sha256": "75255307069b82fd961a7154549614b68f8e9a1fb7e7a8e7832e61b76ac98e71"
+    }
+  ]
+}

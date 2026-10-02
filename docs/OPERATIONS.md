@@ -56,21 +56,39 @@ by EdgeChat and should not be enabled merely to build this dashboard.
 ## Before a schema or protocol rollout
 
 1. Confirm the Worker build and full test suite pass from the exact revision.
-2. Record the current remote D1 Time Travel bookmark:
+2. Run `pnpm run db:migrations:check`. Every recorded migration must retain its
+   exact SHA-256 digest and filenames must form one contiguous zero-padded
+   sequence. Never edit a recorded migration; add the next file instead.
+3. Record the current remote D1 Time Travel bookmark:
 
    ```bash
    pnpm run db:bookmark:remote
    ```
 
-3. Save the bookmark, revision, migration list and UTC time in the deployment
+4. Save the bookmark, revision, migration list and UTC time in the deployment
    record. Do not store Cloudflare credentials in that record.
-4. Apply migrations with `pnpm --filter @edgechat/worker db:migrate:remote`, then
+5. Apply migrations with `pnpm --filter @edgechat/worker db:migrate:remote`, then
    deploy the Worker.
-5. Check `pnpm run operator -- readiness`, `/api/v1/health`, login, sync, one MLS
+6. Check `pnpm run operator -- readiness`, `/api/v1/health`, login, sync, one MLS
    message, attachment download and a Range history read.
-6. Keep the preceding Worker artifact available until the mixed-version window
+7. Keep the preceding Worker artifact available until the mixed-version window
    has passed. A code rollback is safe only when that code accepts the resulting
    schema and advertised protocol range.
+
+New migrations are recorded explicitly with `pnpm run db:migrations:record`.
+They must declare one rollout phase:
+
+```sql
+-- edgechat-migration-phase: expand
+```
+
+`expand` may only add compatible schema. A `data` migration that rewrites rows
+also needs `-- edgechat-migration-approval: <review reference>`. A `contract`
+migration additionally needs `-- edgechat-min-worker-protocol: <version>` and is
+valid only after older Workers/clients are outside the supported version window.
+The recorder refuses missing numbers, edits to recorded SQL, unreviewed data
+rewrites, destructive statements mislabeled as expansion, and disabling foreign
+keys. Updating `manifest.json` by hand defeats the release gate and is forbidden.
 
 Cloudflare D1 Time Travel is automatic. On the production storage backend it can
 restore by timestamp or bookmark; the documented history window is up to 30 days
