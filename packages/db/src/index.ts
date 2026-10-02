@@ -99,6 +99,10 @@ export type ImageSearchResult = Pick<LocalMessage, "message_id" | "room_id" | "s
 type ImageEmbeddingRow = Omit<ImageSearchResult, "kind" | "score"> & { embedding: Uint8Array; dimensions: number };
 export type CompactionJobStatus = "leased" | "key_wrapped" | "building" | "uploading" | "uploaded" | "complete" | "failed";
 export type PendingArchiveRetentionAck = { room_id: RoomId; segment_id: string };
+export type LocalArchiveSegmentMetadata = {
+  segment_id: string; room_id: RoomId; start_seq: number; end_seq: number; byte_size: number;
+  header_bytes: Uint8Array<ArrayBuffer>; envelope_index_bytes: Uint8Array<ArrayBuffer>;
+};
 export type OutboxStatus = "pending" | "sending" | "failed";
 export type OutboxItem = {
   event_id: string; message_id: string; room_id: RoomId; event: ClientEvent;
@@ -1103,6 +1107,29 @@ export class LocalDatabase {
   async archiveKey(segmentId: string): Promise<{ room_id: RoomId; segment_key: Uint8Array<ArrayBuffer>; start_seq: number; end_seq: number } | null> {
     const [row] = await this.query<{ room_id: RoomId; segment_key: Uint8Array<ArrayBuffer>; start_seq: number; end_seq: number }>("SELECT room_id, segment_key, start_seq, end_seq FROM archive_keys WHERE segment_id = $1", [segmentId]);
     return row ?? null;
+  }
+
+  async archiveSegmentMetadata(segmentId: string): Promise<LocalArchiveSegmentMetadata | null> {
+    const [row] = await this.query<LocalArchiveSegmentMetadata>(
+      "SELECT segment_id, room_id, start_seq, end_seq, byte_size, header_bytes, envelope_index_bytes FROM archive_segment_metadata WHERE segment_id = $1",
+      [segmentId],
+    );
+    return row ? { ...row, start_seq: Number(row.start_seq), end_seq: Number(row.end_seq), byte_size: Number(row.byte_size) } : null;
+  }
+
+  async saveArchiveSegmentMetadata(value: LocalArchiveSegmentMetadata): Promise<void> {
+    await this.query(
+      `INSERT INTO archive_segment_metadata (segment_id, room_id, start_seq, end_seq, byte_size, header_bytes, envelope_index_bytes, verified_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (segment_id) DO UPDATE SET room_id = EXCLUDED.room_id, start_seq = EXCLUDED.start_seq,
+         end_seq = EXCLUDED.end_seq, byte_size = EXCLUDED.byte_size, header_bytes = EXCLUDED.header_bytes,
+         envelope_index_bytes = EXCLUDED.envelope_index_bytes, verified_at = EXCLUDED.verified_at`,
+      [value.segment_id, value.room_id, value.start_seq, value.end_seq, value.byte_size, value.header_bytes, value.envelope_index_bytes, Date.now()],
+    );
+  }
+
+  async removeArchiveSegmentMetadata(segmentId: string): Promise<void> {
+    await this.query("DELETE FROM archive_segment_metadata WHERE segment_id = $1", [segmentId]);
   }
 
   async saveCompactionJob(job: { room_id: RoomId; segment_id: string; lease_token: string; start_seq: number; end_seq: number; expires_at: number; status: CompactionJobStatus; error?: string | null }): Promise<void> {

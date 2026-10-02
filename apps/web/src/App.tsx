@@ -844,7 +844,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const currentSession = session(); const currentIdentity = identity(); const currentMls = mls();
     rooms().length;
     if (!currentSession || !currentIdentity || !currentMls) return;
-    const engine = new SyncEngine(api, db, processEvent, async () => { await loadRooms(currentMls); }, undefined, resolveArchiveKey, presenceSharing()); syncRef = engine;
+    const engine = new SyncEngine(api, db, processEvent, async () => { await loadRooms(currentMls); }, undefined, resolveArchiveKey, presenceSharing(), db, archiveSegmentCache); syncRef = engine;
     const refresh = (received: Event) => {
       const event = (received as CustomEvent<RoomEvent>).detail;
       setRooms((current) => current.map((room) => room.room_id === event.room_id ? { ...room, current_seq: Math.max(room.current_seq, event.seq) } : room));

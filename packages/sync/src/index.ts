@@ -621,10 +621,12 @@ export class SyncEngine extends EventTarget {
     private networkEvents: NetworkEventSource | null = defaultNetworkEventSource(),
     archiveKeyResolver?: ArchiveKeyResolver,
     private sharePresence = false,
+    archiveMetadataCache?: ArchiveMetadataCache,
+    archiveCiphertextSource?: ArchiveCiphertextSource,
   ) {
     super();
     this.archiveCatchUp = archiveKeyResolver
-      ? new OrderedArchiveCatchUp(api, new ArchiveSegmentReader(api, archiveKeyResolver), (event) => this.ingestOne(event))
+      ? new OrderedArchiveCatchUp(api, new ArchiveSegmentReader(api, archiveKeyResolver, archiveMetadataCache, archiveCiphertextSource), (event) => this.ingestOne(event))
       : null;
   }
 
@@ -930,25 +932,79 @@ export class SyncEngine extends EventTarget {
 }
 
 export type ArchiveKeyResolver = (roomId: RoomId, segment: ArchiveSegmentDescriptor, envelope: Uint8Array<ArrayBuffer>) => Promise<Uint8Array<ArrayBuffer>>;
+export type ArchiveMetadataCache = {
+  archiveSegmentMetadata(segmentId: string): Promise<{
+    segment_id: string; room_id: RoomId; start_seq: number; end_seq: number; byte_size: number;
+    header_bytes: Uint8Array<ArrayBuffer>; envelope_index_bytes: Uint8Array<ArrayBuffer>;
+  } | null>;
+  saveArchiveSegmentMetadata(value: {
+    segment_id: string; room_id: RoomId; start_seq: number; end_seq: number; byte_size: number;
+    header_bytes: Uint8Array<ArrayBuffer>; envelope_index_bytes: Uint8Array<ArrayBuffer>;
+  }): Promise<void>;
+  removeArchiveSegmentMetadata(segmentId: string): Promise<void>;
+};
+export type ArchiveCiphertextSource = { get(segmentId: string): Promise<ArrayBuffer | null>; remove?(segmentId: string): Promise<void> };
 
 export class ArchiveSegmentReader {
-  constructor(private api: ApiClient, private resolveKey: ArchiveKeyResolver) {}
+  constructor(private api: ApiClient, private resolveKey: ArchiveKeyResolver, private metadataCache?: ArchiveMetadataCache, private ciphertextSource?: ArchiveCiphertextSource) {}
 
-  async read(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences?: number[]): Promise<RoomEvent[]> {
-    const headerBytes = await this.api.segmentRange(roomId, segment.segment_id, 0, SEGMENT_HEADER_BYTES);
+  private async verifiedMetadata(roomId: RoomId, segment: ArchiveSegmentDescriptor, range: (offset: number, length: number) => Promise<Uint8Array<ArrayBuffer>>) {
+    const decode = async (headerBytes: Uint8Array<ArrayBuffer>, envelopeAndIndex: Uint8Array<ArrayBuffer>) => {
+      const header = decodeSegmentHeader(headerBytes);
+      if (header.start_seq !== segment.start_seq || header.end_seq !== segment.end_seq) throw new Error("Archive manifest sequence range mismatch");
+      if (envelopeAndIndex.length !== header.key_envelope_length + header.index_length) throw new Error("Archive cached metadata length mismatch");
+      const keyEnvelope = envelopeAndIndex.slice(0, header.key_envelope_length);
+      const encryptedIndex = envelopeAndIndex.slice(header.key_envelope_length);
+      const segmentKey = await this.resolveKey(roomId, segment, keyEnvelope);
+      const index = await decodeSegmentIndex(roomId, segment.segment_id, encryptedIndex, segmentKey, header.index_uncompressed_length, { header, object_bytes: segment.byte_size });
+      return { header, segmentKey, index };
+    };
+    const cached = await this.metadataCache?.archiveSegmentMetadata(segment.segment_id).catch(() => null);
+    if (cached) {
+      const descriptorMatches = cached.room_id === roomId && cached.start_seq === segment.start_seq
+        && cached.end_seq === segment.end_seq && cached.byte_size === segment.byte_size;
+      if (descriptorMatches) {
+        try { return await decode(cached.header_bytes, cached.envelope_index_bytes); }
+        catch { await this.metadataCache?.removeArchiveSegmentMetadata(segment.segment_id).catch(() => undefined); }
+      } else await this.metadataCache?.removeArchiveSegmentMetadata(segment.segment_id).catch(() => undefined);
+    }
+    const headerBytes = await range(0, SEGMENT_HEADER_BYTES);
     const header = decodeSegmentHeader(headerBytes);
     if (header.start_seq !== segment.start_seq || header.end_seq !== segment.end_seq) throw new Error("Archive manifest sequence range mismatch");
-    const manifestAndIndex = await this.api.segmentRange(roomId, segment.segment_id, header.key_envelope_offset, header.key_envelope_length + header.index_length);
-    const keyEnvelope = manifestAndIndex.slice(0, header.key_envelope_length);
-    const encryptedIndex = manifestAndIndex.slice(header.key_envelope_length);
-    const segmentKey = await this.resolveKey(roomId, segment, keyEnvelope);
-    const index = await decodeSegmentIndex(roomId, segment.segment_id, encryptedIndex, segmentKey, header.index_uncompressed_length, { header, object_bytes: segment.byte_size });
+    const envelopeAndIndex = await range(header.key_envelope_offset, header.key_envelope_length + header.index_length);
+    const verified = await decode(headerBytes, envelopeAndIndex);
+    await this.metadataCache?.saveArchiveSegmentMetadata({
+      segment_id: segment.segment_id, room_id: roomId, start_seq: segment.start_seq, end_seq: segment.end_seq,
+      byte_size: segment.byte_size, header_bytes: headerBytes.slice(), envelope_index_bytes: envelopeAndIndex.slice(),
+    }).catch(() => undefined);
+    return verified;
+  }
+
+  async read(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences?: number[]): Promise<RoomEvent[]> {
+    const local = await this.ciphertextSource?.get(segment.segment_id).catch(() => null) ?? null;
+    const validLocal = local?.byteLength === segment.byte_size ? new Uint8Array(local) : null;
+    if (local && !validLocal) await this.ciphertextSource?.remove?.(segment.segment_id).catch(() => undefined);
+    try { return await this.readFrom(roomId, segment, sequences, validLocal); }
+    catch (error) {
+      if (!validLocal) throw error;
+      await this.ciphertextSource?.remove?.(segment.segment_id).catch(() => undefined);
+      return this.readFrom(roomId, segment, sequences, null);
+    }
+  }
+
+  private async readFrom(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences: number[] | undefined, local: Uint8Array<ArrayBuffer> | null): Promise<RoomEvent[]> {
+    const readRange = async (offset: number, length: number) => {
+      if (!local) return this.api.segmentRange(roomId, segment.segment_id, offset, length);
+      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1 || offset + length > local.length) throw new Error("Cached archive range is invalid");
+      return local.slice(offset, offset + length);
+    };
+    const { header, segmentKey, index } = await this.verifiedMetadata(roomId, segment, readRange);
     const wanted = sequences ?? Array.from({ length: segment.end_seq - segment.start_seq + 1 }, (_, i) => segment.start_seq + i);
     if (wanted.some((sequence) => !Number.isSafeInteger(sequence) || sequence < segment.start_seq || sequence > segment.end_seq)) throw new Error("Requested archive sequence is outside the segment");
     const wantedSequences = new Set(wanted);
     const selected: RoomEvent[] = [];
     for (const range of rangesForSequences(index, wanted, header.index_offset + header.index_length)) {
-      const encryptedChunk = await this.api.segmentRange(roomId, segment.segment_id, range.offset, range.length);
+      const encryptedChunk = await readRange(range.offset, range.length);
       const events = await decodeSegmentChunk(roomId, segment.segment_id, range.chunk, encryptedChunk, segmentKey, index.chunks[range.chunk].uncompressed_length);
       const descriptor = index.chunks[range.chunk];
       if (events.length !== descriptor.last_seq - descriptor.first_seq + 1 || events.some((event, eventIndex) => event.room_id !== roomId || event.seq !== descriptor.first_seq + eventIndex)) throw new Error("Archive chunk event sequence mismatch");
@@ -964,8 +1020,8 @@ export class ArchiveSegmentReader {
 export class ProgressiveHistoryIndexer {
   private readonly reader: ArchiveSegmentReader;
 
-  constructor(api: ApiClient, private db: LocalDatabase, private processEvent: EventProcessor, resolveKey: ArchiveKeyResolver) {
-    this.reader = new ArchiveSegmentReader(api, resolveKey);
+  constructor(api: ApiClient, private db: LocalDatabase, private processEvent: EventProcessor, resolveKey: ArchiveKeyResolver, metadataCache?: ArchiveMetadataCache, ciphertextSource?: ArchiveCiphertextSource) {
+    this.reader = new ArchiveSegmentReader(api, resolveKey, metadataCache, ciphertextSource);
   }
 
   async indexSegment(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences?: number[]): Promise<number> {

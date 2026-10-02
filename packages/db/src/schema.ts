@@ -386,6 +386,17 @@ CREATE TABLE IF NOT EXISTS archive_keys (
   received_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_archive_keys_room ON archive_keys(room_id, start_seq);
+CREATE TABLE IF NOT EXISTS archive_segment_metadata (
+  segment_id TEXT PRIMARY KEY,
+  room_id TEXT NOT NULL,
+  start_seq BIGINT NOT NULL,
+  end_seq BIGINT NOT NULL,
+  byte_size BIGINT NOT NULL,
+  header_bytes BYTEA NOT NULL,
+  envelope_index_bytes BYTEA NOT NULL,
+  verified_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_archive_segment_metadata_room ON archive_segment_metadata(room_id, start_seq);
 CREATE TABLE IF NOT EXISTS compaction_jobs (
   room_id TEXT PRIMARY KEY,
   segment_id TEXT NOT NULL,
@@ -409,7 +420,7 @@ TRUNCATE TABLE
   account_state, cached_session, users, devices, device_verifications, rooms, room_snapshots, room_members, room_hidden_senders, messages, expired_messages, room_message_expiry, message_tombstones, message_edits, message_reactions,
   room_read_state, room_preferences, device_preferences, composer_drafts, composer_draft_sync_state, composer_draft_outbox, composer_draft_device_state, read_receipts, room_delivery_state, delivery_receipts, outbox,
   device_revocation_outbox, device_link_jobs, device_link_outbox, account_removal_outbox, processed_events, room_sync_state, deferred_room_events, event_envelopes, failed_events, attachments,
-  message_parts, image_embeddings, segment_state, crypto_state, archive_keys, compaction_jobs, push_state
+  message_parts, image_embeddings, segment_state, crypto_state, archive_keys, archive_segment_metadata, compaction_jobs, push_state
 CASCADE;
 UPDATE sync_state SET cursor = 0, updated_at = 0 WHERE id = 1;
 `;

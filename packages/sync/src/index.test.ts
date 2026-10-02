@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, RoomSequenceGapError, SyncEngine } from "./index";
+import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -623,6 +623,56 @@ describe("ProgressiveHistoryIndexer", () => {
     expect(resolveKey).toHaveBeenCalledOnce();
     expect(ranges[0]).toEqual([0, 40]);
     expect(ranges[1][1]).toBeGreaterThan(envelope.length);
+  });
+});
+
+describe("ArchiveSegmentReader metadata cache", () => {
+  it("reuses authenticated immutable metadata while range-fetching only requested chunks", async () => {
+    const roomId = "!archive-cache:example.com" as const;
+    const events = [1, 2].map((seq) => ({
+      event_id: `cache-event-${seq}`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "alice-device",
+      type: "message.text" as const, created_at: seq, ciphertext: `cipher-${seq}`, metadata: {}, signature: `signature-${seq}`,
+    } as RoomEvent));
+    const key = crypto.getRandomValues(new Uint8Array(32)); const envelope = new Uint8Array(96).fill(4);
+    const built = await buildSegment(roomId, "archive_cache_segment_01", events, key, envelope, 1);
+    const descriptor = { segment_id: "archive_cache_segment_01", start_seq: 1, end_seq: 2, byte_size: built.bytes.length };
+    const segmentRange = vi.fn(async (_room: string, _segment: string, offset: number, length: number) => built.bytes.slice(offset, offset + length));
+    let cached: Awaited<ReturnType<ArchiveMetadataCache["archiveSegmentMetadata"]>> = null;
+    const cache: ArchiveMetadataCache = {
+      archiveSegmentMetadata: vi.fn(async () => cached ?? null),
+      saveArchiveSegmentMetadata: vi.fn(async (value) => { cached = value; }),
+      removeArchiveSegmentMetadata: vi.fn(async () => { cached = null; }),
+    };
+    const reader = new ArchiveSegmentReader({ segmentRange } as unknown as ApiClient, async () => key, cache);
+
+    await expect(reader.read(roomId, descriptor, [1])).resolves.toHaveLength(1);
+    await expect(reader.read(roomId, descriptor, [2])).resolves.toHaveLength(1);
+
+    expect(cache.saveArchiveSegmentMetadata).toHaveBeenCalledOnce();
+    expect(segmentRange.mock.calls.filter((call) => call[2] === 0)).toHaveLength(1);
+    expect(segmentRange).toHaveBeenCalledTimes(4); // header + envelope/index once, then one independently authenticated chunk per read
+  });
+
+  it("uses a linked-device OPFS segment without R2 and evicts a corrupted local copy before retrying", async () => {
+    const roomId = "!archive-local:example.com" as const;
+    const event = { event_id: "local-event-1", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "alice-device",
+      type: "message.text" as const, created_at: 1, ciphertext: "cipher", metadata: {}, signature: "signature" } as RoomEvent;
+    const key = crypto.getRandomValues(new Uint8Array(32)); const envelope = new Uint8Array(96).fill(8);
+    const built = await buildSegment(roomId, "archive_local_segment_1", [event], key, envelope, 180);
+    const descriptor = { segment_id: "archive_local_segment_1", start_seq: 1, end_seq: 1, byte_size: built.bytes.length };
+    const segmentRange = vi.fn(async (_room: string, _segment: string, offset: number, length: number) => built.bytes.slice(offset, offset + length));
+    const remove = vi.fn(async () => undefined);
+    const validSource = { get: vi.fn(async () => built.bytes.slice().buffer as ArrayBuffer), remove };
+    const localReader = new ArchiveSegmentReader({ segmentRange } as unknown as ApiClient, async () => key, undefined, validSource);
+    await expect(localReader.read(roomId, descriptor)).resolves.toEqual([event]);
+    expect(segmentRange).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+
+    const corrupted = built.bytes.slice(); corrupted[corrupted.length - 1] ^= 0xff;
+    const corruptSource = { get: vi.fn(async () => corrupted.buffer as ArrayBuffer), remove };
+    const repairingReader = new ArchiveSegmentReader({ segmentRange } as unknown as ApiClient, async () => key, undefined, corruptSource);
+    await expect(repairingReader.read(roomId, descriptor)).resolves.toEqual([event]);
+    expect(remove).toHaveBeenCalledWith(descriptor.segment_id);
+    expect(segmentRange).toHaveBeenCalledTimes(3);
   });
 });
 
