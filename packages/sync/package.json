@@ -1,0 +1,23 @@
+{
+  "name": "@edgechat/sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./archive": "./src/archive.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@edgechat/db": "workspace:*",
+    "@edgechat/protocol": "workspace:*",
+    "@paddor/zrip": "^0.5.9"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "vitest": "^4.1.11"
+  }
+}

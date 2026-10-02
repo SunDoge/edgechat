@@ -1,0 +1,15 @@
+{
+  "name": "@edgechat/storage-audit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "bin": {
+    "edgechat-storage-audit": "./src/cli.mjs"
+  },
+  "scripts": {
+    "build": "node --check src/audit.mjs && node --check src/cloudflare.mjs && node --check src/cli.mjs",
+    "typecheck": "node --check src/audit.mjs && node --check src/cloudflare.mjs && node --check src/cli.mjs",
+    "test": "node --test"
+  }
+}

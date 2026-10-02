@@ -1,0 +1,127 @@
+/// <reference lib="webworker" />
+import { PGlite } from "@electric-sql/pglite";
+import { LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
+import { purgeRoomBefore, setRoomRetention, type LocalRetentionDays } from "./retention";
+import { purgeExpiredMessages } from "./expiry";
+
+type DbRequest =
+  | { id: number; kind?: "query"; sql: string; params?: unknown[]; exec?: boolean }
+  | { id: number; kind: "dump" }
+  | { id: number; kind: "purge-room"; roomId: string; cutoff: number }
+  | { id: number; kind: "set-room-retention"; roomId: string; days: LocalRetentionDays | null; now: number }
+  | { id: number; kind: "purge-expired-messages"; now: number }
+  | { id: number; kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string };
+type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
+
+let storage: "opfs" | "indexeddb" = "opfs";
+const CONFIG_DB = "edgechat-local-config";
+
+function configDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(CONFIG_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("settings");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function activeDataDir(): Promise<string | null> {
+  const config = await configDatabase();
+  const value = await new Promise<string | null>((resolve, reject) => {
+    const request = config.transaction("settings").objectStore("settings").get("active-data-dir");
+    request.onsuccess = () => resolve(typeof request.result === "string" ? request.result : null);
+    request.onerror = () => reject(request.error);
+  });
+  config.close();
+  return value;
+}
+
+async function setActiveDataDir(value: string): Promise<void> {
+  const config = await configDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = config.transaction("settings", "readwrite");
+    transaction.objectStore("settings").put(value, "active-data-dir");
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+  config.close();
+}
+
+const database = (async () => {
+  const configured = await activeDataDir();
+  if (configured) {
+    storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
+    const db = new PGlite(configured);
+    await db.waitReady;
+    await db.exec(LOCAL_SCHEMA);
+    return db;
+  }
+  let db: PGlite;
+  try {
+    db = new PGlite("opfs-ahp://edgechat-local");
+    await db.waitReady;
+  } catch {
+    storage = "indexeddb";
+    db = new PGlite("idb://edgechat-local");
+    await db.waitReady;
+  }
+  await db.exec(LOCAL_SCHEMA);
+  return db;
+})();
+
+self.onmessage = async (event: MessageEvent<DbRequest>) => {
+  const request = event.data;
+  try {
+    const db = await database;
+    if (request.kind === "dump") {
+      const blob = await db.runExclusive(() => db.dumpDataDir("gzip"));
+      self.postMessage({ id: request.id, blob, storage } satisfies DbResponse);
+      return;
+    }
+    if (request.kind === "purge-room") {
+      const deleted = await purgeRoomBefore(db, request.roomId, request.cutoff);
+      self.postMessage({ id: request.id, rows: [{ deleted }], storage } satisfies DbResponse);
+      return;
+    }
+    if (request.kind === "set-room-retention") {
+      const deleted = await setRoomRetention(db, request.roomId, request.days, request.now);
+      self.postMessage({ id: request.id, rows: [{ deleted }], storage } satisfies DbResponse);
+      return;
+    }
+    if (request.kind === "purge-expired-messages") {
+      const deleted = await purgeExpiredMessages(db, request.now);
+      self.postMessage({ id: request.id, rows: [{ deleted }], storage } satisfies DbResponse);
+      return;
+    }
+    if (request.kind === "restore" || request.kind === "restore-device-history") {
+      if (request.snapshot.size === 0 || request.snapshot.size > 2_147_483_648) throw new Error("Backup database is empty or too large");
+      const slot = `edgechat-local-restore-${crypto.randomUUID()}`;
+      const dataDir = storage === "opfs" ? `opfs-ahp://${slot}` : `idb://${slot}`;
+      const restored = new PGlite(dataDir, { loadDataDir: request.snapshot });
+      try {
+        await restored.waitReady;
+        await restored.exec(LOCAL_SCHEMA);
+        const result = await restored.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1");
+        if (result.rows.length !== 1 || result.rows[0].user_id !== request.expectedUserId) throw new Error("备份中的本机消息库不属于这个账户");
+        if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
+        await restored.close();
+        await setActiveDataDir(dataDir);
+      } catch (error) {
+        await restored.close().catch(() => undefined);
+        throw error;
+      }
+      self.postMessage({ id: request.id, restored: true, storage } satisfies DbResponse);
+      return;
+    }
+    if (!("sql" in request)) throw new Error("Invalid database request");
+    if (request.exec) {
+      await db.exec(request.sql);
+      self.postMessage({ id: request.id, rows: [], storage } satisfies DbResponse);
+    } else {
+      const result = await db.query(request.sql, request.params ?? []);
+      self.postMessage({ id: request.id, rows: result.rows, storage } satisfies DbResponse);
+    }
+  } catch (error) {
+    self.postMessage({ id: request.id, error: error instanceof Error ? error.message : String(error) } satisfies DbResponse);
+  }
+};

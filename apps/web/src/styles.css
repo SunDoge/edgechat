@@ -1,0 +1,33 @@
+@import "tailwindcss";
+@source "../../../packages/ui/src";
+
+@theme {
+  --color-ink: #18181b;
+  --color-muted: #71717a;
+  --color-line: rgb(24 24 27 / 0.10);
+  --color-brand: #2563eb;
+  --color-brand-strong: #1d4ed8;
+  --color-brand-soft: #eff6ff;
+  --color-chat: #f7f7f5;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --shadow-composer: 0 1px 2px rgb(24 24 27 / 0.06), 0 5px 16px rgb(24 24 27 / 0.05);
+  --shadow-message: 0 1px 2px rgb(24 24 27 / 0.08), 0 0 0 1px rgb(24 24 27 / 0.04);
+}
+
+@layer base {
+  :root { color: var(--color-ink); background: white; font-family: var(--font-sans); }
+  html, body, #root { min-width: 320px; height: 100%; }
+  body { margin: 0; overflow: hidden; }
+  button, input, textarea { font: inherit; }
+  button { cursor: pointer; }
+  button:disabled { cursor: default; }
+  ::selection { background: rgb(37 99 235 / 0.16); }
+}
+
+@utility chat-viewport { min-height: 0; }
+@utility message-list { min-height: 0; scrollbar-gutter: stable; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+}

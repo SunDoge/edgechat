@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/db" },
+    { "path": "packages/sync" },
+    { "path": "packages/ui" },
+    { "path": "packages/bot-sdk" },
+    { "path": "apps/web" },
+    { "path": "apps/worker" }
+  ]
+}

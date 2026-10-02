@@ -1,0 +1,10 @@
+{
+  "name": "@edgechat/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "dependencies": { "@electric-sql/pglite": "^0.5.8", "@edgechat/protocol": "workspace:*" },
+  "devDependencies": { "typescript": "latest", "vitest": "^4.1.11" }
+}

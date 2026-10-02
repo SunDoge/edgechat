@@ -1,0 +1,1003 @@
+import type { LocalDatabase } from "@edgechat/db";
+import { assertCompatibleServerProtocol, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserProfile } from "@edgechat/protocol";
+import { decodeSegmentChunk, decodeSegmentHeader, decodeSegmentIndex, rangesForSequences, SEGMENT_HEADER_BYTES } from "./archive";
+
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public code: string) { super(message); }
+}
+
+export type SessionIdentity = { user_id: string; device_id: string; display_name: string; avatar_url?: string | null; server_name?: string; vapid_public_key?: string; device_credential?: string; archive_compaction_enabled: boolean; protocol?: ServerProtocolCapabilities };
+export type ServerDevice = { device_id: string; user_id: string; display_name: string; kind: "user" | "bot"; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
+export type RoomArchiveDevice = ServerDevice;
+export type ServerRoom = RoomSummary & { home_server: string; joined_seq: number; encrypted_state: string | null; epoch: number | null; muted_until: number | null; blocked_by_me: boolean };
+export type ClaimedMlsKeyPackage = { claim_id: string; device_id: string; user_id: string; key_package: string };
+export type CompactionLease = { room_id: RoomId; token: string; device_id: string; segment_id: string; start_seq: number; end_seq: number; expires_at: number };
+export type RepairLease = {
+  complete?: boolean;
+  token?: string;
+  room_id?: RoomId;
+  start_seq?: number;
+  end_seq?: number;
+  floor_seq: number;
+  generation: number;
+  expires_at?: number;
+  missing_sequences: number[];
+  max_events_per_upload?: number;
+};
+export type RepairUploadResult = {
+  restored_do_events: number;
+  restored_d1_events: number;
+  complete: boolean;
+  missing_sequences: number[];
+};
+export type HistoryRepairJob = { room_id: RoomId; start_seq: number; end_seq: number; missing_count: number; detected_at: number };
+export type AttachmentRepairJob = { attachment_id: string; ciphertext_bytes: number; ciphertext_sha256: string; detected_at: number };
+export type AttachmentRepairLease = AttachmentRepairJob & { token: string; expires_at: number };
+export type ArchiveRepairJob = { segment_id: string; room_id: RoomId; byte_size: number; ciphertext_sha256: string; detected_at: number };
+export type ArchiveRepairLease = ArchiveRepairJob & { token: string; expires_at: number };
+export type ArchiveSegmentDescriptor = { segment_id: string; start_seq: number; end_seq: number; byte_size: number };
+export type BotIntegration = { bot_id: string; device_id: string; display_name: string; room_id: RoomId | null; scope: "message:create"; max_messages_per_minute: number; created_at: number; expires_at: number; revoked_at: number | null };
+export type BotCredentials = { bot_id: string; access_token: string; user_id: string; device_id: string; display_name: string; server_name: string; expires_at: number; scope: "message:create"; max_messages_per_minute: number };
+export type StorageUsage = { attachment_bytes: number; archive_bytes: number; avatar_bytes: number; attachment_objects: number; archive_objects: number; avatar_objects: number; used_bytes: number; quota_bytes: number; remaining_bytes: number; used_objects: number; object_limit: number; remaining_objects: number; quota_source: "default" | "override"; updated_at: number };
+export type InvitationPolicy = "everyone" | "shared_rooms" | "nobody";
+export type MlsKeyPackageStatus = { available: number; claimed: number; active: number; low_water: number; target: number; active_limit: number };
+export type DeviceRevocation = {
+  revocation_id: string;
+  target_device_id: string;
+  status: "pending" | "finalizing" | "complete";
+  rooms: Array<{ room_id: RoomId; expected_epoch: number; status: "pending" | "complete"; event_id: string | null }>;
+};
+export type DeviceLinkStatus = {
+  link_id: string;
+  device_id: string;
+  status: "pending" | "awaiting_packages" | "approved" | "complete" | "claimed" | "cancelled";
+  required_packages: number;
+  expires_at: number;
+  history_transfer_ready: boolean;
+  history_transfer_bytes: number | null;
+  history_source_device_id: string | null;
+  history_transfer: DeviceHistoryTransfer | null;
+  user_id?: string;
+  room_count?: number;
+  rooms?: Array<{ room_id: RoomId; expected_epoch: number; status: "pending" | "complete"; encrypted_state: string | null; name: string | null; kind: "direct" | "group"; purpose: "chat" | "saved" }>;
+};
+export type DeviceHistoryTransfer = {
+  transfer_id: string;
+  source_device_id: string;
+  plaintext_bytes: number;
+  shard_plaintext_bytes: number;
+  shard_count: number;
+  ready_shards: number[];
+  acked_shards: number[];
+  ciphertext_bytes: number;
+};
+export type DeviceLinkPreview = {
+  link_id: string; device_id: string; display_name: string; signing_key: JsonWebKey; encryption_key: JsonWebKey;
+  status: DeviceLinkStatus["status"]; required_packages: number; expires_at: number;
+  history_transfer_ready: boolean; history_transfer_bytes: number | null; history_source_device_id: string | null;
+  history_transfer: DeviceHistoryTransfer | null;
+  rooms: Array<{ room_id: RoomId; key_package: string; expected_epoch: number; status: "pending" | "complete"; event_id: string | null; name: string | null; kind: "direct" | "group"; purpose: "chat" | "saved" }>;
+};
+export type AccountRemovalTask = {
+  deletion_id: string;
+  room_id: RoomId;
+  target_user_id: string;
+  target_device_ids: string[];
+  expected_epoch: number;
+  name: string | null;
+  kind: "direct" | "group";
+};
+export type AccountDeletionProgress = {
+  deletion_id: string;
+  status: "pending" | "processing" | "complete";
+  rooms: { pending: number; complete: number };
+  objects: { pending: number; complete: number };
+};
+export type AccountExportPage<T> = { next_cursor: string | null } & T;
+export type RetentionCoverageState = { room_id: RoomId; current_seq: number; retention_floor_seq: number; retention_generation: number };
+export type RetentionCoverageAcknowledgement = { room_id: RoomId; generation: number; from_seq: number; through_seq: number };
+export type PeerRecoveryStatus = "pending" | "transferring" | "ready" | "complete" | "cancelled";
+export type PeerRecovery = {
+  recovery_id: string; room_id: RoomId; target_device_id: string; source_device_id: string | null;
+  after_seq: number; through_seq: number; status: PeerRecoveryStatus; ciphertext_bytes?: number | null; expires_at: number;
+  source_encryption_key?: JsonWebKey | null;
+};
+export type PeerRecoveryJob = PeerRecovery & { encryption_key: JsonWebKey };
+export type PeerRecoveryLease = {
+  recovery_id: string; room_id: RoomId; target_device_id: string; after_seq: number; through_seq: number;
+  encryption_key: JsonWebKey; token: string; lease_expires_at: number;
+};
+
+export class ApiClient {
+  constructor(public readonly baseUrl = "", private token: string | null = null) {}
+  setToken(token: string | null): void { this.token = token; }
+  getToken(): string | null { return this.token; }
+
+  register(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/register", { method: "POST", body: JSON.stringify(payload) }); }
+  login(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/login", { method: "POST", body: JSON.stringify(payload) }); }
+  createDeviceLink(payload: Record<string, unknown>) { return this.request<{ link_id: string; secret: string; expires_at: number; server_name: string }>("/api/v1/device-links", { method: "POST", body: JSON.stringify(payload) }); }
+  deviceLinkStatus(linkId: string, secret: string) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/status`, { headers: { "x-device-link-secret": secret } }); }
+  uploadDeviceLinkPackages(linkId: string, secret: string, packages: string[]) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/key-packages`, { method: "POST", headers: { "x-device-link-secret": secret }, body: JSON.stringify({ mls_key_packages: packages }) }); }
+  uploadDeviceLinkHistory(linkId: string, history: Blob) { return this.request<{ ready: true; bytes: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history" }, body: history }); }
+  createDeviceLinkHistoryTransfer(linkId: string, manifest: { transfer_id: string; plaintext_bytes: number; shard_plaintext_bytes: number; shard_count: number }) {
+    return this.request<{ transfer: DeviceHistoryTransfer }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/manifest`, { method: "PUT", body: JSON.stringify(manifest) });
+  }
+  uploadDeviceLinkHistoryShard(linkId: string, index: number, shard: Blob) {
+    return this.request<{ ready: true; index: number; bytes: number; status: "ready" | "acked" }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history-shard" }, body: shard });
+  }
+  async downloadDeviceLinkHistoryShard(linkId: string, secret: string, index: number): Promise<Blob> {
+    const response = await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { headers: { "x-device-link-secret": secret } });
+    return response.blob();
+  }
+  async acknowledgeDeviceLinkHistoryShard(linkId: string, secret: string, index: number): Promise<void> {
+    await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "DELETE", headers: { "x-device-link-secret": secret } });
+  }
+  async downloadDeviceLinkHistory(linkId: string, secret: string): Promise<Blob> {
+    const response = await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { headers: { "x-device-link-secret": secret } });
+    return response.blob();
+  }
+  async acknowledgeDeviceLinkHistory(linkId: string, secret: string): Promise<void> {
+    await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { method: "DELETE", headers: { "x-device-link-secret": secret } });
+  }
+  deviceLinkPreview(linkId: string) { return this.request<DeviceLinkPreview>(`/api/v1/device-links/${encodeURIComponent(linkId)}`); }
+  approveDeviceLink(linkId: string) { return this.request<{ link_id: string; status: DeviceLinkStatus["status"]; required_packages: number; expires_at: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}`, { method: "POST" }); }
+  commitDeviceLinkRoom(linkId: string, roomId: RoomId, event: ClientEvent, encryptedState: string) { return this.request<{ link_id: string; room_id: RoomId; status: "complete"; event: RoomEvent }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify({ event, encrypted_state: encryptedState }) }); }
+  claimDeviceLink(linkId: string, secret: string, accessToken: string, signature: string) { return this.sessionRequest<SessionIdentity>(`/api/v1/device-links/${encodeURIComponent(linkId)}/claim`, { method: "POST", headers: { "x-device-link-secret": secret }, body: JSON.stringify({ access_token: accessToken, signature }) }); }
+  checkBackupRestore(payload: Record<string, unknown>) { return this.request<{ valid: true }>("/api/v1/backup-restores/check", { method: "POST", body: JSON.stringify(payload) }); }
+  me() { return this.sessionRequest<SessionIdentity>("/api/v1/me"); }
+  profile(userId?: string) { return this.request<{ profile: UserProfile }>(userId ? `/api/v1/users/${encodeURIComponent(userId)}/profile` : "/api/v1/profile"); }
+  updateProfile(displayName: string, bio: string) { return this.request<{ profile: UserProfile }>("/api/v1/profile", { method: "PUT", body: JSON.stringify({ display_name: displayName, bio }) }); }
+  updateProfileAvatar(blob: Blob) { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "PUT", body: blob, headers: { "content-type": "image/webp" } }); }
+  deleteProfileAvatar() { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "DELETE" }); }
+  storageUsage() { return this.request<StorageUsage>("/api/v1/storage"); }
+  privacy() { return this.request<{ invitation_policy: InvitationPolicy }>("/api/v1/privacy"); }
+  setInvitationPolicy(invitationPolicy: InvitationPolicy) { return this.request<{ invitation_policy: InvitationPolicy }>("/api/v1/privacy", { method: "PUT", body: JSON.stringify({ invitation_policy: invitationPolicy }) }); }
+  bots() { return this.request<{ bots: BotIntegration[] }>("/api/v1/bots"); }
+  createBot(payload: Record<string, unknown>) { return this.request<BotCredentials>("/api/v1/bots", { method: "POST", body: JSON.stringify(payload) }); }
+  revokeBot(botId: string) { return this.request<void>(`/api/v1/bots/${encodeURIComponent(botId)}`, { method: "DELETE" }); }
+  rooms() { return this.request<{ rooms: ServerRoom[] }>("/api/v1/rooms"); }
+  room(roomId: RoomId) { return this.request<{ room: ServerRoom }>(`/api/v1/rooms/${encodeURIComponent(roomId)}`); }
+  acceptMessageRequest(roomId: RoomId) { return this.request<{ room_id: RoomId; status: "accepted" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/request/accept`, { method: "POST" }); }
+  rejectMessageRequest(roomId: RoomId) { return this.request<{ room_id: RoomId; status: "rejected" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/request`, { method: "DELETE" }); }
+  reportMessageRequest(roomId: RoomId, category: "spam" | "abuse" | "other", eventId?: string) { return this.request<{ room_id: RoomId; status: "rejected" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/report`, { method: "POST", body: JSON.stringify({ category, event_id: eventId }) }); }
+  roomDevices(roomId: RoomId) { return this.request<{ devices: RoomArchiveDevice[] }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/devices`); }
+  setRoomNotificationPreference(roomId: RoomId, mutedUntil: number | null) { return this.request<{ room_id: RoomId; muted_until: number | null }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/preferences`, { method: "PUT", body: JSON.stringify({ muted_until: mutedUntil }) }); }
+  hideGroupMember(roomId: RoomId, userId: string) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/hidden-members/${encodeURIComponent(userId)}`, { method: "PUT" }); }
+  showGroupMember(roomId: RoomId, userId: string) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/hidden-members/${encodeURIComponent(userId)}`, { method: "DELETE" }); }
+  putDraft(roomId: RoomId, envelopes: DraftEnvelope[]) { return this.request<{ room_id: RoomId; updated: number }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/draft`, { method: "PUT", body: JSON.stringify({ envelopes }) }); }
+  drafts(cursor?: RoomId) { return this.request<{ drafts: DraftEnvelopeRecord[]; next_cursor: RoomId | null }>(`/api/v1/drafts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`); }
+  createRoom(payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; created: boolean }>("/api/v1/rooms", { method: "POST", body: JSON.stringify(payload) }); }
+  mlsKeyPackageStatus() { return this.request<MlsKeyPackageStatus>("/api/v1/mls/key-packages"); }
+  uploadMlsKeyPackages(packages: string[]) { return this.request<MlsKeyPackageStatus & { uploaded: number }>("/api/v1/mls/key-packages", { method: "POST", body: JSON.stringify({ mls_key_packages: packages }) }); }
+  claimMlsKeyPackages(userIds: string[], roomId: RoomId) { return this.request<{ key_packages: ClaimedMlsKeyPackage[] }>("/api/v1/mls/key-packages/claim", { method: "POST", body: JSON.stringify({ user_ids: userIds, room_id: roomId }) }); }
+  addMember(roomId: RoomId, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members`, { method: "POST", body: JSON.stringify(payload) }); }
+  removeMember(roomId: RoomId, userId: string, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE", body: JSON.stringify(payload) }); }
+  users(query: string) { return this.request<{ users: Array<{ user_id: string; display_name: string; avatar_url: string | null }> }>(`/api/v1/users?q=${encodeURIComponent(query)}`); }
+  blockUser(userId: string) { return this.request<void>(`/api/v1/users/${encodeURIComponent(userId)}/block`, { method: "PUT" }); }
+  unblockUser(userId: string) { return this.request<void>(`/api/v1/users/${encodeURIComponent(userId)}/block`, { method: "DELETE" }); }
+  devices(userId?: string) { return this.request<{ devices: ServerDevice[] }>(userId ? `/api/v1/users/${encodeURIComponent(userId)}/devices` : "/api/v1/devices"); }
+  createBackupCheckpoint() { return this.request<{ checkpoint: string; device_credential: string; created_at: number }>("/api/v1/devices/backup-checkpoints", { method: "POST" }); }
+  revokeDevice(deviceId: string) { return this.request<void>(`/api/v1/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" }); }
+  activeDeviceRevocations() { return this.request<{ revocations: DeviceRevocation[] }>("/api/v1/device-revocations"); }
+  prepareDeviceRevocation(deviceId: string) { return this.request<DeviceRevocation>(`/api/v1/devices/${encodeURIComponent(deviceId)}/revocations`, { method: "POST" }); }
+  commitDeviceRevocation(revocationId: string, roomId: RoomId, event: ClientEvent) {
+    return this.request<DeviceRevocation & { event: RoomEvent | null }>(`/api/v1/device-revocations/${encodeURIComponent(revocationId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify(event) });
+  }
+  accountRemovalTasks() { return this.request<{ tasks: AccountRemovalTask[] }>("/api/v1/account-removals"); }
+  commitAccountRemoval(deletionId: string, roomId: RoomId, event: ClientEvent) {
+    return this.request<{ deletion: AccountDeletionProgress; event: RoomEvent | null }>(`/api/v1/account-removals/${encodeURIComponent(deletionId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify({ event }) });
+  }
+  accountExport() { return this.request<Record<string, unknown>>("/api/v1/account/export"); }
+  accountExportRooms(cursor?: string) { return this.request<AccountExportPage<{ rooms: Array<Record<string, unknown>> }>>(`/api/v1/account/export/rooms?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); }
+  accountExportEvents(cursor?: string) { return this.request<AccountExportPage<{ events: Array<Record<string, unknown>> }>>(`/api/v1/account/export/events?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); }
+  accountExportObjects(cursor?: string) { return this.request<AccountExportPage<{ objects: Array<Record<string, unknown>> }>>(`/api/v1/account/export/objects?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); }
+  accountExportDrafts(cursor?: string) { return this.request<AccountExportPage<{ drafts: Array<Record<string, unknown>> }>>(`/api/v1/account/export/drafts?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); }
+  deleteAccount(password: string) { return this.request<AccountDeletionProgress>("/api/v1/account/deletion", { method: "POST", body: JSON.stringify({ password }) }); }
+  sendEvent(roomId: RoomId, event: RoomEvent | Omit<RoomEvent, "seq">) { return this.request<{ event: RoomEvent }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", body: JSON.stringify(event) }); }
+  sync(cursor: number) { return this.request<SyncResponse>(`/api/v1/sync?cursor=${cursor}`); }
+  retentionCoverage(cursor?: RoomId) {
+    return this.request<{ rooms: RetentionCoverageState[]; next_cursor: RoomId | null }>(`/api/v1/retention/coverage${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+  }
+  acknowledgeRetentionCoverage(acknowledgements: RetentionCoverageAcknowledgement[]) {
+    return this.request<{ acknowledged: number }>("/api/v1/retention/coverage", { method: "POST", body: JSON.stringify({ acknowledgements }) });
+  }
+  requestPeerRecovery(roomId: RoomId, afterSeq: number, throughSeq: number) {
+    return this.request<{ recovery: PeerRecovery }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/peer-recovery`, {
+      method: "POST", body: JSON.stringify({ after_seq: afterSeq, through_seq: throughSeq }),
+    });
+  }
+  peerRecoveryJobs() { return this.request<{ recoveries: PeerRecoveryJob[] }>("/api/v1/peer-recoveries"); }
+  peerRecoveryStatus(recoveryId: string) { return this.request<{ recovery: PeerRecovery }>(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}`); }
+  async cancelPeerRecovery(recoveryId: string): Promise<void> {
+    await this.raw(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}`, { method: "DELETE" });
+  }
+  claimPeerRecovery(recoveryId: string) { return this.request<PeerRecoveryLease>(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/claim`, { method: "POST" }); }
+  uploadPeerRecovery(recoveryId: string, token: string, bundle: Blob) {
+    return this.request<{ recovery_id: string; ready: true; ciphertext_bytes: number }>(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, {
+      method: "PUT", headers: { "x-peer-recovery-token": token, "content-type": "application/vnd.edgechat.room-recovery" }, body: bundle,
+    });
+  }
+  async downloadPeerRecovery(recoveryId: string): Promise<Blob> {
+    return (await this.raw(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`)).blob();
+  }
+  async acknowledgePeerRecovery(recoveryId: string): Promise<void> {
+    await this.raw(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, { method: "DELETE" });
+  }
+  history(roomId: RoomId, beforeSeq?: number, limit = 50) { const query = new URLSearchParams({ limit: String(limit) }); if (beforeSeq) query.set("before_seq", String(beforeSeq)); return this.request<{ events: RoomEvent[]; segments: ArchiveSegmentDescriptor[] }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/history?${query}`); }
+  archivePlan(roomId: RoomId, afterSeq: number, throughSeq: number) {
+    const query = new URLSearchParams({ after_seq: String(afterSeq), through_seq: String(throughSeq) });
+    return this.request<{ segments: ArchiveSegmentDescriptor[]; has_more: boolean }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/archive-plan?${query}`);
+  }
+  acquireRepairLease(roomId: RoomId, startSeq: number, endSeq: number) {
+    return this.request<RepairLease>(`/api/v1/rooms/${encodeURIComponent(roomId)}/repair/lease`, {
+      method: "POST", body: JSON.stringify({ start_seq: startSeq, end_seq: endSeq }),
+    });
+  }
+  async releaseRepairLease(roomId: RoomId, token: string, outcome?: "local_incomplete" | "local_unverified"): Promise<void> {
+    await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/repair/lease`, {
+      method: "DELETE", headers: { "x-repair-token": token, ...(outcome ? { "x-repair-outcome": outcome } : {}) },
+    });
+  }
+  repairJobs(cursor?: RoomId) {
+    return this.request<{ jobs: HistoryRepairJob[]; next_cursor: RoomId | null }>(`/api/v1/repair/jobs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+  }
+  uploadRepairEvents(roomId: RoomId, token: string, generation: number, events: RoomEvent[]) {
+    return this.request<RepairUploadResult>(`/api/v1/rooms/${encodeURIComponent(roomId)}/repair/events`, {
+      method: "POST", body: JSON.stringify({ token, generation, events }),
+    });
+  }
+  wsTicket() { return this.request<{ ticket: string }>("/api/v1/ws-ticket", { method: "POST" }); }
+
+  async acquireCompactionLease(roomId: RoomId): Promise<CompactionLease | null> {
+    const response = await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "POST" });
+    return response.status === 204 ? null : response.json() as Promise<CompactionLease>;
+  }
+  async releaseCompactionLease(roomId: RoomId, token: string): Promise<void> {
+    await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "DELETE", headers: { "x-compaction-token": token } });
+  }
+
+  async uploadAttachment(roomId: RoomId, ciphertext: ArrayBuffer): Promise<{ attachment_id: string }> {
+    return this.request("/api/v1/attachments", { method: "POST", headers: { "x-room-id": roomId }, body: ciphertext });
+  }
+  async abandonAttachments(attachmentIds: string[]): Promise<{ abandoned: number }> {
+    return this.request("/api/v1/attachments/abandon", { method: "POST", body: JSON.stringify({ attachment_ids: attachmentIds }) });
+  }
+  async downloadAttachment(id: string): Promise<ArrayBuffer> {
+    const response = await this.raw(`/api/v1/attachments/${encodeURIComponent(id)}`);
+    return response.arrayBuffer();
+  }
+  async acknowledgeAttachmentRetention(id: string): Promise<{ attachment_id: string }> {
+    return this.request(`/api/v1/attachments/${encodeURIComponent(id)}/retention-ack`, { method: "POST" });
+  }
+  attachmentRepairJobs(cursor?: string) {
+    return this.request<{ jobs: AttachmentRepairJob[]; next_cursor: string | null }>(`/api/v1/attachment-repair/jobs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+  }
+  acquireAttachmentRepairLease(id: string) {
+    return this.request<AttachmentRepairLease>(`/api/v1/attachments/${encodeURIComponent(id)}/repair/lease`, { method: "POST" });
+  }
+  async releaseAttachmentRepairLease(id: string, token: string, outcome?: "local_missing" | "local_invalid"): Promise<void> {
+    await this.raw(`/api/v1/attachments/${encodeURIComponent(id)}/repair/lease`, {
+      method: "DELETE", headers: { "x-repair-token": token, ...(outcome ? { "x-repair-outcome": outcome } : {}) },
+    });
+  }
+  uploadAttachmentRepair(id: string, token: string, ciphertext: ArrayBuffer) {
+    return this.request<{ attachment_id: string; restored: true }>(`/api/v1/attachments/${encodeURIComponent(id)}/repair`, {
+      method: "PUT", headers: { "x-repair-token": token }, body: ciphertext,
+    });
+  }
+  async uploadSegment(roomId: RoomId, segmentId: string, leaseToken: string, startSeq: number, endSeq: number, bytes: ArrayBuffer): Promise<{ segment_id: string }> {
+    return this.request(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, { method: "POST", headers: { "x-segment-id": segmentId, "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq) }, body: bytes });
+  }
+  async segmentRange(roomId: RoomId, segmentId: string, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>> {
+    const maximumRangeBytes = 16 * 1024 * 1024;
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > maximumRangeBytes || !Number.isSafeInteger(offset + length - 1)) {
+      throw new Error("Invalid archive byte range");
+    }
+    const end = offset + length - 1;
+    const response = await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${encodeURIComponent(segmentId)}`, { headers: { range: `bytes=${offset}-${offset + length - 1}` } });
+    const contentRange = response.headers.get("content-range")?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+    if (response.status !== 206 || !contentRange || Number(contentRange[1]) !== offset || Number(contentRange[2]) !== end || !Number.isSafeInteger(Number(contentRange[3])) || Number(contentRange[3]) <= end) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error("Archive server returned an invalid byte range");
+    }
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) !== length)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error("Archive range length mismatch");
+    }
+    if (!response.body) throw new Error("Archive range response has no body");
+    const reader = response.body.getReader();
+    const output = new Uint8Array(length);
+    let written = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (written + value.length > length) throw new Error("Archive range body exceeds requested length");
+        output.set(value, written); written += value.length;
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => undefined);
+      throw error;
+    }
+    if (written !== length) throw new Error("Archive range body is truncated");
+    return output;
+  }
+  acknowledgeArchiveSegmentRetention(segmentId: string) {
+    return this.request<{ segment_id: string; room_id: RoomId }>(`/api/v1/archive-segments/${encodeURIComponent(segmentId)}/retention-ack`, { method: "POST" });
+  }
+  archiveRepairJobs(cursor?: string) {
+    return this.request<{ jobs: ArchiveRepairJob[]; next_cursor: string | null }>(`/api/v1/archive-repair/jobs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+  }
+  acquireArchiveRepairLease(segmentId: string) {
+    return this.request<ArchiveRepairLease>(`/api/v1/archive-segments/${encodeURIComponent(segmentId)}/repair/lease`, { method: "POST" });
+  }
+  async releaseArchiveRepairLease(segmentId: string, token: string, outcome?: "local_missing" | "local_invalid"): Promise<void> {
+    await this.raw(`/api/v1/archive-segments/${encodeURIComponent(segmentId)}/repair/lease`, {
+      method: "DELETE", headers: { "x-repair-token": token, ...(outcome ? { "x-repair-outcome": outcome } : {}) },
+    });
+  }
+  uploadArchiveRepair(segmentId: string, token: string, ciphertext: ArrayBuffer) {
+    return this.request<{ segment_id: string; restored: true }>(`/api/v1/archive-segments/${encodeURIComponent(segmentId)}/repair`, {
+      method: "PUT", headers: { "x-repair-token": token }, body: ciphertext,
+    });
+  }
+  async subscribePush(subscription: PushSubscription): Promise<{ renewal_token: string }> {
+    const json = subscription.toJSON();
+    return this.request<{ renewal_token: string }>("/api/v1/push/subscribe", { method: "POST", body: JSON.stringify({ endpoint: json.endpoint, p256dh: json.keys?.p256dh, auth: json.keys?.auth }) });
+  }
+  pushSubscription() { return this.request<{ subscribed: boolean; endpoint: string | null }>("/api/v1/push/subscription"); }
+  async unsubscribePush(): Promise<void> { await this.raw("/api/v1/push/subscribe", { method: "DELETE" }); }
+
+  private async raw(path: string, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("x-edgechat-client-protocol", String(PROTOCOL_VERSION));
+    headers.set("x-edgechat-min-server-protocol", String(MIN_SUPPORTED_PROTOCOL_VERSION));
+    if (this.token) headers.set("authorization", `Bearer ${this.token}`);
+    if (typeof init.body === "string") headers.set("content-type", "application/json");
+    const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ error: "Request failed", code: "request_failed" })) as { error: string; code: string };
+      throw new ApiError(body.error, response.status, body.code);
+    }
+    const serverVersion = response.headers.get("x-edgechat-server-protocol");
+    const minimumClientVersion = response.headers.get("x-edgechat-min-client-protocol");
+    if (serverVersion !== null || minimumClientVersion !== null) {
+      if (!serverVersion || !minimumClientVersion || !/^\d{1,6}$/.test(serverVersion) || !/^\d{1,6}$/.test(minimumClientVersion)) {
+        throw new ApiError("服务器返回了无效的协议版本", 502, "invalid_server_protocol");
+      }
+      if (Number(minimumClientVersion) > PROTOCOL_VERSION) throw new ApiError("此服务器需要更新版本的客户端", 426, "client_upgrade_required");
+      if (Number(serverVersion) < MIN_SUPPORTED_PROTOCOL_VERSION) throw new ApiError("此服务器版本过旧，请先升级服务器", 426, "server_upgrade_required");
+    }
+    return response;
+  }
+
+  private async sessionRequest<T extends SessionIdentity>(path: string, init: RequestInit = {}): Promise<T> {
+    const session = await this.request<T>(path, init);
+    try { return { ...session, protocol: assertCompatibleServerProtocol(session.protocol) }; }
+    catch (error) { throw new ApiError(error instanceof Error ? error.message : "服务器协议不兼容", 426, "server_protocol_incompatible"); }
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const response = await this.raw(path, init);
+    if (response.status === 204) return undefined as T;
+    return response.json() as Promise<T>;
+  }
+}
+
+export type HistoryRepairResult =
+  | { status: "already_complete"; generation: number }
+  | { status: "local_incomplete"; generation: number; missing_seq: number | null }
+  | { status: "local_unverified"; generation: number; seq: number }
+  | { status: "repaired"; generation: number; restored_do_events: number; restored_d1_events: number }
+  | { status: "server_incomplete"; generation: number; missing_sequences: number[]; restored_do_events: number; restored_d1_events: number };
+
+/**
+ * Repairs cloud ciphertext only from the exact signed envelopes stored locally.
+ * It never reconstructs an event from plaintext and never writes archive objects.
+ */
+export class HistoryRepairEngine {
+  constructor(private api: ApiClient, private db: LocalDatabase) {}
+
+  async repairRange(roomId: RoomId, startSeq: number, endSeq: number): Promise<HistoryRepairResult> {
+    const lease = await this.api.acquireRepairLease(roomId, startSeq, endSeq);
+    if (lease.complete || lease.missing_sequences.length === 0) return { status: "already_complete", generation: lease.generation };
+    if (!lease.token) throw new Error("Repair server omitted the lease token");
+    let unavailableOutcome: "local_incomplete" | "local_unverified" | undefined;
+    try {
+      const local = await this.db.signedEventRange(roomId, startSeq, endSeq);
+      if (!local.complete) {
+        unavailableOutcome = "local_incomplete";
+        return { status: "local_incomplete", generation: lease.generation, missing_seq: local.missing_seq };
+      }
+      const bySeq = new Map(local.events.map((event) => [event.seq, event]));
+      for (const seq of lease.missing_sequences) {
+        const receipt = bySeq.get(seq)?.acceptance_receipt;
+        if (!receipt || receipt.seq !== seq) {
+          unavailableOutcome = "local_unverified";
+          return { status: "local_unverified", generation: lease.generation, seq };
+        }
+      }
+
+      const maxBatch = Math.max(1, Math.min(20, lease.max_events_per_upload ?? 20));
+      let missing = lease.missing_sequences;
+      let restoredDo = 0;
+      let restoredD1 = 0;
+      while (missing.length) {
+        const upload = missing.slice(0, maxBatch).map((seq) => bySeq.get(seq)!);
+        const result = await this.api.uploadRepairEvents(roomId, lease.token, lease.generation, upload);
+        restoredDo += result.restored_do_events;
+        restoredD1 += result.restored_d1_events;
+        if (result.complete) return { status: "repaired", generation: lease.generation, restored_do_events: restoredDo, restored_d1_events: restoredD1 };
+        const next = result.missing_sequences;
+        if (next.length >= missing.length && next.every((seq, index) => seq === missing[index])) {
+          return { status: "server_incomplete", generation: lease.generation, missing_sequences: next, restored_do_events: restoredDo, restored_d1_events: restoredD1 };
+        }
+        missing = next;
+      }
+      return { status: "repaired", generation: lease.generation, restored_do_events: restoredDo, restored_d1_events: restoredD1 };
+    } finally {
+      try { await this.api.releaseRepairLease(roomId, lease.token, unavailableOutcome); } catch { /* expiry/completion already releases it server-side */ }
+    }
+  }
+}
+
+export type AutomaticRepairSummary = { jobs: number; repaired: number; unresolved: number; busy: number; failed: number };
+
+export class AutomaticHistoryRepair {
+  constructor(private api: ApiClient, private db: LocalDatabase) {}
+
+  async run(): Promise<AutomaticRepairSummary> {
+    const summary: AutomaticRepairSummary = { jobs: 0, repaired: 0, unresolved: 0, busy: 0, failed: 0 };
+    let cursor: RoomId | undefined;
+    do {
+      const page = await this.api.repairJobs(cursor);
+      for (const job of page.jobs) {
+        summary.jobs += 1;
+        try {
+          const result = await new HistoryRepairEngine(this.api, this.db).repairRange(job.room_id, job.start_seq, job.end_seq);
+          if (result.status === "repaired" || result.status === "already_complete") summary.repaired += 1;
+          else summary.unresolved += 1;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409) summary.busy += 1;
+          else summary.failed += 1;
+        }
+      }
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+    return summary;
+  }
+}
+
+export type AttachmentCiphertextSource = {
+  get(id: string): Promise<ArrayBuffer | null>;
+  remove?(id: string): Promise<void>;
+};
+
+function base64Url(bytes: ArrayBuffer): string {
+  let binary = "";
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+export type AutomaticAttachmentRepairSummary = { jobs: number; repaired: number; unavailable: number; busy: number; failed: number };
+
+/** Restores only byte-for-byte verified ciphertext already held by this device. */
+export class AutomaticAttachmentRepair {
+  constructor(private api: ApiClient, private source: AttachmentCiphertextSource) {}
+
+  async run(): Promise<AutomaticAttachmentRepairSummary> {
+    const summary: AutomaticAttachmentRepairSummary = { jobs: 0, repaired: 0, unavailable: 0, busy: 0, failed: 0 };
+    let cursor: string | undefined;
+    do {
+      const page = await this.api.attachmentRepairJobs(cursor);
+      for (const job of page.jobs) {
+        summary.jobs += 1;
+        let lease: AttachmentRepairLease | null = null;
+        let outcome: "local_missing" | "local_invalid" | undefined;
+        try {
+          lease = await this.api.acquireAttachmentRepairLease(job.attachment_id);
+          const ciphertext = await this.source.get(job.attachment_id);
+          if (!ciphertext) { outcome = "local_missing"; summary.unavailable += 1; continue; }
+          const digest = base64Url(await crypto.subtle.digest("SHA-256", ciphertext));
+          if (ciphertext.byteLength !== lease.ciphertext_bytes || digest !== lease.ciphertext_sha256) {
+            outcome = "local_invalid"; summary.unavailable += 1;
+            if (this.source.remove) await this.source.remove(job.attachment_id).catch(() => undefined);
+            continue;
+          }
+          await this.api.uploadAttachmentRepair(job.attachment_id, lease.token, ciphertext);
+          summary.repaired += 1;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409) summary.busy += 1;
+          else summary.failed += 1;
+        } finally {
+          if (lease) {
+            try { await this.api.releaseAttachmentRepairLease(job.attachment_id, lease.token, outcome); }
+            catch { /* successful upload removed the job; expired leases are harmless */ }
+          }
+        }
+      }
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+    return summary;
+  }
+}
+
+export type AutomaticArchiveRepairSummary = { jobs: number; repaired: number; unavailable: number; busy: number; failed: number };
+
+export class AutomaticArchiveRepair {
+  constructor(private api: ApiClient, private source: AttachmentCiphertextSource) {}
+
+  async run(): Promise<AutomaticArchiveRepairSummary> {
+    const summary: AutomaticArchiveRepairSummary = { jobs: 0, repaired: 0, unavailable: 0, busy: 0, failed: 0 };
+    let cursor: string | undefined;
+    do {
+      const page = await this.api.archiveRepairJobs(cursor);
+      for (const job of page.jobs) {
+        summary.jobs += 1; let lease: ArchiveRepairLease | null = null;
+        let outcome: "local_missing" | "local_invalid" | undefined;
+        try {
+          lease = await this.api.acquireArchiveRepairLease(job.segment_id);
+          const ciphertext = await this.source.get(job.segment_id);
+          if (!ciphertext) { outcome = "local_missing"; summary.unavailable += 1; continue; }
+          const digest = base64Url(await crypto.subtle.digest("SHA-256", ciphertext));
+          if (ciphertext.byteLength !== lease.byte_size || digest !== lease.ciphertext_sha256) {
+            outcome = "local_invalid"; summary.unavailable += 1;
+            if (this.source.remove) await this.source.remove(job.segment_id).catch(() => undefined);
+            continue;
+          }
+          await this.api.uploadArchiveRepair(job.segment_id, lease.token, ciphertext); summary.repaired += 1;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409) summary.busy += 1;
+          else summary.failed += 1;
+        } finally {
+          if (lease) try { await this.api.releaseArchiveRepairLease(job.segment_id, lease.token, outcome); } catch { /* completion/expiry */ }
+        }
+      }
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+    return summary;
+  }
+}
+
+export type EventProcessor = (event: RoomEvent) => Promise<{ plaintext: string; payload: Record<string, unknown> } | null>;
+export type RoomAvailabilityProcessor = (roomId: RoomId) => Promise<void>;
+type NetworkEventSource = Pick<EventTarget, "addEventListener" | "removeEventListener">;
+
+function defaultNetworkEventSource(): NetworkEventSource | null {
+  return typeof globalThis.addEventListener === "function" ? globalThis as unknown as NetworkEventSource : null;
+}
+
+function retryableConnectionError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("status" in error) || typeof error.status !== "number") return true;
+  return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+}
+
+export function reconnectDelay(attempt: number): number {
+  return Math.min(30_000, 500 * 2 ** Math.min(6, Math.max(1, attempt)));
+}
+
+export class RoomSequenceGapError extends Error {
+  constructor(public readonly roomId: RoomId, public readonly processedThrough: number, public readonly receivedSeq: number) {
+    super(`Room ${roomId} requires ordered recovery for sequences ${processedThrough + 1}-${receivedSeq - 1}`);
+    this.name = "RoomSequenceGapError";
+  }
+}
+
+export class RoomHistoryTransferRequiredError extends Error {
+  constructor(public readonly roomId: RoomId, public readonly processedThrough: number, public readonly requiredThrough = processedThrough + 1) {
+    super(`Room ${roomId} requires recovery from another device for sequences ${processedThrough + 1}-${requiredThrough}`);
+    this.name = "RoomHistoryTransferRequiredError";
+  }
+}
+
+export class SyncEngine extends EventTarget {
+  private running = false;
+  private sockets = new Map<RoomId, WebSocket>();
+  private reconnects = new Map<RoomId, number>();
+  private reconnectTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
+  private connecting = new Map<RoomId, Promise<void>>();
+  private desiredRooms = new Set<RoomId>();
+  private disconnectedRooms = new Set<RoomId>();
+  private historyBlockedRooms = new Set<RoomId>();
+  private ingestQueue: Promise<void> = Promise.resolve();
+  private catchUpTask: Promise<void> | null = null;
+  private readonly archiveCatchUp: OrderedArchiveCatchUp | null;
+  private readonly onlineHandler = () => { void this.recover(); };
+
+  constructor(
+    private api: ApiClient,
+    private db: LocalDatabase,
+    private processEvent: EventProcessor,
+    private prepareRoom?: RoomAvailabilityProcessor,
+    private networkEvents: NetworkEventSource | null = defaultNetworkEventSource(),
+    archiveKeyResolver?: ArchiveKeyResolver,
+    private sharePresence = false,
+  ) {
+    super();
+    this.archiveCatchUp = archiveKeyResolver
+      ? new OrderedArchiveCatchUp(api, new ArchiveSegmentReader(api, archiveKeyResolver), (event) => this.ingestOne(event))
+      : null;
+  }
+
+  async start(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    this.networkEvents?.addEventListener("online", this.onlineHandler);
+    try {
+      for (const roomId of await this.db.deferredRoomIds?.() ?? []) {
+        const state = await this.db.roomSequenceState(roomId);
+        this.blockRoom(new RoomHistoryTransferRequiredError(roomId, state?.processed_through_seq ?? 0));
+      }
+      await this.catchUp();
+    }
+    catch (error) { this.connectionError(error); }
+  }
+
+  stop(): void {
+    this.running = false;
+    this.networkEvents?.removeEventListener("online", this.onlineHandler);
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
+    this.reconnectTimers.clear();
+    this.connecting.clear();
+    this.desiredRooms.clear();
+    for (const socket of this.sockets.values()) socket.close(1000, "client stopped");
+    this.sockets.clear();
+  }
+
+  async catchUp(): Promise<void> {
+    if (this.catchUpTask) return this.catchUpTask;
+    const task = this.catchUpOnce();
+    this.catchUpTask = task;
+    try { await task; }
+    finally { if (this.catchUpTask === task) this.catchUpTask = null; }
+  }
+
+  private async catchUpOnce(): Promise<void> {
+    let cursor = await this.db.getCursor();
+    do {
+      const page = await this.api.sync(cursor);
+      for (const item of page.items) {
+        if (item.kind === "room.event.available" && item.room_id) await this.prepareRoom?.(item.room_id);
+        else if (item.kind === "device.event") {
+          if (item.room_id) await this.prepareRoom?.(item.room_id);
+          this.dispatchEvent(new CustomEvent("device-event", { detail: item.payload }));
+        }
+        else if (item.kind === "room.event") {
+          const event = item.payload as RoomEvent;
+          try { await this.ingest(event); }
+          catch (error) {
+            if (!(error instanceof RoomHistoryTransferRequiredError)) throw error;
+            this.blockRoom(error);
+          }
+        }
+      }
+      cursor = page.next_cursor;
+      await this.db.setCursor(cursor);
+      if (!page.has_more) break;
+    } while (this.running);
+    this.dispatchEvent(new CustomEvent("synced", { detail: { cursor } }));
+  }
+
+  async connectRoom(roomId: RoomId): Promise<void> {
+    if (this.historyBlockedRooms.has(roomId)) return;
+    this.desiredRooms.add(roomId);
+    this.disconnectedRooms.delete(roomId);
+    const timer = this.reconnectTimers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.reconnectTimers.delete(roomId);
+    const socket = this.sockets.get(roomId);
+    if (socket && (socket.readyState === 0 || socket.readyState === 1)) return;
+    const pending = this.connecting.get(roomId);
+    if (pending) return pending;
+    const task = this.openRoom(roomId).finally(() => { if (this.connecting.get(roomId) === task) this.connecting.delete(roomId); });
+    this.connecting.set(roomId, task);
+    return task;
+  }
+
+  private async openRoom(roomId: RoomId): Promise<void> {
+    try {
+      const { ticket } = await this.api.wsTicket();
+      if (!this.running || this.disconnectedRooms.has(roomId) || !this.desiredRooms.has(roomId)) return;
+      this.sockets.get(roomId)?.close(1000, "replaced");
+      const base = this.api.baseUrl || location.origin;
+      const url = new URL("/api/v1/ws", base);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("room_id", roomId);
+      url.searchParams.set("ticket", ticket);
+      if (this.sharePresence) url.searchParams.set("presence", "1");
+      const socket = new WebSocket(url);
+      this.sockets.set(roomId, socket);
+      socket.onopen = () => { this.reconnects.set(roomId, 0); this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: true } })); };
+      socket.onmessage = (message) => {
+        try {
+          const frame = JSON.parse(String(message.data)) as SocketFrame;
+          if (frame.type === "room.event") void this.ingest(frame.event).catch((error) => this.connectionError(error));
+          else if (frame.type === "typing" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("typing", { detail: frame }));
+          else if (frame.type === "presence" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("presence", { detail: frame satisfies PresenceSocketFrame }));
+          else if (frame.type === "presence.snapshot" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("presence-snapshot", { detail: frame satisfies PresenceSnapshotSocketFrame }));
+          else if (frame.type === "history.repair.available" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("repair-available", { detail: frame }));
+          else if (frame.type === "attachment.repair.available" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("attachment-repair-available", { detail: frame }));
+          else if (frame.type === "archive.repair.available" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("archive-repair-available", { detail: frame }));
+        } catch { /* malformed realtime frames are ignored; durable sync repairs gaps */ }
+      };
+      socket.onclose = (event) => this.socketClosed(roomId, socket, event.code);
+    } catch (error) {
+      this.connectionError(error);
+      if (retryableConnectionError(error)) this.scheduleReconnect(roomId);
+    }
+  }
+
+  private socketClosed(roomId: RoomId, socket: WebSocket, code: number): void {
+    if (this.sockets.get(roomId) !== socket) return;
+    this.sockets.delete(roomId);
+    this.dispatchEvent(new CustomEvent("presence-reset", { detail: { room_id: roomId } }));
+    this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: false } }));
+    if (code === 4006) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("account-deletion", { detail: { roomId } })); return; }
+    if (code === 4004) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("device-revoked", { detail: { roomId } })); return; }
+    if (code === 4003 || code === 4005) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("room-unavailable", { detail: { roomId } })); return; }
+    this.scheduleReconnect(roomId);
+  }
+
+  private scheduleReconnect(roomId: RoomId): void {
+    if (!this.running || this.historyBlockedRooms.has(roomId) || this.disconnectedRooms.has(roomId) || !this.desiredRooms.has(roomId) || this.reconnectTimers.has(roomId)) return;
+    const attempt = (this.reconnects.get(roomId) ?? 0) + 1;
+    this.reconnects.set(roomId, attempt);
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(roomId);
+      if (!this.running || this.disconnectedRooms.has(roomId) || this.sockets.has(roomId)) return;
+      void this.catchUp().then(() => this.connectRoom(roomId)).catch((error) => { this.connectionError(error); this.scheduleReconnect(roomId); });
+    }, reconnectDelay(attempt));
+    this.reconnectTimers.set(roomId, timer);
+  }
+
+  private async recover(): Promise<void> {
+    if (!this.running) return;
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
+    this.reconnectTimers.clear();
+    try {
+      await this.catchUp();
+      await Promise.all([...this.desiredRooms].map((roomId) => this.connectRoom(roomId)));
+    } catch (error) {
+      this.connectionError(error);
+      if (retryableConnectionError(error)) for (const roomId of this.desiredRooms) this.scheduleReconnect(roomId);
+    }
+  }
+
+  private connectionError(error: unknown): void {
+    if (error instanceof RoomHistoryTransferRequiredError) {
+      this.blockRoom(error);
+      return;
+    }
+    if (error && typeof error === "object" && "status" in error && error.status === 401) {
+      this.dispatchEvent(new CustomEvent("session-expired", { detail: error }));
+    }
+    this.dispatchEvent(new CustomEvent("error", { detail: error }));
+  }
+
+  private blockRoom(error: RoomHistoryTransferRequiredError): void {
+    const firstNotice = !this.historyBlockedRooms.has(error.roomId);
+    this.historyBlockedRooms.add(error.roomId);
+    this.disconnectRoom(error.roomId);
+    if (firstNotice) this.dispatchEvent(new CustomEvent("history-transfer-required", { detail: error }));
+  }
+
+  async resumeRoom(roomId: RoomId): Promise<void> {
+    this.historyBlockedRooms.delete(roomId);
+    this.disconnectedRooms.delete(roomId);
+    try {
+      for (;;) {
+        const deferred = await this.db.deferredRoomEvents(roomId, 500);
+        if (!deferred.length) break;
+        for (const event of deferred) {
+          await this.ingestOne(event);
+          await this.db.removeDeferredRoomEvent(event.event_id);
+        }
+        if (deferred.length < 500) break;
+      }
+    } catch (error) {
+      if (error instanceof RoomHistoryTransferRequiredError) this.blockRoom(error);
+      else {
+        this.historyBlockedRooms.add(roomId);
+        this.disconnectRoom(roomId);
+      }
+      throw error;
+    }
+    this.dispatchEvent(new CustomEvent("history-recovery-complete", { detail: { roomId } }));
+    if (this.running) await this.connectRoom(roomId);
+  }
+
+  async recoverRoom(roomId: RoomId, events: RoomEvent[]): Promise<void> {
+    const sequence = await this.db.roomSequenceState(roomId);
+    if (!sequence) throw new Error(`Room sequence baseline is unavailable for ${roomId}`);
+    let expected = sequence.processed_through_seq + 1;
+    for (const event of events) {
+      if (event.room_id !== roomId || event.seq !== expected) throw new Error(`Peer recovery is not contiguous at sequence ${expected}`);
+      expected += 1;
+    }
+    if (!events.length) throw new Error("Peer recovery did not contain any events");
+    this.historyBlockedRooms.delete(roomId);
+    try {
+      for (const event of events) await this.ingestOne(event);
+      await this.resumeRoom(roomId);
+    } catch (error) {
+      const state = await this.db.roomSequenceState(roomId);
+      if (error instanceof RoomHistoryTransferRequiredError) {
+        this.blockRoom(error);
+        return; // This bounded batch is durable locally; a following gap becomes a new request.
+      }
+      this.blockRoom(new RoomHistoryTransferRequiredError(roomId, state?.processed_through_seq ?? sequence.processed_through_seq));
+      throw error;
+    }
+  }
+
+  disconnectRoom(roomId: RoomId): void {
+    this.desiredRooms.delete(roomId);
+    this.disconnectedRooms.add(roomId);
+    this.reconnects.delete(roomId);
+    const timer = this.reconnectTimers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.reconnectTimers.delete(roomId);
+    const socket = this.sockets.get(roomId);
+    this.sockets.delete(roomId);
+    socket?.close(1000, "room disconnected");
+  }
+
+  sendTyping(roomId: RoomId, active: boolean): boolean {
+    const socket = this.sockets.get(roomId);
+    if (!socket || socket.readyState !== 1) return false;
+    const frame: ClientSocketFrame = { type: "typing", active };
+    socket.send(JSON.stringify(frame));
+    return true;
+  }
+
+  private ingest(event: RoomEvent): Promise<void> {
+    const task = this.ingestQueue.then(async () => {
+      if (this.historyBlockedRooms.has(event.room_id)) {
+        await this.db.deferRoomEvent(event);
+        return;
+      }
+      try { await this.ingestOne(event); }
+      catch (error) {
+        if (error instanceof RoomHistoryTransferRequiredError) await this.db.deferRoomEvent(event);
+        throw error;
+      }
+    });
+    this.ingestQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private async ingestOne(event: RoomEvent): Promise<void> {
+    let sequence = await this.db.roomSequenceState(event.room_id);
+    if (!sequence && this.prepareRoom) {
+      await this.prepareRoom(event.room_id);
+      sequence = await this.db.roomSequenceState(event.room_id);
+    }
+    if (!sequence) throw new Error(`Room sequence baseline is unavailable for ${event.room_id}`);
+    if (event.seq <= sequence.baseline_seq) return;
+    if (event.seq <= sequence.processed_through_seq) {
+      if (await this.db.hasMessage(event.event_id)) return;
+      throw new Error(`Room sequence ${event.seq} is already bound to another event`);
+    }
+    if (event.seq !== sequence.processed_through_seq + 1) {
+      if (!this.archiveCatchUp) throw new RoomSequenceGapError(event.room_id, sequence.processed_through_seq, event.seq);
+      try {
+        await this.archiveCatchUp.catchUp(event.room_id, sequence.processed_through_seq, event.seq - 1);
+      } catch (error) {
+        if (error instanceof ApiError && (error.code === "device_history_transfer_required" || error.code === "history_intentionally_deleted")) {
+          throw new RoomHistoryTransferRequiredError(event.room_id, sequence.processed_through_seq, event.seq - 1);
+        }
+        throw error;
+      }
+      sequence = await this.db.roomSequenceState(event.room_id);
+      if (!sequence || event.seq !== sequence.processed_through_seq + 1) {
+        throw new RoomSequenceGapError(event.room_id, sequence?.processed_through_seq ?? 0, event.seq);
+      }
+    }
+    if (await this.db.hasMessage(event.event_id)) return;
+    let result: Awaited<ReturnType<EventProcessor>>;
+    try {
+      result = await this.processEvent(event);
+    } catch (error) {
+      // A failed membership Commit must stop the room: later epochs cannot be
+      // decrypted safely. Malformed application events are quarantined so one
+      // authenticated but buggy/malicious sender cannot poison global sync.
+      if (event.type === "control.group.commit" || event.type === "control.device.revoke") throw error;
+      const message = error instanceof Error ? error.message : "Encrypted event processing failed";
+      await this.db.quarantineEvent(event, message);
+      await this.db.markProcessed(event);
+      this.dispatchEvent(new CustomEvent("quarantined", { detail: { event, error } }));
+      this.dispatchEvent(new CustomEvent("processed", { detail: event }));
+      return;
+    }
+    await this.db.markProcessed(event);
+    if (result) {
+      await this.db.saveDecryptedEvent(event, result.plaintext, result.payload);
+      this.dispatchEvent(new CustomEvent("message", { detail: event }));
+    }
+    // Observers may query projections after this event. Dispatch only once all
+    // local writes are committed, otherwise unread counters race the message.
+    this.dispatchEvent(new CustomEvent("processed", { detail: event }));
+  }
+}
+
+export type ArchiveKeyResolver = (roomId: RoomId, segment: ArchiveSegmentDescriptor, envelope: Uint8Array<ArrayBuffer>) => Promise<Uint8Array<ArrayBuffer>>;
+
+export class ArchiveSegmentReader {
+  constructor(private api: ApiClient, private resolveKey: ArchiveKeyResolver) {}
+
+  async read(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences?: number[]): Promise<RoomEvent[]> {
+    const headerBytes = await this.api.segmentRange(roomId, segment.segment_id, 0, SEGMENT_HEADER_BYTES);
+    const header = decodeSegmentHeader(headerBytes);
+    if (header.start_seq !== segment.start_seq || header.end_seq !== segment.end_seq) throw new Error("Archive manifest sequence range mismatch");
+    const manifestAndIndex = await this.api.segmentRange(roomId, segment.segment_id, header.key_envelope_offset, header.key_envelope_length + header.index_length);
+    const keyEnvelope = manifestAndIndex.slice(0, header.key_envelope_length);
+    const encryptedIndex = manifestAndIndex.slice(header.key_envelope_length);
+    const segmentKey = await this.resolveKey(roomId, segment, keyEnvelope);
+    const index = await decodeSegmentIndex(roomId, segment.segment_id, encryptedIndex, segmentKey, header.index_uncompressed_length, { header, object_bytes: segment.byte_size });
+    const wanted = sequences ?? Array.from({ length: segment.end_seq - segment.start_seq + 1 }, (_, i) => segment.start_seq + i);
+    if (wanted.some((sequence) => !Number.isSafeInteger(sequence) || sequence < segment.start_seq || sequence > segment.end_seq)) throw new Error("Requested archive sequence is outside the segment");
+    const wantedSequences = new Set(wanted);
+    const selected: RoomEvent[] = [];
+    for (const range of rangesForSequences(index, wanted, header.index_offset + header.index_length)) {
+      const encryptedChunk = await this.api.segmentRange(roomId, segment.segment_id, range.offset, range.length);
+      const events = await decodeSegmentChunk(roomId, segment.segment_id, range.chunk, encryptedChunk, segmentKey, index.chunks[range.chunk].uncompressed_length);
+      const descriptor = index.chunks[range.chunk];
+      if (events.length !== descriptor.last_seq - descriptor.first_seq + 1 || events.some((event, eventIndex) => event.room_id !== roomId || event.seq !== descriptor.first_seq + eventIndex)) throw new Error("Archive chunk event sequence mismatch");
+      for (const event of events) if (wantedSequences.has(event.seq)) selected.push(event);
+    }
+    selected.sort((left, right) => left.seq - right.seq);
+    const expected = [...wantedSequences].sort((left, right) => left - right);
+    if (selected.length !== expected.length || selected.some((event, index) => event.seq !== expected[index])) throw new Error("Archive segment selection is incomplete");
+    return selected;
+  }
+}
+
+export class ProgressiveHistoryIndexer {
+  private readonly reader: ArchiveSegmentReader;
+
+  constructor(api: ApiClient, private db: LocalDatabase, private processEvent: EventProcessor, resolveKey: ArchiveKeyResolver) {
+    this.reader = new ArchiveSegmentReader(api, resolveKey);
+  }
+
+  async indexSegment(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences?: number[]): Promise<number> {
+    let inserted = 0;
+    for (const event of await this.reader.read(roomId, segment, sequences)) {
+        if (await this.db.hasMessage(event.event_id)) continue;
+        const result = await this.processEvent(event);
+        if (result) { await this.db.saveDecryptedEvent(event, result.plaintext, result.payload); inserted++; }
+        else await this.db.markProcessed(event);
+    }
+    return inserted;
+  }
+}
+
+export class OrderedArchiveCatchUp {
+  constructor(private api: ApiClient, private reader: ArchiveSegmentReader, private ingest: (event: RoomEvent) => Promise<void>) {}
+
+  async catchUp(roomId: RoomId, afterSeq: number, throughSeq: number): Promise<number> {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(throughSeq) || throughSeq <= afterSeq) throw new Error("Invalid archive catch-up range");
+    let processedThrough = afterSeq;
+    while (processedThrough < throughSeq) {
+      const plan = await this.api.archivePlan(roomId, processedThrough, throughSeq);
+      if (!plan.segments.length) throw new Error(`Archive coverage gap after sequence ${processedThrough}`);
+      for (const segment of plan.segments) {
+        const expected = processedThrough + 1;
+        if (segment.start_seq > expected || segment.end_seq < expected) throw new Error(`Archive segments are not contiguous after sequence ${processedThrough}`);
+        const selectedEnd = Math.min(segment.end_seq, throughSeq);
+        const events = await this.reader.read(roomId, segment, Array.from({ length: selectedEnd - expected + 1 }, (_, index) => expected + index));
+        for (const event of events) {
+          if (event.seq !== processedThrough + 1) throw new Error(`Archive event ordering gap after sequence ${processedThrough}`);
+          await this.ingest(event); processedThrough = event.seq;
+        }
+        if (processedThrough === throughSeq) break;
+      }
+      if (!plan.has_more && processedThrough < throughSeq) throw new Error(`Archive coverage ends at sequence ${processedThrough}`);
+    }
+    return processedThrough;
+  }
+}
+
+export { ArchiveSegmentBuilder } from "./archive-builder";
+export { ArchiveCoordinator, type ArchiveCoordinatorStatus, type ArchiveKeyEnvelopeBuilder } from "./archive-coordinator";
+export { OutboxEngine } from "./outbox";

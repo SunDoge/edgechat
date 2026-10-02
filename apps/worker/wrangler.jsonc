@@ -1,0 +1,44 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "edgechat",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "SERVER_NAME": "localhost",
+    "USER_R2_QUOTA_BYTES": "2147483648",
+    "USER_R2_OBJECT_LIMIT": "100000",
+    "ARCHIVE_COMPACTION_ENABLED": "false",
+    "EVENT_RECEIPT_KEY_ID": "v1",
+    "VAPID_SUBJECT": "mailto:admin@example.com",
+    "VAPID_PUBLIC_KEY": ""
+  },
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "edgechat-db",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "edgechat-archive" }],
+  "ratelimits": [
+    { "name": "UNAUTH_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } },
+    { "name": "AUTH_TARGET_RATE_LIMITER", "namespace_id": "1002", "simple": { "limit": 30, "period": 60 } },
+    { "name": "ACCOUNT_RATE_LIMITER", "namespace_id": "1003", "simple": { "limit": 600, "period": 60 } }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "RoomDurableObject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDurableObject"] }],
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.05 }
+  },
+  "triggers": { "crons": ["17 3 * * *"] }
+}

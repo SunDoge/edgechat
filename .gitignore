@@ -1,0 +1,11 @@
+node_modules
+dist
+pkg
+target
+.wrangler
+worker-configuration.d.ts
+*.log
+*.cpuprofile
+.DS_Store
+.dev.vars
+coverage

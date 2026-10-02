@@ -1,0 +1,31 @@
+{
+  "name": "@edgechat/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "build": "exec env WRANGLER_SEND_METRICS=false wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "cf-typegen": "wrangler types worker-configuration.d.ts",
+    "db:migrate:local": "wrangler d1 migrations apply edgechat-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply edgechat-db --remote",
+    "db:types": "node scripts/generate-db-types.mjs",
+    "db:types:check": "node scripts/generate-db-types.mjs --verify",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@edgechat/protocol": "workspace:*",
+    "@sundoge/kysely-d1": "latest",
+    "kysely": "latest"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "latest",
+    "@cloudflare/workers-types": "latest",
+    "@types/node": "latest",
+    "typescript": "latest",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.124.0"
+  }
+}

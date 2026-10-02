@@ -1,0 +1,115 @@
+# EdgeChat maturity roadmap
+
+The target is a dependable private messenger in the same product class as Delta Chat, not protocol compatibility with Delta Chat and not Matrix compatibility. A green MVP test suite is only the starting point.
+
+## Current baseline
+
+Implemented today: same-server accounts and multi-device identities, OpenMLS text/group messaging, encrypted files, images and voice notes, durable sync plus WebSocket acceleration, Web Push, local PGlite history and full-text search, local image semantic search, chunked zstd/R2 archives with authenticated Range reads, room-bound `message:create` notification capabilities with durable ciphertext retry, and resumable MLS device revocation.
+
+Known production caveats remain explicit: no independent cryptographic audit, no server-assisted account recovery, no mature user appeal workflow, no accessibility/browser matrix, and no federation. Authenticated password-encrypted local device backup/restore is implemented, including MLS state and local plaintext history. QR/camera device linking, public-key fingerprints, explicit approval, per-room MLS Add tasks, proof-of-key session claim, reload-safe client state, and progressive device-to-device history handoff are implemented. The handoff copies the approving endpoint's indexed coverage and OPFS attachment ciphertext cache through independently authenticated, resumable 16 MiB bundle shards and deletes each temporary remote shard after durable local staging.
+
+## Release gates
+
+### Gate 1 — data safety and predictable cost
+
+- [x] D1-backed per-user R2 byte and object accounting.
+- [x] Atomic quota reservations before R2 writes and rollback after failed writes.
+- [x] Validate the bytes actually received instead of trusting `Content-Length`.
+- [x] Avoid tiny archive objects: compact at 1 MiB input or 500 events.
+- [x] User quota UI with attachment/archive split and warning thresholds.
+- [x] D1-only Operator totals and configurable per-user byte/object overrides, without bucket listing.
+- [x] Crash-safe D1 write intents, bounded orphan cleanup, and on-read missing-object quota repair without routine bucket listing.
+- [x] Read-only, bounded-memory offline operator audit for legacy/manual R2 objects that predate or bypass the write-intent ledger.
+- [x] Seven-day cleanup for uploaded attachments that never become referenced by a durable event.
+- [x] Sender-only deletion/tombstone flow that removes local search content and decrements usage only after attachment object deletion succeeds.
+- [x] Paginated account export plus resumable account deletion covering local plaintext, exact-key R2 cleanup, private-room Durable Objects, shared-room ownership transfer, and client-produced MLS Remove Commits.
+- [x] Durable message outbox with unchanged-ciphertext retry, event-ID idempotency, reload recovery, exponential backoff and visible send states.
+- [x] Client-only backup/restore with versioned, chunk-authenticated encrypted PGlite, device-key, and OpenMLS snapshots; no R2/S3 duplication.
+- [x] Typed Dexie wrappers for device keys and temporary browser staging, preserving existing IndexedDB schemas while leaving PGlite storage exclusively under PGlite control.
+
+### Gate 2 — secure multi-device operation
+
+- [x] QR/camera device linking, paste fallback, human-verifiable fingerprints, explicit approval, proof-of-key claim, spare-KeyPackage lifecycle, and resumable PGlite approval outbox.
+- [x] Current MLS state recovery through per-device Welcome plus ECDH-encrypted transfer of indexed plaintext history/archive keys, without exporting plaintext or MLS private state through the server.
+- [x] Progressive/resumable linked-device history handoff with one versioned local database-and-attachment bundle, D1 manifest, independently authenticated shards, durable target staging, and per-shard R2 acknowledgement/deletion.
+- [x] Persist-before-publish KeyPackage replenishment, low-water monitoring, claim-context idempotency and expired-claim cleanup.
+- [x] Device-removal Commit workflow with durable per-room progress, explicit pending/complete states, stale-epoch rejection, session/ticket invalidation, and WebSocket closure.
+- [x] MLS-encrypted cross-device read state.
+- [x] Device-level peer identity verification with out-of-band comparable fingerprints, local trust persistence, automatic downgrade for new/changed keys, conversation-header warnings, and no server-side trust graph or R2 objects.
+- [x] First-class cross-device saved messages through an owner-only MLS room, with immutable membership and zero-copy R2 attachment references.
+- [x] Signed, per-device ECDH-encrypted cross-device text/reply/quote/edit drafts with encrypted deletion tombstones, a coalescing local outbox, stale-write protection, device-set reconciliation, paginated D1 retrieval, and no R2/S3 objects. Notification mute remains intentionally per-device and is enforced before content-free Push delivery.
+- [ ] Independent security review and broader protocol transcript tests. Enforced CSP, hardened API/static headers, a dependency policy, and a high-severity production dependency audit are now in place.
+
+### Gate 3 — daily messaging completeness
+
+- [x] Stable message references and sender-only deletion/tombstones.
+- [x] Stable encrypted replies, sender-only text edits, reaction replacement/removal, local projection and durable retry UI.
+- [x] Single-message text/image/file forwarding with destination-scoped aliases and zero-copy R2 reference accounting.
+- [x] Ordered multi-select forwarding with a 100-message bound, partial-failure retry state, durable local outbox admission and the same zero-copy R2 attachment grants.
+- [x] Explicit encrypted quote-block composition with whole-message/selected-text capture, stable references, bounded snapshots, local draft recovery and no extra R2 objects.
+- [x] MLS-encrypted read receipts, local unread counts, retry indicators, bounded arbitrary-local-history search navigation, and jump-to-message without falsely reading new arrivals while inspecting old context.
+- [x] Authenticated, expiring WebSocket typing presence with no durable/R2 writes.
+- [x] MLS-encrypted, coalesced delivery receipts with per-user group counts and reload recovery.
+- [x] Device-local, opt-in online presence aggregated across a user's room sockets, with immediate disconnect reset, hidden-member filtering, no last-seen history, no stranger-request exposure, and no D1/R2 writes.
+- [x] Device-local pinned/archived chats, per-device push mute, and return from archive on new unmuted activity.
+- [x] Direct-user block ACL across discovery, MLS KeyPackage claims, room creation, direct sends, attachment uploads and WebSocket admission.
+- [x] Reviewable stranger-message requests with accept/reject/report-and-block, one encrypted text before acceptance, disabled typing, ten-per-hour/twenty-outstanding account limits, and a hard no-attachment/no-archive R2 boundary. Idempotent request reservations are charged before target MLS KeyPackage claims, closing the abandoned-claim drain. Group creation requires an established relationship with every invitee so a fake group cannot bypass quarantine. Account invitation policy remains `everyone`, existing accepted/shared-room contacts, or nobody.
+- [x] Paginated, metadata-only Operator report review with confirmed/dismissed resolutions and an append-only D1 action trail; no message plaintext or R2 reads are available to reviewers.
+- [x] Reversible, cross-device group-local member hiding that preserves full MLS processing while excluding the sender from local timelines, unread counts, receipts/reactions, text search, image semantic search, and typing presentation; D1/sync metadata only, with no R2 objects.
+- [x] Layered anonymous-target, edge-IP, and authenticated-account rate limits, plus an exact bounded D1 login-failure backstop for real accounts; hashed edge keys, generic authentication failures, structured content-free security logs, and zero R2 traffic.
+- [x] Paginated Operator login-lock inspection and idempotent account unlock with an append-only D1 audit snapshot; no bucket reads, listings, or writes.
+- [ ] Privacy-preserving user appeal intake and operator resolution workflow.
+- [x] Per-conversation device-local retention controls with transactional plaintext/FTS/semantic-index cleanup and periodic enforcement.
+- [x] Cross-device disappearing messages through an MLS-encrypted, sequence-effective room policy; deterministic server-acceptance expiry, offline enforcement, plaintext/FTS/image-index cleanup, anti-resurrection tombstones, and honest limits on recipient-side deletion. The setting and messages use the normal compacted event stream and create no dedicated R2/S3 objects.
+- [x] Client-recorded encrypted voice notes with explicit cancel, bounded duration/size, user-initiated download and zero-copy forwarding.
+- [x] MLS-encrypted contact cards use a dedicated event type with explicit confirmation, forwarding, full namespaced identity display, normal block/request enforcement, and no dedicated R2 object. Message URLs render as referrer-free links plus an optional device-local domain/path card; no Open Graph request, server-visible plaintext URL, remote thumbnail, or R2 object is created. Multi-image album composition and rendering likewise use no server thumbnails.
+- [x] Editable server-visible display name and optional bounded bio, projected into direct/group room summaries and refreshed through durable D1 sync hints with zero R2 objects.
+- [x] One current client-cropped/compressed profile avatar per account, capped at 128 KiB, quota-accounted and content-addressed in R2 with opaque immutable URLs, exact-key replacement/account cleanup, retry-ledger GC, no bucket scans, no server thumbnails, and direct-chat/directory presentation.
+- [ ] Multiple local profiles, localization and accessibility audits.
+- [x] Explicit PGlite history paging with prepend scroll anchoring, retry state, and no network/object read while local rows remain.
+- [x] Variable-height windowed timeline rendering with image-safe height measurement, prepend anchoring, bottom following, and imperative reference/search positioning.
+- [ ] Ordered archive catch-up after server compaction and broader offline/reconnect conflict testing. Segment format v3 independently wraps each segment key to active room devices, eliminating the impossible dependency on a later MLS-epoch key event. Exact `206 Content-Range` enforcement, bounded response streaming, manifest/header/index/object-size cross-checks, and contiguous chunk/event validation protect the decoder before MLS replay. Device-bound offline startup, serialized durable catch-up, online-triggered socket recovery, permanent-close handling, the outbox empty-scan race, and exclusive multi-tab device-state ownership with draft-safe handoff are covered. The ordered replay state machine now uses a persisted per-room baseline/progress ledger and fetches R2 only for a real gap. If intentional GC makes a gap unavailable, later ciphertext is durably deferred in a separate PGlite inbox, the global sync cursor and unrelated rooms continue, and the affected room remains visibly read-only across reloads until peer/backup recovery. Deployed-browser network transitions and broader cross-browser conflict testing remain.
+- [x] Default-off archive-compaction capability guard prevents redundant R2 writes until ordered catch-up and safe D1 pruning exist.
+- [x] Device-acknowledged archived sequence floors, ordered MLS catch-up, and safe pruning of duplicated D1/DO history.
+- [ ] Administrator-configured remote retention. Indefinite history is the default; operator-set per-room retention advances an authoritative RoomDO floor/generation before bounded D1 cleanup, reconciles interrupted runs, pauses for active leases, and cannot resurrect collected sequences. Automatic local-ledger coverage acknowledgements cap event GC at the Nth-highest active-device copy, with an operator-configurable 1–10-copy policy and no R2 writes. Attachment R2 GC now applies the strongest retained copy policy across its source and every forwarding room, counts only distinct active devices with durable OPFS ciphertext acknowledgements, and cannot weaken merely because a grant event was collected. Exact-key deletion uses a retry ledger, updates quota atomically, and performs no bucket scan. Linked-device bundles transfer the OPFS ciphertext cache too. A GC-lagged room is isolated without stopping account-wide sync and stays visibly read-only across reloads. Bounded in-place peer recovery is implemented with zstd-compressed, device-to-device authenticated batches of at most 500 signed ciphertext events, one temporary R2 object per batch, exact deletion after target import, 24-hour abandoned-object cleanup, content-free Push wake-up, and user-facing waiting/transferring/importing/failure states with retry. D1-only operator tooling is complete; broader deployed-device durability drills remain.
+- [x] Client-assisted cloud repair. Individual room-event repair uses exact signed envelopes, bounded contiguous local reads, stable HMAC receipts, device-bound leases, generation/floor enforcement, bounded uploads, conflict checks, and tamper tests. A budgeted recent-first rotating audit compares RoomDO/D1 ranges, persists one durable repair job per room, hints live sockets, and lets online devices automatically compete to restore the original ciphertext; incomplete devices release the lease for another endpoint. Original attachment bindings are reconstructed from repaired signed envelopes, while zero-copy forward grants survive accidental event-row deletion and remain explicitly collectible below the authoritative floor. Missing attachment and archive-segment objects are repaired from acknowledged exact OPFS caches under pinned ciphertext digests and device-bound leases, without bucket listing, duplicate keys, or quota changes. Segment possession acknowledgement is crash-retryable, linked-device bundle v3 transfers exact segment bytes, and intentional-GC 404s retain local history without resurrecting cloud data. Durable multi-device event, attachment, and archive coverage acknowledgements are implemented. Acceptance receipts use a bounded active-plus-historical secret keyring, fail-closed validation, and an operator-only key-ID health endpoint, so rotation preserves old repair receipts. Never resurrect intentionally collected data below the server floor.
+
+- [x] D1-only, paginated room-retention inventory and HTTPS-only operator CLI for policy inspection and updates without R2 listing.
+
+### Gate 4 — platform maturity
+
+- [ ] Install/update/recovery UX across Chromium, Firefox and iOS PWA constraints. Browser-aware installation, standalone detection and controlled service-worker activation with draft-safe user confirmation are implemented; browser-specific recovery and cross-browser device validation remain.
+- [x] Native PWA share target for text, links and one file, with bounded device-local staging, explicit room/send confirmation and no pre-confirmation R2 traffic.
+- [x] Bounded multiple-file/album composition, multi-part zero-copy forwarding, and immediate failed-upload reclamation.
+- [x] Multiple-file OS share-target staging with bounded local persistence, an explicit destination confirmation step, legacy staged-record compatibility, and failure-safe retry.
+- [x] Installed-PWA file handlers for bounded common media/document types, reusing device-local share staging and explicit destination confirmation with no pre-confirmation Worker/D1/R2 traffic.
+- [ ] Dependable background notifications. Progressive app-badge handling, anonymous push-time marking, exact local unread reconciliation, authenticated startup repair, VAPID-key rotation, explicit disable, and closed-window `pushsubscriptionchange` renewal through a narrow hashed device capability are implemented without R2. Deployed Chromium/Firefox/iOS provider and permission-recovery drills remain.
+- [ ] Desktop/mobile packaging decision for capabilities a PWA cannot reliably provide.
+- [ ] Operational dashboards, structured security events, SLOs, backups and disaster exercises.
+- [ ] Controlled schema/protocol migrations with mixed-version clients. Bidirectional HTTP version ranges, session feature/limit advertisement, legacy single-attachment downgrade, and incompatible-version rejection are implemented; database rollout/rollback tooling remains.
+- [ ] Federation only after the single-home-server model and abuse boundary are proven.
+
+Voice/video calling and an in-chat application platform are later product decisions. They are not prerequisites for validating the messaging/storage core, but they are part of a literal feature-parity claim and therefore remain outside any premature “complete” declaration.
+
+## R2/S3 budget policy
+
+R2 is the encrypted blob/archive plane, never the live event database or search index.
+
+- Attachments use one opaque object because they have independent authorization and deletion lifecycles. Do not create thumbnail objects by default; derive/cache thumbnails locally.
+- Profile avatars use one current client-resized WebP object per account, capped at 128 KiB. They are quota-accounted, content-addressed for idempotent retry, addressed publicly only through an opaque active ID, and replaced through an exact-key deletion ledger; no old versions or server thumbnails are retained.
+- A voice note is one ordinary encrypted attachment object. Timeline rendering must not auto-fetch it; the first explicit play/save action performs the authorized object read. Do not create server-side waveform, transcoding, or alternate-codec objects.
+- Device-local retention deletes local decrypted projections, indexes, and matching signed repair envelopes. It performs no R2 request and must not be presented as cloud quota reclamation; sender retraction/account deletion remain the flows that can schedule exact-key attachment deletion.
+- Historical messages are packed into 1–10 MiB range-decodable segments. A low-volume room waits until at least 1 MiB of encoded input or 500 events, whichever comes first.
+- D1 metadata is authoritative for object location and accounting. Normal request paths must not call bucket `list()` or `head()` merely to discover objects.
+- Each historical lookup fetches one framing header, one coalesced device-key-envelope/encrypted-index range, then encrypted chunk ranges. Require exact partial-content responses and reject whole-object fallback; cache immutable header/envelope/index bytes locally.
+- The history manifest returns at most four segments immediately before the requested room sequence. Continue with the earliest returned `start_seq`; never return the room's complete segment catalog on every page.
+- Standard storage is the default. Infrequent Access is opt-in only after measured access patterns justify its higher operations/retrieval cost and minimum storage duration.
+- Bucket lifecycle deletion must not be enabled for committed `attachments/` or `rooms/` prefixes until the administrator retention floor/generation and deletion-event reconciliation keep D1 and clients consistent.
+- Cloudflare is the reliable new-device bootstrap and temporary encrypted snapshot relay. Future native iroh and browser WebRTC paths are optional bulk-transfer optimizations behind one peer-transport boundary; browser iroh is relay-only and must not be advertised as LAN-direct.
+- Temporary/multipart prefixes may use short lifecycle cleanup. Failed single-part uploads are deleted immediately and quota reservations are rolled back.
+- Device linking uses temporary, quota-accounted `device-links/<link>/<transfer>/<index>.bin` objects over one versioned bundle containing the gzip PGlite snapshot and cached attachment ciphertext. Plaintext shards are 16 MiB, encrypted directly from the approving device's ECDH key to the new device, deleted individually after authenticated durable local staging, and cron-reclaimed if the new endpoint disappears. They are never split per room, message, or attachment; a 1 GiB bundle produces about 64 objects.
+- Default deployment budget is 2 GiB and 100,000 objects per user, configurable through `USER_R2_QUOTA_BYTES` and `USER_R2_OBJECT_LIMIT`.
+
+## Evidence required before calling this a Delta Chat alternative
+
+Completion requires more than matching a feature checklist: multi-month dogfooding, upgrade and recovery drills, independent cryptographic review, load/cost measurements, cross-browser/mobile testing, accessibility review, and published operational/security documentation. Until those gates pass, project documentation and UI should describe EdgeChat as an MVP or preview.

@@ -1,0 +1,14 @@
+{
+  "name": "@edgechat/messaging-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./node": "./src/node.ts" },
+  "scripts": {
+    "build": "cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/edgechat_messaging_core.wasm --target web --out-dir pkg --out-name edgechat_mls && wasm-bindgen target/wasm32-unknown-unknown/release/edgechat_messaging_core.wasm --target nodejs --out-dir pkg-node --out-name edgechat_mls",
+    "build:wasm": "pnpm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "cargo test && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/edgechat_messaging_core.wasm --target nodejs --out-dir pkg-node --out-name edgechat_mls && node scripts/mls-smoke.mjs && vitest run"
+  },
+  "devDependencies": { "typescript": "latest", "vitest": "^4.1.11" }
+}

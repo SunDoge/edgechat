@@ -1,0 +1,33 @@
+{
+  "name": "edgechat",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=22 <26"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @edgechat/web --filter @edgechat/worker dev",
+    "dev:web": "pnpm run build:core && pnpm --filter @edgechat/web dev",
+    "dev:worker": "pnpm --filter @edgechat/worker dev",
+    "build": "pnpm run build:core && pnpm -r --filter '!@edgechat/worker' --filter '!@edgechat/messaging-core' --if-present run build && pnpm --filter @edgechat/worker build",
+    "build:core": "pnpm --filter @edgechat/messaging-core build",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test",
+    "check": "pnpm run db:types:check && pnpm run typecheck && pnpm run test && pnpm run build",
+    "security:audit": "pnpm audit --prod --audit-level high",
+    "cf-typegen": "pnpm --filter @edgechat/worker cf-typegen",
+    "db:migrate:local": "pnpm --filter @edgechat/worker db:migrate:local",
+    "db:types": "pnpm --filter @edgechat/worker db:types",
+    "db:types:check": "pnpm --filter @edgechat/worker db:types:check",
+    "audit:storage": "node packages/storage-audit/src/cli.mjs",
+    "operator": "node packages/operator-cli/src/cli.mjs",
+    "deploy": "pnpm run build && pnpm --filter @edgechat/worker deploy"
+  },
+  "devDependencies": {
+    "better-sqlite3": "12.4.1",
+    "kysely-codegen": "0.20.0",
+    "typescript": "latest"
+  }
+}

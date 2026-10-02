@@ -1,0 +1,6 @@
+{
+  "dialect": "sqlite",
+  "logLevel": "warn",
+  "outFile": "./src/database.generated.ts",
+  "typeOnlyImports": true
+}

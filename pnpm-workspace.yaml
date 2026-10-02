@@ -1,0 +1,15 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Transformers.js runs only in the browser here. Avoid its Node-only image and
+# inference backends while retaining required platform binaries for Vite,
+# Wrangler, Rolldown and esbuild.
+ignoredOptionalDependencies:
+  - onnxruntime-node
+  - sharp
+
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  workerd: true

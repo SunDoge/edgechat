@@ -1,0 +1,384 @@
+export const API_VERSION = "v1" as const;
+export const PROTOCOL_VERSION = 1 as const;
+export const MIN_SUPPORTED_PROTOCOL_VERSION = 1 as const;
+export const MAX_ATTACHMENT_PLAINTEXT_BYTES = 25 * 1024 * 1024;
+export const MAX_MESSAGE_ATTACHMENTS = 10;
+export const MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES = 100 * 1024 * 1024;
+
+export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1"] as const;
+export type ServerProtocolFeature = typeof serverProtocolFeatures[number];
+export type ServerProtocolCapabilities = {
+  version: number;
+  minimum_client_version: number;
+  features: string[];
+  limits: {
+    max_attachments_per_message: number;
+    max_attachment_plaintext_bytes: number;
+    max_message_attachment_plaintext_bytes: number;
+  };
+};
+
+const legacyServerProtocol: ServerProtocolCapabilities = {
+  version: 1,
+  minimum_client_version: 1,
+  features: [],
+  limits: {
+    max_attachments_per_message: 1,
+    max_attachment_plaintext_bytes: MAX_ATTACHMENT_PLAINTEXT_BYTES,
+    max_message_attachment_plaintext_bytes: MAX_ATTACHMENT_PLAINTEXT_BYTES,
+  },
+};
+
+export const currentServerProtocol: ServerProtocolCapabilities = {
+  version: PROTOCOL_VERSION,
+  minimum_client_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+  features: [...serverProtocolFeatures],
+  limits: {
+    max_attachments_per_message: MAX_MESSAGE_ATTACHMENTS,
+    max_attachment_plaintext_bytes: MAX_ATTACHMENT_PLAINTEXT_BYTES,
+    max_message_attachment_plaintext_bytes: MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES,
+  },
+};
+
+/** Missing capabilities mean a pre-negotiation v1 server, never the newest feature set. */
+export function normalizeServerProtocol(value: unknown): ServerProtocolCapabilities {
+  if (value === undefined || value === null) return structuredClone(legacyServerProtocol);
+  if (!value || typeof value !== "object") throw new Error("Invalid server protocol capabilities");
+  const protocol = value as Partial<ServerProtocolCapabilities>;
+  const limits = protocol.limits as Partial<ServerProtocolCapabilities["limits"]> | undefined;
+  if (!Number.isSafeInteger(protocol.version) || Number(protocol.version) < 1
+    || !Number.isSafeInteger(protocol.minimum_client_version) || Number(protocol.minimum_client_version) < 1
+    || Number(protocol.minimum_client_version) > Number(protocol.version)
+    || !Array.isArray(protocol.features) || protocol.features.length > 64
+    || protocol.features.some((feature) => typeof feature !== "string" || feature.length < 1 || feature.length > 64)
+    || new Set(protocol.features).size !== protocol.features.length
+    || !limits
+    || !Number.isSafeInteger(limits.max_attachments_per_message) || Number(limits.max_attachments_per_message) < 1 || Number(limits.max_attachments_per_message) > MAX_MESSAGE_ATTACHMENTS
+    || !Number.isSafeInteger(limits.max_attachment_plaintext_bytes) || Number(limits.max_attachment_plaintext_bytes) < 1 || Number(limits.max_attachment_plaintext_bytes) > MAX_ATTACHMENT_PLAINTEXT_BYTES
+    || !Number.isSafeInteger(limits.max_message_attachment_plaintext_bytes) || Number(limits.max_message_attachment_plaintext_bytes) < 1 || Number(limits.max_message_attachment_plaintext_bytes) > MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES) {
+    throw new Error("Invalid server protocol capabilities");
+  }
+  return {
+    version: Number(protocol.version), minimum_client_version: Number(protocol.minimum_client_version),
+    features: [...protocol.features],
+    limits: {
+      max_attachments_per_message: Number(limits.max_attachments_per_message),
+      max_attachment_plaintext_bytes: Number(limits.max_attachment_plaintext_bytes),
+      max_message_attachment_plaintext_bytes: Number(limits.max_message_attachment_plaintext_bytes),
+    },
+  };
+}
+
+export function assertCompatibleServerProtocol(value: unknown): ServerProtocolCapabilities {
+  const protocol = normalizeServerProtocol(value);
+  if (protocol.minimum_client_version > PROTOCOL_VERSION) throw new Error("此服务器需要更新版本的客户端");
+  if (protocol.version < MIN_SUPPORTED_PROTOCOL_VERSION) throw new Error("此服务器版本过旧，请先升级服务器");
+  return protocol;
+}
+
+export function serverSupports(protocol: ServerProtocolCapabilities | undefined, feature: ServerProtocolFeature): boolean {
+  return normalizeServerProtocol(protocol).features.includes(feature);
+}
+
+export type UserId = `@${string}:${string}`;
+export type RoomId = `!${string}:${string}`;
+export type DeviceId = string;
+export type EventId = string;
+export type MessageId = `$${string}:${string}`;
+export type AttachmentId = string;
+export type MessagePartId = string;
+
+export type MessageReference = {
+  kind: "message";
+  message_id: MessageId;
+  room_id: RoomId;
+};
+
+export type MessageDeletePayload = {
+  version: 1;
+  kind: "message.delete";
+  target: MessageReference;
+  deleted_at: number;
+};
+
+export type MessageEditPayload = {
+  version: 1;
+  kind: "message.edit";
+  target: MessageReference;
+  text: string;
+  edited_at: number;
+};
+
+export type MessageReactionPayload = {
+  version: 1;
+  kind: "message.reaction";
+  target: MessageReference;
+  reaction: string | null;
+  updated_at: number;
+};
+
+export type ReadReceiptPayload = {
+  version: 1;
+  kind: "receipt.read";
+  room_id: RoomId;
+  up_to_seq: number;
+  read_at: number;
+};
+
+export type DeliveryReceiptPayload = {
+  version: 1;
+  kind: "receipt.delivered";
+  room_id: RoomId;
+  up_to_seq: number;
+  delivered_at: number;
+};
+
+export const MESSAGE_EXPIRY_OPTIONS_SECONDS = [3_600, 86_400, 604_800, 2_592_000] as const;
+export type MessageExpirySeconds = typeof MESSAGE_EXPIRY_OPTIONS_SECONDS[number];
+export type MessageExpiryPolicyPayload = {
+  version: 1;
+  kind: "room.message-expiry";
+  expires_in_seconds: MessageExpirySeconds | null;
+  updated_at: number;
+};
+
+export const roomEventTypes = [
+  "message.text", "message.file", "message.image", "message.contact", "message.delete", "message.edit", "message.reaction",
+  "control.member.add", "control.member.remove", "control.device.add",
+  "control.device.revoke", "control.key.update", "control.group.commit", "control.message-expiry",
+  "receipt.read", "receipt.delivered", "typing.start", "typing.stop",
+] as const;
+export type RoomEventType = typeof roomEventTypes[number];
+
+export type ClientEvent = {
+  event_id: EventId;
+  room_id: RoomId;
+  sender: UserId;
+  device_id: DeviceId;
+  type: RoomEventType;
+  created_at: number;
+  ciphertext: string;
+  metadata: Record<string, string | number | boolean | null | string[]>;
+  signature: string;
+};
+
+export type EventAcceptanceReceipt = {
+  version: 1;
+  key_id: string;
+  room_id: RoomId;
+  seq: number;
+  event_id: EventId;
+  event_hash: string;
+  retention_generation: number;
+  accepted_at: number;
+  mac: string;
+};
+
+export type RoomEvent = ClientEvent & { seq: number; acceptance_receipt?: EventAcceptanceReceipt };
+
+export type Device = {
+  device_id: DeviceId;
+  user_id: UserId;
+  display_name: string;
+  signing_key: JsonWebKey;
+  encryption_key: JsonWebKey;
+  created_at: number;
+  revoked_at: number | null;
+};
+
+export type UserProfile = {
+  user_id: UserId;
+  display_name: string;
+  bio: string;
+  avatar_url: string | null;
+};
+
+export type DraftEnvelope = {
+  version: 1;
+  room_id: RoomId;
+  source_device_id: string;
+  target_device_id: string;
+  client_updated_at: number;
+  ephemeral_key: JsonWebKey;
+  salt: string;
+  nonce: string;
+  ciphertext: string;
+  signature: string;
+};
+
+export type DraftEnvelopeRecord = DraftEnvelope & { server_updated_at: number };
+
+export type RoomSummary = {
+  room_id: RoomId;
+  name: string | null;
+  kind: "direct" | "group";
+  purpose: "chat" | "saved";
+  current_seq: number;
+  created_at: number;
+  members: Array<{ user_id: UserId; display_name: string; avatar_url: string | null; role: "owner" | "member" }>;
+  hidden_member_ids: UserId[];
+  request_status: "pending" | "accepted" | "rejected" | null;
+  request_role: "requester" | "recipient" | null;
+  request_message_sent: boolean;
+};
+
+export type SyncItem = {
+  cursor: number;
+  kind: "room.event" | "device.event" | "room.event.available";
+  room_id: RoomId | null;
+  seq: number | null;
+  payload: RoomEvent | Record<string, unknown>;
+};
+
+export type SyncResponse = {
+  next_cursor: number;
+  has_more: boolean;
+  items: SyncItem[];
+};
+
+export type ClientSocketFrame =
+  | { type: "ping" }
+  | { type: "typing"; active: boolean };
+
+export type TypingSocketFrame = {
+  type: "typing";
+  room_id: RoomId;
+  user_id: UserId;
+  connection_id: string;
+  active: boolean;
+  expires_at: number;
+};
+
+export type PresenceSocketFrame = {
+  type: "presence";
+  room_id: RoomId;
+  user_id: UserId;
+  active: boolean;
+};
+
+export type PresenceSnapshotSocketFrame = {
+  type: "presence.snapshot";
+  room_id: RoomId;
+  user_ids: UserId[];
+};
+
+export type SocketFrame =
+  | { type: "ready"; room_id: RoomId; current_seq: number }
+  | { type: "room.event"; room_id: RoomId; seq: number; event: RoomEvent }
+  | { type: "history.repair.available"; room_id: RoomId; start_seq: number; end_seq: number }
+  | { type: "attachment.repair.available"; room_id: RoomId; attachment_id: string }
+  | { type: "archive.repair.available"; room_id: RoomId; segment_id: string }
+  | TypingSocketFrame
+  | PresenceSocketFrame
+  | PresenceSnapshotSocketFrame
+  | { type: "ping"; at: number }
+  | { type: "error"; code: string };
+
+export interface FederationTransport {
+  sendRoomEvent(event: RoomEvent): Promise<void>;
+  sendControlEvent(event: RoomEvent): Promise<void>;
+  resolveRemoteUser(userId: UserId): Promise<never>;
+}
+
+export class LocalFederationTransport implements FederationTransport {
+  constructor(private readonly localDomain: string) {}
+  async sendRoomEvent(event: RoomEvent): Promise<void> { this.assertLocal(event.room_id.slice(event.room_id.lastIndexOf(":") + 1)); }
+  async sendControlEvent(event: RoomEvent): Promise<void> { return this.sendRoomEvent(event); }
+  async resolveRemoteUser(userId: UserId): Promise<never> {
+    const domain = userId.slice(userId.lastIndexOf(":") + 1);
+    throw new Error(domain === this.localDomain ? "Local users resolve through D1" : "Federation is disabled in Phase 1");
+  }
+  private assertLocal(domain: string): void { if (domain !== this.localDomain) throw new Error("Federation is disabled in Phase 1"); }
+}
+
+export function isNamespacedUserId(value: string): value is UserId {
+  return /^@[a-z0-9_][a-z0-9_.-]{1,30}:[a-z0-9.-]+$/i.test(value);
+}
+export function isNamespacedRoomId(value: string): value is RoomId {
+  return /^![A-Za-z0-9_-]{16,}:[a-z0-9.-]+$/i.test(value);
+}
+export function isNamespacedMessageId(value: string): value is MessageId {
+  return /^\$[A-Za-z0-9_-]{8,}:[a-z0-9.-]+$/i.test(value);
+}
+export function isMessageDeletePayload(value: unknown): value is MessageDeletePayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MessageDeletePayload>;
+  return payload.version === 1 && payload.kind === "message.delete" && Number.isFinite(payload.deleted_at)
+    && Boolean(payload.target && payload.target.kind === "message" && isNamespacedMessageId(payload.target.message_id)
+      && isNamespacedRoomId(payload.target.room_id));
+}
+export function isMessageEditPayload(value: unknown): value is MessageEditPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MessageEditPayload>;
+  return payload.version === 1 && payload.kind === "message.edit" && typeof payload.text === "string" && payload.text.length <= 16_000
+    && Number.isFinite(payload.edited_at) && Boolean(payload.target && payload.target.kind === "message"
+      && isNamespacedMessageId(payload.target.message_id) && isNamespacedRoomId(payload.target.room_id));
+}
+export function isMessageReactionPayload(value: unknown): value is MessageReactionPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MessageReactionPayload>;
+  return payload.version === 1 && payload.kind === "message.reaction" && (payload.reaction === null
+    || (typeof payload.reaction === "string" && Array.from(payload.reaction).length >= 1 && Array.from(payload.reaction).length <= 8))
+    && Number.isFinite(payload.updated_at) && Boolean(payload.target && payload.target.kind === "message"
+      && isNamespacedMessageId(payload.target.message_id) && isNamespacedRoomId(payload.target.room_id));
+}
+export function isReadReceiptPayload(value: unknown): value is ReadReceiptPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<ReadReceiptPayload>;
+  return payload.version === 1 && payload.kind === "receipt.read" && isNamespacedRoomId(payload.room_id ?? "")
+    && Number.isSafeInteger(payload.up_to_seq) && Number(payload.up_to_seq) > 0 && Number.isFinite(payload.read_at);
+}
+export function isDeliveryReceiptPayload(value: unknown): value is DeliveryReceiptPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<DeliveryReceiptPayload>;
+  return payload.version === 1 && payload.kind === "receipt.delivered" && isNamespacedRoomId(payload.room_id ?? "")
+    && Number.isSafeInteger(payload.up_to_seq) && Number(payload.up_to_seq) > 0 && Number.isFinite(payload.delivered_at);
+}
+export function isMessageExpiryPolicyPayload(value: unknown): value is MessageExpiryPolicyPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MessageExpiryPolicyPayload>;
+  return payload.version === 1 && payload.kind === "room.message-expiry" && Number.isSafeInteger(payload.updated_at) && Number(payload.updated_at) >= 0
+    && (payload.expires_in_seconds === null || MESSAGE_EXPIRY_OPTIONS_SECONDS.includes(payload.expires_in_seconds as MessageExpirySeconds));
+}
+export function canonicalEventBytes(event: Omit<ClientEvent, "signature">): Uint8Array<ArrayBuffer> {
+  const ordered = { event_id: event.event_id, room_id: event.room_id, sender: event.sender, device_id: event.device_id, type: event.type, created_at: event.created_at, ciphertext: event.ciphertext, metadata: event.metadata };
+  return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
+}
+
+export function canonicalSignedEventBytes(event: ClientEvent): Uint8Array<ArrayBuffer> {
+  const ordered = {
+    event_id: event.event_id, room_id: event.room_id, sender: event.sender, device_id: event.device_id,
+    type: event.type, created_at: event.created_at, ciphertext: event.ciphertext, metadata: event.metadata,
+    signature: event.signature,
+  };
+  return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
+}
+
+export function draftEnvelopeAadBytes(envelope: Omit<DraftEnvelope, "ciphertext" | "signature">): Uint8Array<ArrayBuffer> {
+  const ordered = {
+    version: envelope.version, room_id: envelope.room_id, source_device_id: envelope.source_device_id,
+    target_device_id: envelope.target_device_id, client_updated_at: envelope.client_updated_at,
+    ephemeral_key: { kty: envelope.ephemeral_key.kty, crv: envelope.ephemeral_key.crv, x: envelope.ephemeral_key.x, y: envelope.ephemeral_key.y },
+    salt: envelope.salt, nonce: envelope.nonce,
+  };
+  return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
+}
+
+export function canonicalDraftEnvelopeBytes(envelope: Omit<DraftEnvelope, "signature">): Uint8Array<ArrayBuffer> {
+  const ordered = {
+    version: envelope.version, room_id: envelope.room_id, source_device_id: envelope.source_device_id,
+    target_device_id: envelope.target_device_id, client_updated_at: envelope.client_updated_at,
+    ephemeral_key: { kty: envelope.ephemeral_key.kty, crv: envelope.ephemeral_key.crv, x: envelope.ephemeral_key.x, y: envelope.ephemeral_key.y },
+    salt: envelope.salt, nonce: envelope.nonce, ciphertext: envelope.ciphertext,
+  };
+  return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
+}
+
+export function canonicalAcceptanceReceiptBytes(receipt: Omit<EventAcceptanceReceipt, "mac">): Uint8Array<ArrayBuffer> {
+  const ordered = {
+    version: receipt.version, key_id: receipt.key_id, room_id: receipt.room_id, seq: receipt.seq,
+    event_id: receipt.event_id, event_hash: receipt.event_hash,
+    retention_generation: receipt.retention_generation, accepted_at: receipt.accepted_at,
+  };
+  return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
+}
