@@ -11,6 +11,7 @@
     "cf-typegen": "wrangler types worker-configuration.d.ts",
     "db:migrate:local": "wrangler d1 migrations apply edgechat-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply edgechat-db --remote",
+    "db:bookmark:remote": "wrangler d1 time-travel info edgechat-db --json",
     "db:types": "node scripts/generate-db-types.mjs",
     "db:types:check": "node scripts/generate-db-types.mjs --verify",
     "deploy": "wrangler deploy"

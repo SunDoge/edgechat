@@ -44,6 +44,10 @@ export class OperatorClient {
     return this.request(`/api/v1/operator/storage?${query}`);
   }
 
+  readiness() {
+    return this.request("/api/v1/operator/readiness");
+  }
+
   reports({ limit = 50, cursor, status = "open" } = {}) {
     const query = new URLSearchParams({ limit: String(limit), status });
     if (cursor) query.set("cursor", cursor);

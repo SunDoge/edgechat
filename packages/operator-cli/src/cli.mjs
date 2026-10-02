@@ -11,6 +11,7 @@ Environment:
   EDGECHAT_OPERATOR_TOKEN  Operator API bearer token
 
 Commands:
+  readiness
   rooms [--policy POLICY] [--limit N] [--cursor ROOM_ID] [--all]
   storage [--limit N] [--cursor USER_ID] [--all]
   reports [--status open|confirmed|dismissed|all] [--limit N] [--cursor REPORT_ID] [--all]
@@ -22,7 +23,7 @@ Commands:
   retention ROOM_ID
   retention ROOM_ID --days N|indefinite [--minimum-device-copies N]
 
-The rooms, storage, reports, appeals, and login-lock commands use D1 only; they never list R2.`;
+The readiness, rooms, storage, reports, appeals, and login-lock commands use D1 only; they never list R2.`;
 }
 
 function integer(value, label, minimum, maximum) {
@@ -34,7 +35,7 @@ function integer(value, label, minimum, maximum) {
 export function parseArguments(argv, env = process.env) {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { help: true };
   const command = argv[0];
-  if (!new Set(["rooms", "storage", "reports", "report", "appeals", "appeal", "retention", "login-locks", "login-unlock"]).has(command)) throw new Error(`Unknown command: ${command}`);
+  if (!new Set(["readiness", "rooms", "storage", "reports", "report", "appeals", "appeal", "retention", "login-locks", "login-unlock"]).has(command)) throw new Error(`Unknown command: ${command}`);
   const values = { command, baseUrl: env.EDGECHAT_URL ?? "", token: env.EDGECHAT_OPERATOR_TOKEN ?? "", limit: 50, all: false };
   let index = 1;
   if (command === "retention" || command === "report" || command === "appeal" || command === "login-unlock") {
@@ -80,6 +81,7 @@ export function parseArguments(argv, env = process.env) {
   if (command === "appeal" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status)) throw new Error("pagination options are not valid for appeal");
   if (command === "retention" && (values.policy || values.cursor || values.all || values.limit !== 50)) throw new Error("pagination options are not valid for retention");
   if (command === "login-unlock" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status)) throw new Error("pagination options are not valid for login-unlock");
+  if (command === "readiness" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status || values.resolution || values.note || values.unlockLogin)) throw new Error("options are not valid for readiness");
   if (command !== "retention" && (values.retentionDays !== undefined || values.minimumDeviceCopies !== undefined)) throw new Error("retention options require the retention command");
   if (command === "retention" && values.minimumDeviceCopies !== undefined && values.retentionDays === undefined) throw new Error("--minimum-device-copies requires --days");
   return values;
@@ -100,6 +102,7 @@ async function allPages(first, loadNext, collection) {
 
 export async function run(options, fetchImpl = globalThis.fetch) {
   const client = new OperatorClient({ baseUrl: options.baseUrl, token: options.token, fetchImpl });
+  if (options.command === "readiness") return client.readiness();
   if (options.command === "report") return client.resolveReport(options.reportId, { resolution: options.resolution, note: options.note });
   if (options.command === "appeal") return client.resolveAppeal(options.appealId, { resolution: options.resolution, unlockLogin: options.unlockLogin, note: options.note });
   if (options.command === "login-unlock") return client.unlockLogin(options.userId, { note: options.note });

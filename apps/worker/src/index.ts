@@ -9,6 +9,7 @@ import { notifyAccountDevices, notifyOfflineDevices } from "./push";
 import { accountDeletionStatus, accountExport, accountExportDrafts, accountExportEvents, accountExportObjects, accountExportRooms, accountRemovalTasks, completeAccountRoomRemoval, processAccountDeletions, requestAccountDeletion } from "./account";
 import { eventReceiptKeyStatus, repairReceiptsEnabled, verifyAcceptanceReceipt } from "./receipt";
 import { cleanupLoginFailureState, clearLoginFailures, limitAuthenticatedRequest, limitUnauthenticatedIpRequest, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "./abuse";
+import { logSecurityEvent } from "./security-events";
 export { RoomDurableObject } from "./room-do";
 
 // The browser limit is 25 MiB of plaintext; AES-GCM appends a 16-byte tag.
@@ -49,6 +50,9 @@ const DEFAULT_USER_R2_OBJECT_LIMIT = 100_000;
 const MAX_PROFILE_AVATAR_BYTES = 128 * 1024;
 const ACCOUNT_APPEAL_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const RESOLVED_APPEAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const READINESS_WRITE_INTENT_SLO_MS = 30 * 60 * 1_000;
+const READINESS_BACKGROUND_WORK_SLO_MS = 24 * 60 * 60 * 1_000;
+const READINESS_APPEAL_SLO_MS = 7 * 24 * 60 * 60 * 1_000;
 const UNCOMMITTED_ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const PENDING_R2_WRITE_TTL_MS = 15 * 60 * 1_000;
 const visibleMessageEventTypes = new Set(["message.text", "message.file", "message.image", "message.contact"]);
@@ -281,6 +285,7 @@ async function requireOperator(request: Request, env: Env): Promise<void> {
     crypto.subtle.digest("SHA-256", encoder.encode(provided)),
   ]);
   if (!(crypto.subtle as TimingSafeSubtleCrypto).timingSafeEqual(configuredHash, providedHash)) {
+    logSecurityEvent("warn", "security.operator_auth_failed");
     throw new HttpError(401, "Operator authentication required", "operator_unauthorized", { "www-authenticate": "Bearer" });
   }
 }
@@ -361,6 +366,94 @@ async function operatorStorage(url: URL, env: Env): Promise<Response> {
       pending_delete_bytes: Number(pendingDeletes?.bytes ?? 0) + Number(pendingAvatarDeletes?.bytes ?? 0), pending_delete_objects: Number(pendingDeletes?.objects ?? 0) + Number(pendingAvatarDeletes?.objects ?? 0),
     },
     users, next_cursor: hasMore ? page.at(-1)?.user_id ?? null : null,
+  });
+}
+
+type ReadinessRow = {
+  active_users: number; active_devices: number; rooms: number; sync_cursor_high_water: number;
+  ledger_bytes: number; ledger_objects: number;
+  pending_writes: number; pending_writes_oldest_at: number | null;
+  pending_object_deletions: number; pending_object_deletions_oldest_at: number | null;
+  repair_jobs: number; repair_jobs_oldest_at: number | null;
+  account_deletions: number; account_deletions_oldest_at: number | null;
+  device_revocations: number; device_revocations_oldest_at: number | null;
+  peer_recoveries: number; peer_recoveries_oldest_at: number | null;
+  pending_appeals: number; pending_appeals_oldest_at: number | null;
+};
+
+function age(now: number, timestamp: number | null): number | null {
+  return timestamp === null ? null : Math.max(0, now - Number(timestamp));
+}
+
+async function operatorReadiness(env: Env): Promise<Response> {
+  const db = createDatabase(env.DB); const now = Date.now();
+  const result = await sql<ReadinessRow>`SELECT
+    (SELECT count(*) FROM users WHERE deleted_at IS NULL) AS active_users,
+    (SELECT count(*) FROM devices WHERE revoked_at IS NULL) AS active_devices,
+    (SELECT count(*) FROM rooms) AS rooms,
+    COALESCE((SELECT max(cursor) FROM sync_log), 0) AS sync_cursor_high_water,
+    COALESCE((SELECT sum(attachment_bytes + archive_bytes) FROM user_storage_usage), 0)
+      + COALESCE((SELECT sum(avatar_bytes) FROM users), 0) AS ledger_bytes,
+    COALESCE((SELECT sum(attachment_objects + archive_objects) FROM user_storage_usage), 0)
+      + COALESCE((SELECT sum(CASE WHEN avatar_bytes > 0 THEN 1 ELSE 0 END) FROM users), 0) AS ledger_objects,
+    (SELECT count(*) FROM pending_r2_writes) AS pending_writes,
+    (SELECT min(created_at) FROM pending_r2_writes) AS pending_writes_oldest_at,
+    (SELECT count(*) FROM attachment_deletions) + (SELECT count(*) FROM retention_object_deletions)
+      + (SELECT count(*) FROM profile_avatar_deletions) AS pending_object_deletions,
+    (SELECT min(requested_at) FROM (
+      SELECT requested_at FROM attachment_deletions UNION ALL
+      SELECT requested_at FROM retention_object_deletions UNION ALL
+      SELECT requested_at FROM profile_avatar_deletions
+    )) AS pending_object_deletions_oldest_at,
+    (SELECT count(*) FROM history_repair_jobs) + (SELECT count(*) FROM attachment_repair_jobs)
+      + (SELECT count(*) FROM archive_segment_repair_jobs) AS repair_jobs,
+    (SELECT min(detected_at) FROM (
+      SELECT detected_at FROM history_repair_jobs UNION ALL
+      SELECT detected_at FROM attachment_repair_jobs UNION ALL
+      SELECT detected_at FROM archive_segment_repair_jobs
+    )) AS repair_jobs_oldest_at,
+    (SELECT count(*) FROM account_deletions WHERE status != 'complete') AS account_deletions,
+    (SELECT min(updated_at) FROM account_deletions WHERE status != 'complete') AS account_deletions_oldest_at,
+    (SELECT count(*) FROM device_revocations WHERE status != 'complete') AS device_revocations,
+    (SELECT min(updated_at) FROM device_revocations WHERE status != 'complete') AS device_revocations_oldest_at,
+    (SELECT count(*) FROM room_peer_recoveries WHERE status NOT IN ('complete', 'cancelled')) AS peer_recoveries,
+    (SELECT min(updated_at) FROM room_peer_recoveries WHERE status NOT IN ('complete', 'cancelled')) AS peer_recoveries_oldest_at,
+    (SELECT count(*) FROM account_appeals WHERE status = 'pending') AS pending_appeals,
+    (SELECT min(created_at) FROM account_appeals WHERE status = 'pending') AS pending_appeals_oldest_at`.execute(db);
+  const row = result.rows[0];
+  if (!row) throw new HttpError(503, "Readiness query returned no row", "readiness_unavailable");
+  const ages = {
+    pending_writes: age(now, row.pending_writes_oldest_at),
+    pending_object_deletions: age(now, row.pending_object_deletions_oldest_at),
+    repair_jobs: age(now, row.repair_jobs_oldest_at),
+    account_deletions: age(now, row.account_deletions_oldest_at),
+    device_revocations: age(now, row.device_revocations_oldest_at),
+    peer_recoveries: age(now, row.peer_recoveries_oldest_at),
+    pending_appeals: age(now, row.pending_appeals_oldest_at),
+  };
+  const degraded_reasons: string[] = [];
+  if (ages.pending_writes !== null && ages.pending_writes > READINESS_WRITE_INTENT_SLO_MS) degraded_reasons.push("stale_r2_write_intents");
+  for (const key of ["pending_object_deletions", "repair_jobs", "account_deletions", "device_revocations", "peer_recoveries"] as const) {
+    if (ages[key] !== null && ages[key] > READINESS_BACKGROUND_WORK_SLO_MS) degraded_reasons.push(`stale_${key}`);
+  }
+  if (ages.pending_appeals !== null && ages.pending_appeals > READINESS_APPEAL_SLO_MS) degraded_reasons.push("stale_pending_appeals");
+  return json({
+    status: degraded_reasons.length ? "degraded" : "healthy", generated_at: now, degraded_reasons,
+    inventory: {
+      active_users: Number(row.active_users), active_devices: Number(row.active_devices), rooms: Number(row.rooms), sync_cursor_high_water: Number(row.sync_cursor_high_water),
+      ledger_bytes: Number(row.ledger_bytes), ledger_objects: Number(row.ledger_objects),
+    },
+    queues: {
+      pending_writes: { count: Number(row.pending_writes), oldest_age_ms: ages.pending_writes },
+      pending_object_deletions: { count: Number(row.pending_object_deletions), oldest_age_ms: ages.pending_object_deletions },
+      repair_jobs: { count: Number(row.repair_jobs), oldest_age_ms: ages.repair_jobs },
+      account_deletions: { count: Number(row.account_deletions), oldest_age_ms: ages.account_deletions },
+      device_revocations: { count: Number(row.device_revocations), oldest_age_ms: ages.device_revocations },
+      peer_recoveries: { count: Number(row.peer_recoveries), oldest_age_ms: ages.peer_recoveries },
+      pending_appeals: { count: Number(row.pending_appeals), oldest_age_ms: ages.pending_appeals },
+    },
+    slo_ms: { write_intent: READINESS_WRITE_INTENT_SLO_MS, background_work: READINESS_BACKGROUND_WORK_SLO_MS, pending_appeal: READINESS_APPEAL_SLO_MS },
+    storage_source: "d1_ledger",
   });
 }
 
@@ -512,6 +605,7 @@ async function operatorResolveAppeal(request: Request, env: Env, appealId: strin
     db.insertInto("operator_appeal_actions").values({ action_id: actionId, appeal_id: appealId, resolution, login_unlocked: unlockLogin ? 1 : 0, note, created_at: now }),
     ...(unlockLogin ? [db.deleteFrom("login_failure_state").where("user_id", "=", appeal.user_id)] : []),
   ]);
+  logSecurityEvent("info", "security.account_appeal_resolved", { resolution, login_unlocked: unlockLogin });
   const updated = await db.selectFrom("account_appeals").select([
     "appeal_id", "user_id", "category", "status", "created_at", "updated_at", "expires_at", "resolved_at",
   ]).where("appeal_id", "=", appealId).executeTakeFirstOrThrow();
@@ -1079,6 +1173,7 @@ async function createAccountAppeal(request: Request, env: Env): Promise<Response
         status: "pending", created_at: now, updated_at: now, expires_at: expiresAt, resolved_at: null,
       }).execute();
     }
+    logSecurityEvent("info", "security.account_appeal_submitted", { category: category as AppealCategory, replaced_pending: Boolean(pending) });
   }
   // Invalid credentials receive an indistinguishable, self-expiring receipt,
   // but cannot allocate durable D1 state or reveal whether an account exists.
@@ -3932,6 +4027,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (path.startsWith("/api/v1/operator/")) {
     await limitUnauthenticatedRequest(request, env, "operator", request.headers.get("authorization") ?? "missing");
     await requireOperator(request, env);
+    if (path === "/api/v1/operator/readiness" && request.method === "GET") return operatorReadiness(env);
     if (path === "/api/v1/operator/storage" && request.method === "GET") return operatorStorage(url, env);
     if (path === "/api/v1/operator/rooms" && request.method === "GET") return operatorRooms(url, env);
     if (path === "/api/v1/operator/reports" && request.method === "GET") return operatorReports(url, env);

@@ -158,6 +158,32 @@ it("lets the operator inspect and idempotently clear login locks with a D1-only 
   expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 });
 
+it("reports D1-ledger readiness and stale background work without touching R2", async () => {
+  const account = await register("readiness_owner", await device("readiness-device"));
+  const operatorHeaders = { authorization: "Bearer operator-test-token-with-at-least-32-bytes" };
+  expect((await SELF.fetch("https://edgechat.test/api/v1/operator/readiness", { headers: { authorization: `Bearer ${account.access_token}` } })).status).toBe(401);
+
+  const healthy = await SELF.fetch("https://edgechat.test/api/v1/operator/readiness", { headers: operatorHeaders });
+  expect(healthy.status, await healthy.clone().text()).toBe(200);
+  expect(await healthy.json()).toMatchObject({
+    status: "healthy", degraded_reasons: [], storage_source: "d1_ledger",
+    inventory: { active_users: 1, active_devices: 1, rooms: 0, ledger_bytes: 0, ledger_objects: 0 },
+    queues: { pending_writes: { count: 0, oldest_age_ms: null } },
+  });
+
+  await env.DB.prepare(`INSERT INTO pending_r2_writes
+    (object_key, owner_user_id, kind, expected_bytes, created_at, attempts, last_error)
+    VALUES (?, ?, 'attachment', 64, ?, 0, NULL)`)
+    .bind(`attachments/readiness-${crypto.randomUUID()}`, account.user_id, Date.now() - 31 * 60_000).run();
+  const degraded = await SELF.fetch("https://edgechat.test/api/v1/operator/readiness", { headers: operatorHeaders });
+  expect(await degraded.json()).toMatchObject({
+    status: "degraded", degraded_reasons: ["stale_r2_write_intents"], storage_source: "d1_ledger",
+    queues: { pending_writes: { count: 1 } },
+    slo_ms: { write_intent: 30 * 60_000, background_work: 24 * 60 * 60_000, pending_appeal: 7 * 24 * 60 * 60_000 },
+  });
+  expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+});
+
 it("accepts privacy-preserving account appeals and lets an operator resolve a verified login lock without R2", async () => {
   const typedEnv = env as unknown as Env;
   const currentDevice = await device("appeal-device");

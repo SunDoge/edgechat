@@ -19,6 +19,7 @@
     "security:audit": "pnpm audit --prod --audit-level high",
     "cf-typegen": "pnpm --filter @edgechat/worker cf-typegen",
     "db:migrate:local": "pnpm --filter @edgechat/worker db:migrate:local",
+    "db:bookmark:remote": "pnpm --filter @edgechat/worker db:bookmark:remote",
     "db:types": "pnpm --filter @edgechat/worker db:types",
     "db:types:check": "pnpm --filter @edgechat/worker db:types:check",
     "audit:storage": "node packages/storage-audit/src/cli.mjs",

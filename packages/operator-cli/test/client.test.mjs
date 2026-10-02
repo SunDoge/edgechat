@@ -24,6 +24,22 @@ test("sends the operator token only as an authorization header", async () => {
   assert.equal(captured.url.includes("operator-secret"), false);
 });
 
+test("fetches the D1-only readiness snapshot without pagination", async () => {
+  const env = { EDGECHAT_URL: "https://chat.example.com", EDGECHAT_OPERATOR_TOKEN: "secret" };
+  assert.deepEqual(parseArguments(["readiness"], env), {
+    command: "readiness", baseUrl: env.EDGECHAT_URL, token: "secret", limit: 50, all: false,
+  });
+  assert.throws(() => parseArguments(["readiness", "--all"], env), /options are not valid/);
+  let captured;
+  const result = await run(parseArguments(["readiness"], env), async (url, init) => {
+    captured = { url, init };
+    return new Response(JSON.stringify({ status: "healthy", storage_source: "d1_ledger" }));
+  });
+  assert.deepEqual(result, { status: "healthy", storage_source: "d1_ledger" });
+  assert.equal(captured.url, "https://chat.example.com/api/v1/operator/readiness");
+  assert.equal(captured.init.headers.authorization, "Bearer secret");
+});
+
 test("follows bounded room pagination when --all is requested", async () => {
   const urls = [];
   const fetchImpl = async (url) => {

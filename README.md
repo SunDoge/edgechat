@@ -378,7 +378,7 @@ Use at least 32 random bytes for `OPERATOR_TOKEN`; it protects the storage-opera
 
 Accounts/devices, the D1/DO side of capability-protected device linking, scoped personal bots, idempotent MLS KeyPackage claiming/replenishment, Welcome-based room creation, MLS Commit-based group member add/remove and resumable per-device removal, signed ciphertext events and sender tombstones, durable cursor sync, recent history, encrypted attachment upload/download/deletion, client-compaction leases, segment upload/range download, push subscribe/unsubscribe, one-time WebSocket tickets, and room WebSockets are implemented below `/api/v1`.
 
-The separately authenticated Operator API exposes `GET /api/v1/operator/storage` for paginated D1-ledger totals, including pending writes/deletions, `GET /api/v1/operator/rooms` for retention policy, active-device coverage, and archive-ledger use, and `PUT`/`DELETE /api/v1/operator/users/:userId/storage-limit` for setting or resetting a user's byte/object limits. `GET /api/v1/operator/reports` pages metadata-only abuse reports by status; `PUT /api/v1/operator/reports/:reportId` records a confirmed or dismissed resolution plus an append-only operator action. `GET /api/v1/operator/appeals` pages password-verified, metadata-only account appeals; `PUT /api/v1/operator/appeals/:appealId` records an approved/denied action and can optionally clear a matching login lock. `GET /api/v1/operator/login-locks` lists active or historical failure state without credentials, and `POST /api/v1/operator/users/:userId/login-unlock` idempotently clears it while preserving an append-only audit snapshot. The server cannot supply message plaintext to reviewers. These routine operations query D1 and never list or read the R2 bucket. Lowering a limit below current usage is non-destructive: existing ciphertext remains, while subsequent object reservations are rejected until usage falls below the limit.
+The separately authenticated Operator API exposes `GET /api/v1/operator/readiness` for a one-statement D1 inventory and durable-queue age SLO snapshot, `GET /api/v1/operator/storage` for paginated D1-ledger totals including pending writes/deletions, `GET /api/v1/operator/rooms` for retention policy, active-device coverage, and archive-ledger use, and `PUT`/`DELETE /api/v1/operator/users/:userId/storage-limit` for setting or resetting a user's byte/object limits. `GET /api/v1/operator/reports` pages metadata-only abuse reports by status; `PUT /api/v1/operator/reports/:reportId` records a confirmed or dismissed resolution plus an append-only operator action. `GET /api/v1/operator/appeals` pages password-verified, metadata-only account appeals; `PUT /api/v1/operator/appeals/:appealId` records an approved/denied action and can optionally clear a matching login lock. `GET /api/v1/operator/login-locks` lists active or historical failure state without credentials, and `POST /api/v1/operator/users/:userId/login-unlock` idempotently clears it while preserving an append-only audit snapshot. The server cannot supply message plaintext to reviewers. These routine operations query D1 and never list or read the R2 bucket. Lowering a limit below current usage is non-destructive: existing ciphertext remains, while subsequent object reservations are rejected until usage falls below the limit.
 
 The HTTPS-only CLI exposes the same bounded operations:
 
@@ -407,6 +407,7 @@ The small operator CLI calls only those authenticated Worker endpoints. Keep its
 ```bash
 export EDGECHAT_URL=https://chat.example.com
 export EDGECHAT_OPERATOR_TOKEN='a-long-random-operator-token'
+pnpm run operator -- readiness
 pnpm run operator -- rooms --policy finite --all
 pnpm run operator -- retention '!opaque-room-id-1234:example.com'
 pnpm run operator -- retention '!opaque-room-id-1234:example.com' --days 30 --minimum-device-copies 2
@@ -414,6 +415,8 @@ pnpm run operator -- retention '!opaque-room-id-1234:example.com' --days indefin
 ```
 
 Remote URLs must use HTTPS; plain HTTP is accepted only for localhost development. `rooms --all` follows bounded cursor pagination. The separate `pnpm run audit:storage` command is the exceptional offline integrity audit that deliberately lists R2 and should not be part of routine retention administration.
+
+Operational SLOs, structured security-event privacy rules, D1 Time Travel rollout preflight, and the staging disaster-recovery exercise are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md). The readiness snapshot is one D1 statement and never inspects R2; this keeps routine monitoring predictable even for long-lived personal archives.
 
 Protocol/control events remain in the encrypted event stream but are filtered from the visible chat timeline. Encrypted delivery/read receipts, local unread state, and ephemeral WebSocket typing presence are implemented.
 

@@ -85,7 +85,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] Installed-PWA file handlers for bounded common media/document types, reusing device-local share staging and explicit destination confirmation with no pre-confirmation Worker/D1/R2 traffic.
 - [ ] Dependable background notifications. Progressive app-badge handling, anonymous push-time marking, exact local unread reconciliation, authenticated startup repair, VAPID-key rotation, explicit disable, and closed-window `pushsubscriptionchange` renewal through a narrow hashed device capability are implemented without R2. Deployed Chromium/Firefox/iOS provider and permission-recovery drills remain.
 - [ ] Desktop/mobile packaging decision for capabilities a PWA cannot reliably provide.
-- [ ] Operational dashboards, structured security events, SLOs, backups and disaster exercises.
+- [ ] Operational dashboards, structured security events, SLOs, backups and disaster exercises. A single-query D1-ledger readiness endpoint/CLI, content-free typed `security.*` events, explicit queue-age SLOs, D1 Time Travel preflight command, and staging-only quarterly recovery runbook are implemented without routine R2 reads or backup duplication. Production alert wiring and recorded disaster exercises remain.
 - [ ] Controlled schema/protocol migrations with mixed-version clients. Bidirectional HTTP version ranges, session feature/limit advertisement, legacy single-attachment downgrade, and incompatible-version rejection are implemented; database rollout/rollback tooling remains.
 - [ ] Federation only after the single-home-server model and abuse boundary are proven.
 

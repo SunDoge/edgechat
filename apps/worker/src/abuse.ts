@@ -2,6 +2,7 @@ import { sql } from "kysely";
 import { createDatabase } from "./database";
 import type { AuthContext, Env } from "./env";
 import { HttpError, sha256 } from "./http";
+import { logSecurityEvent } from "./security-events";
 
 export const LOGIN_FAILURE_WINDOW_MS = 15 * 60_000;
 export const LOGIN_FAILURE_LIMIT = 10;
@@ -14,7 +15,7 @@ async function opaqueRateKey(scope: string, value: string): Promise<string> {
 
 async function requireRateLimit(limiter: RateLimit, key: string, code: string): Promise<void> {
   if (!(await limiter.limit({ key })).success) {
-    console.warn(JSON.stringify({ event: "request_rate_limited", code }));
+    logSecurityEvent("warn", "security.rate_limited", { code });
     throw new HttpError(429, "Too many requests; try again shortly", code, { "retry-after": "60" });
   }
 }
@@ -56,6 +57,7 @@ export async function recordLoginFailure(env: Env, userId: string, now = Date.no
       ELSE login_failure_state.blocked_until END`,
     updated_at: now,
   })).returning(["failure_count", "blocked_until"]).executeTakeFirstOrThrow();
+  if (Number(result.failure_count) === LOGIN_FAILURE_LIMIT) logSecurityEvent("warn", "security.login_locked");
   return { failure_count: Number(result.failure_count), blocked_until: result.blocked_until === null ? null : Number(result.blocked_until) };
 }
 
