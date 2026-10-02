@@ -19,7 +19,7 @@ import {
 import { LocalDatabase, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomPreference, type OutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
 import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
+import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
 import { AuthScreen } from "./components/AuthScreen";
@@ -49,6 +49,7 @@ import { ShareTargetDialog } from "./components/ShareTargetDialog";
 import { createDeviceHistoryManifest, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
 import { deviceHistoryStagingFor } from "./device-history-staging";
 import { clearPendingDeviceLink } from "./device-linking";
+import { stagedMlsPosition } from "./mls-staging";
 import { enqueueForwardBatch, ForwardBatchError, MAX_FORWARD_SELECTION, selectedTimelineMessages, toggleSelectedMessage } from "./message-selection";
 import { deleteStagedShare, loadStagedShare, shareTargetErrorMessage, shareTargetId, type StagedShare } from "./share-target";
 import { syncUnreadAppBadge } from "./app-badge";
@@ -405,41 +406,80 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const eventEpoch = Number(event.metadata.mls_epoch);
       if (Number.isInteger(eventEpoch) && currentMls.epoch(event.room_id) >= eventEpoch) return null;
     }
-    const plaintextBytes = await mutateMls(async () => {
+    const staged = await db.stagedDecryptedEvent(event.event_id);
+    if (staged && (staged.event.room_id !== event.room_id || staged.event.seq !== event.seq || staged.event.ciphertext !== event.ciphertext || staged.event.signature !== event.signature)) {
+      throw new LocalStagingIntegrityError();
+    }
+    if (staged) {
+      if (!identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for staged MLS recovery");
+      const activeState = currentMls.exportState();
+      const position = stagedMlsPosition(activeState, staged.previous_mls_state, staged.next_mls_state);
+      if (position === "previous") {
+        let restored: OpenMlsMessagingCore;
+        try { restored = await OpenMlsMessagingCore.create(identityRef.deviceId, staged.next_mls_state); }
+        catch (cause) { throw new LocalStagingIntegrityError(`Staged MLS transition cannot be restored: ${cause instanceof Error ? cause.message : String(cause)}`); }
+        currentMls.destroy(); mlsRef = restored; setMls(restored);
+      } else if (position === "mismatch") {
+        throw new LocalStagingIntegrityError("Local MLS state does not match the staged event transition");
+      }
+      identityRef = { ...identityRef, mlsState: staged.next_mls_state };
+      try { await saveIdentity(profileId, identityRef); }
+      catch (cause) { throw new LocalProjectionPersistenceError(cause); }
+    }
+    const plaintextBytes = staged?.plaintext ?? await mutateMls(async () => {
+      const previousState = currentMls.exportState(); const previousIdentity = identityRef;
       const plaintext = currentMls.processMessage(event.room_id, decodeBase64Url(event.ciphertext));
-      await persistMls(currentMls);
-      return plaintext;
+      const nextState = currentMls.exportState();
+      try {
+        await db.stageDecryptedEvent(event, new Uint8Array(plaintext), new Uint8Array(previousState), new Uint8Array(nextState));
+        await persistMls(currentMls);
+        return plaintext;
+      } catch (cause) {
+        // Keep a possibly committed staging row. Even if the PGlite worker
+        // response was lost, startup can safely advance this restored pre-state.
+        if (previousIdentity) {
+          const restored = await OpenMlsMessagingCore.create(previousIdentity.deviceId, previousState);
+          currentMls.destroy(); mlsRef = restored; setMls(restored);
+          identityRef = { ...previousIdentity, mlsState: previousState };
+          await saveIdentity(profileId, identityRef).catch(() => undefined);
+        }
+        throw new LocalProjectionPersistenceError(cause);
+      }
     });
     if (!plaintextBytes.length) return null;
     const decoded: unknown = JSON.parse(decoder.decode(plaintextBytes));
+    const persistProjection = async (operation: () => Promise<void>) => {
+      try { await operation(); }
+      catch (cause) { throw new LocalProjectionPersistenceError(cause); }
+    };
     if (event.type === "message.delete") {
       if (!isMessageDeletePayload(decoded) || decoded.target.room_id !== event.room_id) throw new Error("无效的消息撤回事件");
-      await db.applyMessageTombstone(event, decoded.target.message_id);
+      await persistProjection(() => db.applyMessageTombstone(event, decoded.target.message_id));
       return null;
     }
     if (event.type === "message.edit") {
       if (!isMessageEditPayload(decoded) || decoded.target.room_id !== event.room_id) throw new Error("无效的消息编辑事件");
-      await db.applyMessageEdit(event, decoded);
+      await persistProjection(() => db.applyMessageEdit(event, decoded));
       return null;
     }
     if (event.type === "message.reaction") {
       if (!isMessageReactionPayload(decoded) || decoded.target.room_id !== event.room_id) throw new Error("无效的消息回应事件");
-      await db.applyMessageReaction(event, decoded);
+      await persistProjection(() => db.applyMessageReaction(event, decoded));
       return null;
     }
     if (event.type === "receipt.read") {
       if (!isReadReceiptPayload(decoded) || decoded.room_id !== event.room_id) throw new Error("无效的已读回执事件");
-      await db.applyReadReceipt(event, decoded, event.sender === session()?.user_id);
+      await persistProjection(() => db.applyReadReceipt(event, decoded, event.sender === session()?.user_id));
       return null;
     }
     if (event.type === "receipt.delivered") {
       if (!isDeliveryReceiptPayload(decoded) || decoded.room_id !== event.room_id) throw new Error("无效的送达回执事件");
-      await db.applyDeliveryReceipt(event, decoded, event.sender === session()?.user_id);
+      await persistProjection(() => db.applyDeliveryReceipt(event, decoded, event.sender === session()?.user_id));
       return null;
     }
     if (event.type === "control.message-expiry") {
       if (!isMessageExpiryPolicyPayload(decoded)) throw new Error("无效的消息自动消失设置");
-      await db.applyMessageExpiryPolicy(event, decoded);
+      await persistProjection(() => db.applyMessageExpiryPolicy(event, decoded));
       return null;
     }
     if (!event.type.startsWith("message.")) return null;

@@ -127,6 +127,7 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO event_envelopes VALUES ('signed-event','!room:example.com',1,1,$1::jsonb,1)", [JSON.stringify({ event_id: "signed-event", room_id: "!room:example.com", seq: 1 })]);
     await db.query("INSERT INTO room_sync_state VALUES ('!room:example.com',0,1,1)");
     await db.query("INSERT INTO deferred_room_events VALUES ('deferred-event','!room:example.com',2,$1::jsonb,1)", [JSON.stringify({ event_id: "deferred-event", room_id: "!room:example.com", seq: 2 })]);
+    await db.query("INSERT INTO decrypted_event_staging VALUES ('staged-event','!room:example.com',2,$1::jsonb,$2,$3,$4,1)", [JSON.stringify({ event_id: "staged-event", room_id: "!room:example.com", seq: 2 }), new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])]);
     await db.query("INSERT INTO crypto_state VALUES ('!room:example.com',1,$1,'openmls',1)", [new Uint8Array([1])]);
     await db.query("INSERT INTO room_preferences (room_id,pinned_at,archived_at,muted_until,local_retention_days,updated_at) VALUES ('!room:example.com',1,NULL,NULL,NULL,1)");
     await db.query("INSERT INTO device_preferences (id,link_previews,share_presence,updated_at) VALUES (1,FALSE,TRUE,1)");
@@ -143,6 +144,7 @@ describe("PGlite local full-text index", () => {
     expect((await db.query("SELECT * FROM crypto_state")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM room_sync_state")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM deferred_room_events")).rows).toHaveLength(0);
+    expect((await db.query("SELECT * FROM decrypted_event_staging")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM room_preferences")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM device_preferences")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM composer_drafts")).rows).toHaveLength(0);
@@ -336,6 +338,7 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await db.query("INSERT INTO crypto_state VALUES ('!room:example.com',1,$1,'openmls',1)", [new Uint8Array([1, 2, 3])]);
     await db.query("INSERT INTO archive_segment_metadata VALUES ('segment','!room:example.com',1,10,100,$1,$2,1)", [new Uint8Array([1]), new Uint8Array([2])]);
+    await db.query("INSERT INTO decrypted_event_staging VALUES ('staged-event','!room:example.com',1,$1::jsonb,$2,$3,$4,1)", [JSON.stringify({ event_id: "staged-event", room_id: "!room:example.com", seq: 1 }), new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])]);
     await db.query("INSERT INTO composer_drafts (room_id,text_content,mode,target_message_id,updated_at) VALUES ('!room:example.com','private unfinished text','message',NULL,1)");
     await db.query("INSERT INTO cached_session VALUES (1,$1::jsonb,1)", [JSON.stringify({ user_id: "@alice:example.com", device_id: "phone" })]);
     await db.query("INSERT INTO room_snapshots VALUES ('!room:example.com',$1::jsonb,1)", [JSON.stringify({ room_id: "!room:example.com" })]);
@@ -346,6 +349,7 @@ describe("PGlite local full-text index", () => {
     expect((await db.query("SELECT * FROM users")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM crypto_state")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM archive_segment_metadata")).rows).toHaveLength(0);
+    expect((await db.query("SELECT * FROM decrypted_event_staging")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM composer_drafts")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM cached_session")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM room_snapshots")).rows).toHaveLength(0);

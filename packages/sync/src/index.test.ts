@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
+import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, LocalProjectionPersistenceError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -265,6 +265,50 @@ describe("SyncEngine event ingestion", () => {
     const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
     await ingest(event);
     expect(order).toEqual(["marked", "saved", "processed"]);
+  });
+
+  it("replays a staged plaintext projection after MLS state advanced but the browser crashed", async () => {
+    const roomId = "!staged-recovery:example.com" as const;
+    const event = { event_id: "staged-event-1", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+      type: "message.text" as const, created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    let staged = true; const order: string[] = [];
+    const db = {
+      stagedDecryptedEvents: async () => staged ? [event] : [],
+      stagedDecryptedEvent: async () => staged ? ({ event, plaintext: new TextEncoder().encode("already decrypted") }) : null,
+      roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: 1 }),
+      hasMessage: async () => true,
+      markProcessed: async () => { order.push("marked"); },
+      saveDecryptedEvent: async () => { order.push("projected"); },
+      removeStagedDecryptedEvent: async () => { order.push("unstaged"); staged = false; },
+      deferredRoomIds: async () => [], getCursor: async () => 4, setCursor: async () => undefined,
+    } as unknown as LocalDatabase;
+    const process = vi.fn(async () => ({ plaintext: "already decrypted", payload: {} }));
+    const api = { sync: async () => ({ next_cursor: 4, has_more: false, items: [] }) } as unknown as ApiClient;
+    const engine = new SyncEngine(api, db, process, undefined, null);
+
+    await engine.start(); engine.stop();
+
+    expect(process).toHaveBeenCalledExactlyOnceWith(event);
+    expect(order).toEqual(["marked", "projected", "unstaged"]);
+  });
+
+  it("keeps staged plaintext retryable when the local projection cannot be persisted", async () => {
+    const roomId = "!staged-write-failure:example.com" as const;
+    const event = { event_id: "staged-event-write-failure", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+      type: "message.edit" as const, created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    const removeStagedDecryptedEvent = vi.fn(async () => undefined);
+    const quarantineEvent = vi.fn(async () => undefined);
+    const db = {
+      stagedDecryptedEvent: async () => ({ event, plaintext: new TextEncoder().encode("already decrypted") }),
+      roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: 1 }),
+      hasMessage: async () => false, removeStagedDecryptedEvent, quarantineEvent,
+    } as unknown as LocalDatabase;
+    const engine = new SyncEngine(new ApiClient(""), db, async () => { throw new LocalProjectionPersistenceError(new Error("OPFS unavailable")); });
+    const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
+
+    await expect(ingest(event)).rejects.toBeInstanceOf(LocalProjectionPersistenceError);
+    expect(quarantineEvent).not.toHaveBeenCalled();
+    expect(removeStagedDecryptedEvent).not.toHaveBeenCalled();
   });
 
   it("does not replay events already represented by a newly joined device state", async () => {

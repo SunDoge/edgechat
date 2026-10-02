@@ -599,6 +599,19 @@ export class RoomHistoryTransferRequiredError extends Error {
   }
 }
 
+export class LocalStagingIntegrityError extends Error {
+  constructor(message = "Local decrypted event staging does not match its signed envelope") {
+    super(message); this.name = "LocalStagingIntegrityError";
+  }
+}
+
+export class LocalProjectionPersistenceError extends Error {
+  constructor(cause: unknown) {
+    super("Failed to persist the decrypted local event projection", { cause });
+    this.name = "LocalProjectionPersistenceError";
+  }
+}
+
 export class SyncEngine extends EventTarget {
   private running = false;
   private sockets = new Map<RoomId, WebSocket>();
@@ -635,6 +648,12 @@ export class SyncEngine extends EventTarget {
     this.running = true;
     this.networkEvents?.addEventListener("online", this.onlineHandler);
     try {
+      for (;;) {
+        const staged = await this.db.stagedDecryptedEvents?.(500) ?? [];
+        if (!staged.length) break;
+        for (const event of staged) await this.ingest(event);
+        if (staged.length < 500) break;
+      }
       for (const roomId of await this.db.deferredRoomIds?.() ?? []) {
         const state = await this.db.roomSequenceState(roomId);
         this.blockRoom(new RoomHistoryTransferRequiredError(roomId, state?.processed_through_seq ?? 0));
@@ -884,12 +903,15 @@ export class SyncEngine extends EventTarget {
       sequence = await this.db.roomSequenceState(event.room_id);
     }
     if (!sequence) throw new Error(`Room sequence baseline is unavailable for ${event.room_id}`);
-    if (event.seq <= sequence.baseline_seq) return;
+    const staged = await this.db.stagedDecryptedEvent?.(event.event_id) ?? null;
+    if (event.seq <= sequence.baseline_seq && !staged) return;
     if (event.seq <= sequence.processed_through_seq) {
-      if (await this.db.hasMessage(event.event_id)) return;
-      throw new Error(`Room sequence ${event.seq} is already bound to another event`);
+      if (!staged) {
+        if (await this.db.hasMessage(event.event_id)) return;
+        throw new Error(`Room sequence ${event.seq} is already bound to another event`);
+      }
     }
-    if (event.seq !== sequence.processed_through_seq + 1) {
+    if (event.seq > sequence.processed_through_seq && event.seq !== sequence.processed_through_seq + 1) {
       if (!this.archiveCatchUp) throw new RoomSequenceGapError(event.room_id, sequence.processed_through_seq, event.seq);
       try {
         await this.archiveCatchUp.catchUp(event.room_id, sequence.processed_through_seq, event.seq - 1);
@@ -904,7 +926,7 @@ export class SyncEngine extends EventTarget {
         throw new RoomSequenceGapError(event.room_id, sequence?.processed_through_seq ?? 0, event.seq);
       }
     }
-    if (await this.db.hasMessage(event.event_id)) return;
+    if (!staged && await this.db.hasMessage(event.event_id)) return;
     let result: Awaited<ReturnType<EventProcessor>>;
     try {
       result = await this.processEvent(event);
@@ -912,10 +934,12 @@ export class SyncEngine extends EventTarget {
       // A failed membership Commit must stop the room: later epochs cannot be
       // decrypted safely. Malformed application events are quarantined so one
       // authenticated but buggy/malicious sender cannot poison global sync.
-      if (event.type === "control.group.commit" || event.type === "control.device.revoke") throw error;
+      if (event.type === "control.group.commit" || event.type === "control.device.revoke"
+        || error instanceof LocalStagingIntegrityError || error instanceof LocalProjectionPersistenceError) throw error;
       const message = error instanceof Error ? error.message : "Encrypted event processing failed";
       await this.db.quarantineEvent(event, message);
       await this.db.markProcessed(event);
+      await this.db.removeStagedDecryptedEvent?.(event.event_id);
       this.dispatchEvent(new CustomEvent("quarantined", { detail: { event, error } }));
       this.dispatchEvent(new CustomEvent("processed", { detail: event }));
       return;
@@ -925,6 +949,7 @@ export class SyncEngine extends EventTarget {
       await this.db.saveDecryptedEvent(event, result.plaintext, result.payload);
       this.dispatchEvent(new CustomEvent("message", { detail: event }));
     }
+    await this.db.removeStagedDecryptedEvent?.(event.event_id);
     // Observers may query projections after this event. Dispatch only once all
     // local writes are committed, otherwise unread counters race the message.
     this.dispatchEvent(new CustomEvent("processed", { detail: event }));

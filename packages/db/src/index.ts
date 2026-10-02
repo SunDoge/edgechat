@@ -20,6 +20,12 @@ export type LocalSignedEventRange = { events: RoomEvent[]; complete: boolean; mi
 export type LocalRoomSyncState = { room_id: RoomId; baseline_seq: number; processed_through_seq: number };
 type LocalEventEnvelopeRow = { event_id: string; room_id: string; seq: number | string; event_json: RoomEvent | string };
 type LocalDeferredEventRow = { event_id: string; room_id: RoomId; seq: number | string; event_json: RoomEvent | string };
+export type LocalStagedDecryptedEvent = {
+  event: RoomEvent;
+  plaintext: Uint8Array<ArrayBuffer>;
+  previous_mls_state: Uint8Array<ArrayBuffer>;
+  next_mls_state: Uint8Array<ArrayBuffer>;
+};
 
 const MAX_SIGNED_EVENT_RANGE = 500;
 export const MARK_EVENT_PROCESSED_SQL = `WITH stored_envelope AS (
@@ -338,6 +344,47 @@ export class LocalDatabase {
 
   async removeDeferredRoomEvent(eventId: string): Promise<void> {
     await this.query("DELETE FROM deferred_room_events WHERE event_id = $1", [eventId]);
+  }
+
+  async stageDecryptedEvent(
+    event: RoomEvent,
+    plaintext: Uint8Array<ArrayBuffer>,
+    previousMlsState: Uint8Array<ArrayBuffer>,
+    nextMlsState: Uint8Array<ArrayBuffer>,
+  ): Promise<void> {
+    await this.query(
+      `INSERT INTO decrypted_event_staging (event_id, room_id, seq, event_json, plaintext, previous_mls_state, next_mls_state, staged_at)
+       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)`,
+      [event.event_id, event.room_id, event.seq, JSON.stringify(event), plaintext, previousMlsState, nextMlsState, Date.now()],
+    );
+  }
+
+  async stagedDecryptedEvent(eventId: string): Promise<LocalStagedDecryptedEvent | null> {
+    const [row] = await this.query<{ event_id: string; room_id: RoomId; seq: number | string; event_json: RoomEvent | string; plaintext: Uint8Array<ArrayBuffer>; previous_mls_state: Uint8Array<ArrayBuffer>; next_mls_state: Uint8Array<ArrayBuffer> }>(
+      "SELECT event_id, room_id, seq, event_json, plaintext, previous_mls_state, next_mls_state FROM decrypted_event_staging WHERE event_id = $1",
+      [eventId],
+    );
+    if (!row) return null;
+    const seq = Number(row.seq); const event = jsonValue(row.event_json);
+    if (!isStoredRoomEvent(event, row.room_id, seq, row.event_id)) throw new Error("Stored decrypted event staging record is invalid");
+    return { event, plaintext: row.plaintext, previous_mls_state: row.previous_mls_state, next_mls_state: row.next_mls_state };
+  }
+
+  async stagedDecryptedEvents(limit = 500): Promise<RoomEvent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Staged decrypted event limit must be between 1 and 500");
+    const rows = await this.query<LocalDeferredEventRow>(
+      "SELECT event_id, room_id, seq, event_json FROM decrypted_event_staging ORDER BY staged_at, room_id, seq LIMIT $1",
+      [limit],
+    );
+    return rows.map((row) => {
+      const seq = Number(row.seq); const event = jsonValue(row.event_json);
+      if (!isStoredRoomEvent(event, row.room_id, seq, row.event_id)) throw new Error("Stored decrypted event staging record is invalid");
+      return event;
+    });
+  }
+
+  async removeStagedDecryptedEvent(eventId: string): Promise<void> {
+    await this.query("DELETE FROM decrypted_event_staging WHERE event_id = $1", [eventId]);
   }
 
   async cachedRooms<T extends object>(): Promise<T[]> {
