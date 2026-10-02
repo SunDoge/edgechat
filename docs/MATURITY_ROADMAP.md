@@ -38,7 +38,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] Device-level peer identity verification with out-of-band comparable fingerprints, local trust persistence, automatic downgrade for new/changed keys, conversation-header warnings, and no server-side trust graph or R2 objects.
 - [x] First-class cross-device saved messages through an owner-only MLS room, with immutable membership and zero-copy R2 attachment references.
 - [x] Signed, per-device ECDH-encrypted cross-device text/reply/quote/edit drafts with encrypted deletion tombstones, a coalescing local outbox, stale-write protection, device-set reconciliation, paginated D1 retrieval, and no R2/S3 objects. Notification mute remains intentionally per-device and is enforced before content-free Push delivery.
-- [ ] Independent security review and broader protocol transcript tests. Enforced CSP, hardened API/static headers, a dependency policy, and a high-severity production dependency audit are now in place.
+- [ ] Independent security review. Enforced CSP, hardened API/static headers, a dependency policy, and a high-severity production dependency audit are in place. The generated OpenMLS Wasm is exercised against application replay, ciphertext/Commit tampering, wrong-group delivery, out-of-order generations, stale Commits, post-removal send/decrypt attempts, trailing TLS bytes, snapshot corruption, and input bounds; an external review remains mandatory.
 
 ### Gate 3 — daily messaging completeness
 
