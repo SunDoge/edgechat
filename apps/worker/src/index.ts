@@ -1169,7 +1169,8 @@ async function appendRoomEvent(env: Env, roomId: RoomId, event: ClientEvent, cur
   if (!result.ok) {
     const message = result.code === "stale_epoch"
       ? "Room MLS epoch changed while ordering the event"
-      : result.code === "event_id_conflict" ? "Event ID is already bound to another signed envelope" : "Event MLS epoch is invalid";
+      : result.code === "event_id_conflict" ? "Event ID is already bound to another signed envelope"
+        : result.code === "owner_conflict" ? "Room ownership changed while ordering the event" : "Event MLS epoch is invalid";
     throw new HttpError(409, message, result.code);
   }
   return result.event;
@@ -3044,6 +3045,28 @@ async function sendEvent(request: Request, env: Env, ctx: ExecutionContext, auth
   if (!roomEpoch) throw new HttpError(404, "Room not found", "not_found");
   if (!duplicate && await roomLeavePending(env, roomId, auth.userId)) {
     throw new HttpError(409, "Room leave is waiting for the owner to update encryption", "room_leave_pending");
+  }
+  if (event.type === "control.owner.transfer") {
+    const targetUserId = event.metadata.target_user_id;
+    if (typeof targetUserId !== "string") throw new HttpError(400, "Signed ownership target is required", "invalid_owner_transfer");
+    assertLocalId(targetUserId, "@", env);
+    if (targetUserId === auth.userId) throw new HttpError(400, "Ownership must be transferred to another member", "invalid_owner_transfer");
+    if (roomEpoch.kind !== "group" || roomEpoch.purpose !== "chat" || roomEpoch.removed_at !== null) {
+      throw new HttpError(409, "Only active group chats support ownership transfer", "invalid_owner_transfer");
+    }
+    const target = await db.selectFrom("room_members").select(["role", "removed_at"])
+      .where("room_id", "=", roomId).where("user_id", "=", targetUserId).executeTakeFirst();
+    if (!duplicate && (!target || target.removed_at !== null)) throw new HttpError(409, "The new owner must be an active room member", "invalid_owner_transfer");
+    if (!duplicate && await roomLeavePending(env, roomId, targetUserId)) {
+      throw new HttpError(409, "The selected member is waiting to leave this room", "owner_transfer_target_leaving");
+    }
+    const accepted = await appendRoomEvent(env, roomId, event, roomEpoch.mls_epoch);
+    if (!duplicate || (roomEpoch.role === "owner" && target?.removed_at === null)) await batch(env.DB, [
+      db.updateTable("room_members").set({ role: "member" }).where("room_id", "=", roomId).where("user_id", "=", auth.userId),
+      db.updateTable("room_members").set({ role: "owner" }).where("room_id", "=", roomId).where("user_id", "=", targetUserId),
+    ]);
+    ctx.waitUntil(notifyOfflineDevices(env, roomId, auth.deviceId));
+    return json({ event: accepted }, duplicate ? 200 : 201);
   }
   if (!duplicate && event.type === "control.room.profile"
     && (roomEpoch.kind !== "group" || roomEpoch.purpose !== "chat" || roomEpoch.role !== "owner" || roomEpoch.removed_at !== null)) {

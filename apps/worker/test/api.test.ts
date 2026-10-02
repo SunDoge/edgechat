@@ -40,7 +40,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
   expect(tooNew.status).toBe(426);
@@ -745,6 +745,31 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT count(*) AS count FROM room_device_keys WHERE room_id = ? AND device_id = ?").bind(groupRoom, carol.device_id).first()).toEqual({ count: 0 });
     expect(await env.DB.prepare("SELECT status FROM room_leave_requests WHERE request_id = ?").bind(leaveRequest.request_id).first()).toEqual({ status: "complete" });
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}`, { headers: carolHeaders })).status).toBe(404);
+
+    const transferUnsigned: Omit<ClientEvent, "signature"> = {
+      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      type: "control.owner.transfer", created_at: Date.now(), ciphertext: "opaque-encrypted-owner-transfer",
+      metadata: { mls_epoch: 3, target_user_id: bob.user_id },
+    };
+    const transferEvent = { ...transferUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(transferUnsigned))) };
+    const transferEndpoint = `https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`;
+    const transferred = await SELF.fetch(transferEndpoint, { method: "POST", headers, body: JSON.stringify(transferEvent) });
+    expect(transferred.status, await transferred.clone().text()).toBe(201);
+    expect(await transferred.json()).toMatchObject({ event: { event_id: transferEvent.event_id, type: "control.owner.transfer" } });
+    expect(await env.DB.prepare("SELECT user_id,role FROM room_members WHERE room_id = ? AND removed_at IS NULL ORDER BY user_id").bind(groupRoom).all())
+      .toMatchObject({ results: [{ user_id: bob.user_id, role: "owner" }, { user_id: alice.user_id, role: "member" }] });
+    const transferRetry = await SELF.fetch(transferEndpoint, { method: "POST", headers, body: JSON.stringify(transferEvent) });
+    expect(transferRetry.status, await transferRetry.clone().text()).toBe(200);
+    expect(await transferRetry.json()).toMatchObject({ event: { event_id: transferEvent.event_id } });
+    const formerOwnerProfileUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(), metadata: { mls_epoch: 3, room_profile_avatar_id: null, room_profile_previous_avatar_id: null } };
+    const formerOwnerProfile = { ...formerOwnerProfileUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(formerOwnerProfileUnsigned))) };
+    const formerOwnerProfileResponse = await SELF.fetch(transferEndpoint, { method: "POST", headers, body: JSON.stringify(formerOwnerProfile) });
+    expect(formerOwnerProfileResponse.status).toBe(403);
+    expect(await formerOwnerProfileResponse.json()).toMatchObject({ code: "room_profile_forbidden" });
+    const formerOwnerLeave = await SELF.fetch(leaveEndpoint, { method: "POST", headers });
+    expect(formerOwnerLeave.status, await formerOwnerLeave.clone().text()).toBe(202);
+    expect(await (await SELF.fetch("https://edgechat.test/api/v1/room-leave-tasks", { headers: { authorization: `Bearer ${bob.access_token}` } })).json())
+      .toMatchObject({ tasks: [{ room_id: groupRoom, target_user_id: alice.user_id }] });
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
   });
 

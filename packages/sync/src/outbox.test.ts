@@ -126,6 +126,17 @@ describe("OutboxEngine", () => {
     expect(db.calls).toEqual(["sending", "room-profile", "removed"]);
   });
 
+  it("removes an accepted ownership transfer without creating a timeline row", async () => {
+    const transferEvent = { ...event, event_id: "owner-transfer-1", type: "control.owner.transfer" as const,
+      metadata: { mls_epoch: 1, target_user_id: "@bob:example.com" } };
+    const transferPayload = { version: 1 as const, kind: "room.owner-transfer" as const, target_user_id: "@bob:example.com" as const, updated_at: 4 };
+    const db = database([{ ...item, event_id: transferEvent.event_id, event: transferEvent, payload: transferPayload }]);
+    const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...transferEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);
+    await engine.start(); engine.stop();
+    expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
+    expect(db.calls).toEqual(["sending", "removed"]);
+  });
+
   it("drains an item enqueued while an empty scan is finishing", async () => {
     let releaseScan!: () => void;
     const scanBlocked = new Promise<void>((resolve) => { releaseScan = resolve; });

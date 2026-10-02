@@ -21,12 +21,15 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     isRoomOwner: true,
     leaveStatus: null,
     leaveSupported: true,
+    ownershipTransferSupported: true,
+    ownershipBusyUserId: null,
     canManageMembers: true,
     membershipBusyUserId: null,
     members: [{ userId: "@bob:example.com", displayName: "Bob", hidden: false, role: "member" }],
     searchUsers: vi.fn(async () => [{ user_id: "@carol:example.com", display_name: "Carol" }, { user_id: "@bob:example.com", display_name: "Bob" }]),
     onAddMember: vi.fn(async () => undefined),
     onRemoveMember: vi.fn(async () => undefined),
+    onTransferOwnership: vi.fn(async () => undefined),
     onToggleMember: vi.fn(async () => undefined),
     onSaveRoomProfile: vi.fn(async () => undefined),
     onSaveRetention: vi.fn(async () => 0),
@@ -71,6 +74,14 @@ describe("RoomSettingsDialog group membership", () => {
     mount({ isRoomOwner: true });
     expect(document.body.textContent).toContain("先转让群主身份");
     expect([...document.querySelectorAll("button")].some((button) => button.textContent === "退出群聊")).toBe(false);
+  });
+
+  it("confirms and transfers ownership to an active member", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const props = mount();
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "转让群主")?.click();
+    await vi.waitFor(() => expect(props.onTransferOwnership).toHaveBeenCalledWith("@bob:example.com"));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Bob"));
   });
 
   it("queues an encrypted room name update for the owner", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
+import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -46,6 +46,7 @@ describe("federation-ready identifiers", () => {
     expect(serverSupports(currentServerProtocol, "messages.contact.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.profile.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.leave.v1")).toBe(true);
+    expect(serverSupports(currentServerProtocol, "rooms.owner-transfer.v1")).toBe(true);
   });
 
   it("rejects malformed or incompatible server capability envelopes", () => {
@@ -60,6 +61,11 @@ describe("federation-ready identifiers", () => {
     const receipt = { version: 1 as const, key_id: "v1", room_id: event.room_id, seq: 7, event_id: event.event_id, event_hash: "hash", retention_generation: 2, accepted_at: 3 };
     expect(JSON.parse(new TextDecoder().decode(canonicalAcceptanceReceiptBytes(receipt)))).toEqual(receipt);
   });
+});
+
+it("validates encrypted room ownership transfers", () => {
+  expect(isRoomOwnerTransferPayload({ version: 1, kind: "room.owner-transfer", target_user_id: "@bob:example.com", updated_at: 10 })).toBe(true);
+  expect(isRoomOwnerTransferPayload({ version: 1, kind: "room.owner-transfer", target_user_id: "bob", updated_at: 10 })).toBe(false);
 });
 
 it("validates the bounded encrypted message-expiry policy", () => {

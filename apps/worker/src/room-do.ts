@@ -11,7 +11,7 @@ type EventRow = { event_json: string; accepted_at: number };
 type CompactionLeaseRow = { token: string; device_id: string; segment_id: string; start_seq: number; end_seq: number; expires_at: number };
 type RepairLeaseRow = { token_hash: string; device_id: string; start_seq: number; end_seq: number; generation: number; expires_at: number };
 type SocketAttachment = { userId: UserId; deviceId: string; connectionId: string; typingActive: boolean; lastTypingAt: number; allowTyping: boolean; sharePresence: boolean };
-export type AppendEventResult = { ok: true; event: RoomEvent } | { ok: false; code: "stale_epoch" | "invalid_epoch" | "event_id_conflict" };
+export type AppendEventResult = { ok: true; event: RoomEvent } | { ok: false; code: "stale_epoch" | "invalid_epoch" | "event_id_conflict" | "owner_conflict" };
 export type RepairRangeState = { floor_seq: number; generation: number; current_seq: number; missing_sequences: number[] };
 export type RetentionAdvanceResult = { floor_seq: number; generation: number; current_seq: number; deleted_events: number; advanced: boolean };
 
@@ -131,17 +131,37 @@ export class RoomDurableObject extends DurableObject<Env> {
     const membershipCommit = event.type === "control.group.commit" || event.type === "control.device.add" || event.type === "control.device.revoke";
     const requiredEpoch = membershipCommit ? meta.mls_epoch + 1 : meta.mls_epoch;
     if (!Number.isInteger(eventEpoch) || eventEpoch !== requiredEpoch) return { ok: false, code: "invalid_epoch" };
+    if (event.type === "control.group.commit"
+      && (event.metadata.membership_action === "add" || event.metadata.membership_action === "remove")
+      && member.role !== "owner") return { ok: false, code: "owner_conflict" };
+    let nextOwner: MemberRow | null = null;
+    if (event.type === "control.owner.transfer") {
+      const targetUserId = event.metadata.target_user_id;
+      if (member.role !== "owner" || typeof targetUserId !== "string" || targetUserId === event.sender) {
+        return { ok: false, code: "owner_conflict" };
+      }
+      nextOwner = this.ctx.storage.sql.exec<MemberRow>(
+        "SELECT user_id, role, removed_at FROM members WHERE user_id = ?", targetUserId,
+      ).toArray()[0] ?? null;
+      if (!nextOwner || nextOwner.removed_at !== null || nextOwner.role !== "member") return { ok: false, code: "owner_conflict" };
+    }
 
     const seq = meta.current_seq + 1;
     const acceptedAt = Date.now();
     let ordered: RoomEvent = { ...event, seq };
     let serialized = JSON.stringify(ordered);
-    this.ctx.storage.sql.exec("UPDATE room_meta SET current_seq = ? WHERE room_id = ?", seq, meta.room_id);
-    if (membershipCommit) this.ctx.storage.sql.exec("UPDATE room_meta SET mls_epoch = ? WHERE room_id = ?", eventEpoch, meta.room_id);
-    this.ctx.storage.sql.exec(
-      "INSERT INTO events (event_id, seq, event_json, created_at, accepted_at) VALUES (?, ?, ?, ?, ?)",
-      event.event_id, seq, serialized, event.created_at, acceptedAt,
-    );
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("UPDATE room_meta SET current_seq = ? WHERE room_id = ?", seq, meta.room_id);
+      if (membershipCommit) this.ctx.storage.sql.exec("UPDATE room_meta SET mls_epoch = ? WHERE room_id = ?", eventEpoch, meta.room_id);
+      if (nextOwner) {
+        this.ctx.storage.sql.exec("UPDATE members SET role = 'member' WHERE user_id = ?", event.sender);
+        this.ctx.storage.sql.exec("UPDATE members SET role = 'owner' WHERE user_id = ?", nextOwner.user_id);
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO events (event_id, seq, event_json, created_at, accepted_at) VALUES (?, ?, ?, ?, ?)",
+        event.event_id, seq, serialized, event.created_at, acceptedAt,
+      );
+    });
 
     // Commit ordering before awaiting WebCrypto so another RPC can never reuse
     // this sequence while the receipt MAC is being calculated.

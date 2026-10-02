@@ -1,5 +1,5 @@
 import type { LocalDatabase, OutboxItem } from "@edgechat/db";
-import { isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomProfilePayload, type ClientEvent, type RoomEvent, type RoomId } from "@edgechat/protocol";
+import { isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, type ClientEvent, type RoomEvent, type RoomId } from "@edgechat/protocol";
 
 type OutboxApi = { sendEvent(roomId: RoomId, event: ClientEvent): Promise<{ event: RoomEvent }> };
 
@@ -104,6 +104,9 @@ export class OutboxEngine extends EventTarget {
         await this.db.applyMessageExpiryPolicy(result.event, item.payload);
       } else if (result.event.type === "control.room.profile" && isRoomProfilePayload(item.payload)) {
         await this.db.applyRoomProfile(result.event, item.payload);
+      } else if (result.event.type === "control.owner.transfer" && isRoomOwnerTransferPayload(item.payload)) {
+        // Server room membership is the projection source of truth. The sent
+        // event is intentionally not inserted into the visible message cache.
       } else {
         await this.db.saveDecryptedEvent(result.event, item.plaintext, item.payload);
       }

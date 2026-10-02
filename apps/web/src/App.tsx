@@ -18,7 +18,7 @@ import {
 } from "@tabler/icons-solidjs";
 import { LocalDatabase, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
-import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
 import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
@@ -163,6 +163,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [roomSettingsOpen, setRoomSettingsOpen] = createSignal(false);
   const [roomMembershipBusy, setRoomMembershipBusy] = createSignal<string | null>(null);
+  const [roomOwnershipBusy, setRoomOwnershipBusy] = createSignal<string | null>(null);
   const [identityVerificationOpen, setIdentityVerificationOpen] = createSignal(false);
   const [roomIdentityTrust, setRoomIdentityTrust] = createSignal<Record<string, RoomIdentityTrust>>({});
   const [incomingShare, setIncomingShare] = createSignal<StagedShare | null>(null);
@@ -506,6 +507,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (!isRoomProfilePayload(decoded)) throw new Error("无效的群聊资料设置");
       if ((decoded.avatar?.attachment_id ?? null) !== (event.metadata.room_profile_avatar_id ?? null)) throw new Error("群聊头像引用与加密资料不一致");
       await persistProjection(() => db.applyRoomProfile(event, decoded));
+      return null;
+    }
+    if (event.type === "control.owner.transfer") {
+      if (!isRoomOwnerTransferPayload(decoded) || decoded.target_user_id !== event.metadata.target_user_id) throw new Error("无效的群主转让事件");
       return null;
     }
     if (!event.type.startsWith("message.")) return null;
@@ -941,6 +946,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         void refreshRoomProfile(event.room_id);
         if (event.sender !== currentSession.user_id) setNotice("群聊资料已更新");
       }
+      if (event.type === "control.owner.transfer") {
+        void loadRooms(currentMls);
+        if (event.sender !== currentSession.user_id) setNotice("群主已变更");
+      }
       if (["control.device.add", "control.device.revoke", "control.member.add", "control.member.remove", "control.group.commit"].includes(event.type)) void refreshRoomIdentityTrust(event.room_id);
       if (visibleMessageTypes.has(event.type) && event.sender !== currentSession.user_id) void db.unarchiveForIncoming(event.room_id, Date.now()).then((changed) => changed ? refreshRoomPreferences() : undefined);
       if (visibleMessageTypes.has(event.type) && event.sender !== currentSession.user_id) scheduleDeliveryReceipt(event.room_id);
@@ -1070,6 +1079,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setRooms((current) => current.map((room) => room.room_id === event.room_id ? { ...room, current_seq: Math.max(room.current_seq, event.seq) } : room));
       if (event.type === "control.message-expiry") void refreshMessageExpiryPolicies();
       if (event.type === "control.room.profile") void refreshRoomProfile(event.room_id);
+      if (event.type === "control.owner.transfer") void loadRooms(mlsRef);
       if (event.room_id === selectedRef) void refreshRoomProjection(event.room_id).then(() => shouldMarkIncomingRead(historyFocus(), event.room_id) ? markRoomRead(event.room_id) : refreshUnreadCounts());
       else void refreshUnreadCounts();
       if (event.seq % 25 === 0) void archiveRef?.compact(event.room_id).catch(() => undefined);
@@ -2618,6 +2628,36 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     await refreshRoomIdentityTrust(roomId);
   }
 
+  async function transferRoomOwnership(room: ServerRoom, targetUserId: UserId): Promise<void> {
+    const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(room.room_id)) throw new Error("群聊状态尚未就绪");
+    if (!serverSupports(currentSession.protocol, "rooms.owner-transfer.v1")) throw new Error("当前服务器不支持群主转让");
+    if (room.kind !== "group" || room.purpose !== "chat"
+      || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner")) throw new Error("只有群主可以转让群聊");
+    if (!room.members.some((member) => member.user_id === targetUserId && member.role === "member")) throw new Error("新群主必须是当前群成员");
+    if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先恢复此群聊");
+    if ((await db.outbox(room.room_id)).some((item) => item.event.type === "control.owner.transfer")) throw new Error("已有群主转让正在等待发送");
+    setRoomOwnershipBusy(targetUserId);
+    try {
+      const updatedAt = Date.now();
+      const payload: RoomOwnerTransferPayload = { version: 1, kind: "room.owner-transfer", target_user_id: targetUserId, updated_at: updatedAt };
+      await mutateMls(async () => {
+        const ciphertext = encodeBase64Url(currentMls.encryptMessage(room.room_id, encoder.encode(JSON.stringify(payload))));
+        await persistMls(currentMls);
+        const unsigned: Omit<ClientEvent, "signature"> = {
+          event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
+          room_id: room.room_id, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId,
+          type: "control.owner.transfer", created_at: updatedAt, ciphertext,
+          metadata: { mls_epoch: currentMls.epoch(room.room_id), target_user_id: targetUserId },
+        };
+        const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
+        await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+      });
+      await db.outbox(room.room_id).then(setPendingMessages).catch(() => undefined);
+      setRoomSettingsOpen(false); setNotice("群主转让已加入发送队列");
+    } finally { setRoomOwnershipBusy(null); }
+  }
+
   function changeRoomMembership(roomId: RoomId, operation: "add" | "remove", targetUserId: UserId): Promise<void> {
     if (roomMembershipRun) return Promise.reject(new Error("另一项成员变更正在进行"));
     setRoomMembershipBusy(targetUserId);
@@ -2913,7 +2953,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
       <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>
       <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticStatus={semanticStatus()} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
-      <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
+      <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} ownershipTransferSupported={serverSupports(currentSession().protocol, "rooms.owner-transfer.v1")} ownershipBusyUserId={roomOwnershipBusy()} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onTransferOwnership={(userId) => transferRoomOwnership(room(), userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>
       <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
       <Show when={profileOpen() && profile()}>{(currentProfile) => <ProfileDialog profile={currentProfile()} onSave={updateProfile} onClose={() => setProfileOpen(false)}/>}</Show>

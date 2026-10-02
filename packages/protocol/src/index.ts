@@ -5,7 +5,7 @@ export const MAX_ATTACHMENT_PLAINTEXT_BYTES = 25 * 1024 * 1024;
 export const MAX_MESSAGE_ATTACHMENTS = 10;
 export const MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES = 100 * 1024 * 1024;
 
-export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1"] as const;
+export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1"] as const;
 export type ServerProtocolFeature = typeof serverProtocolFeatures[number];
 export type ServerProtocolCapabilities = {
   version: number;
@@ -150,6 +150,13 @@ export type RoomProfilePayload = {
   updated_at: number;
 };
 
+export type RoomOwnerTransferPayload = {
+  version: 1;
+  kind: "room.owner-transfer";
+  target_user_id: UserId;
+  updated_at: number;
+};
+
 export type RoomProfileAvatar = {
   attachment_id: AttachmentId;
   mime_type: "image/webp";
@@ -161,7 +168,7 @@ export type RoomProfileAvatar = {
 export const roomEventTypes = [
   "message.text", "message.file", "message.image", "message.contact", "message.delete", "message.edit", "message.reaction",
   "control.member.add", "control.member.remove", "control.device.add",
-  "control.device.revoke", "control.key.update", "control.group.commit", "control.message-expiry", "control.room.profile",
+  "control.device.revoke", "control.key.update", "control.group.commit", "control.message-expiry", "control.room.profile", "control.owner.transfer",
   "receipt.read", "receipt.delivered", "typing.start", "typing.stop",
 ] as const;
 export type RoomEventType = typeof roomEventTypes[number];
@@ -370,6 +377,13 @@ export function isRoomProfilePayload(value: unknown): value is RoomProfilePayloa
     && payload.name === payload.name.trim() && payload.name.length >= 1 && payload.name.length <= 100
     && !/[\u0000-\u001f\u007f]/u.test(payload.name)
     && validAvatar
+    && Number.isSafeInteger(payload.updated_at) && Number(payload.updated_at) >= 0;
+}
+export function isRoomOwnerTransferPayload(value: unknown): value is RoomOwnerTransferPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<RoomOwnerTransferPayload>;
+  return payload.version === 1 && payload.kind === "room.owner-transfer"
+    && isNamespacedUserId(payload.target_user_id ?? "")
     && Number.isSafeInteger(payload.updated_at) && Number(payload.updated_at) >= 0;
 }
 export function canonicalEventBytes(event: Omit<ClientEvent, "signature">): Uint8Array<ArrayBuffer> {

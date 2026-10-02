@@ -23,12 +23,15 @@ export function RoomSettingsDialog(props: {
   isRoomOwner: boolean;
   leaveStatus: "pending" | null;
   leaveSupported: boolean;
+  ownershipTransferSupported: boolean;
+  ownershipBusyUserId: string | null;
   canManageMembers: boolean;
   membershipBusyUserId: string | null;
   members: Array<{ userId: string; displayName: string; hidden: boolean; role: "owner" | "member" }>;
   searchUsers: (query: string) => Promise<Array<{ user_id: string; display_name: string }>>;
   onAddMember: (userId: string) => Promise<void>;
   onRemoveMember: (userId: string) => Promise<void>;
+  onTransferOwnership: (userId: string) => Promise<void>;
   onToggleMember: (userId: string, hidden: boolean) => Promise<void>;
   onSaveRoomProfile: (name: string, avatar: RoomProfileAvatarChange) => Promise<void>;
   onSaveRetention: (days: LocalRetentionDays | null) => Promise<number>;
@@ -58,7 +61,7 @@ export function RoomSettingsDialog(props: {
   const changed = () => selectedDays() !== props.preference.local_retention_days;
   const selectedExpiry = (): MessageExpirySeconds | null => expiryValue() === "off" ? null : Number(expiryValue()) as MessageExpirySeconds;
   const expiryChanged = () => selectedExpiry() !== props.messageExpirySeconds;
-  const anyBusy = () => busy() || expiryBusy() || roomNameBusy() || avatarEncoding() || leaveBusy() || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId);
+  const anyBusy = () => busy() || expiryBusy() || roomNameBusy() || avatarEncoding() || leaveBusy() || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId) || Boolean(props.ownershipBusyUserId);
   const hasDisplayedAvatar = () => Boolean(avatarPreview() || (props.roomAvatar && avatarChange().kind !== "remove"));
 
   onCleanup(() => { const url = avatarPreview(); if (url) URL.revokeObjectURL(url); });
@@ -114,6 +117,14 @@ export function RoomSettingsDialog(props: {
     setError("");
     try { await props.onRemoveMember(userId); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "无法移除群成员"); }
+  }
+
+  async function transferOwnership(userId: string, displayName: string) {
+    if (anyBusy() || !props.ownershipTransferSupported
+      || !confirm(`将群主身份转让给 ${displayName}？转让后，对方可以管理群成员和群资料，你将不再拥有这些权限。`)) return;
+    setError("");
+    try { await props.onTransferOwnership(userId); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "无法转让群主身份"); }
   }
 
   async function changeLeaveStatus() {
@@ -206,7 +217,8 @@ export function RoomSettingsDialog(props: {
         <For each={memberResults()}>{(person) => <div class="flex min-h-14 items-center gap-3 px-3"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{person.display_name}</strong><small class="block truncate text-xs text-muted">{person.user_id}</small></span><button type="button" disabled={anyBusy()} class="h-10 shrink-0 rounded-lg px-3 text-sm font-semibold text-brand hover:bg-brand-soft disabled:opacity-50" onClick={() => void addMember(person.user_id)}>{props.membershipBusyUserId === person.user_id ? "正在添加…" : "添加"}</button></div>}</For>
         <Show when={!memberSearchBusy() && !memberResults().length}><p class="px-3 py-5 text-center text-sm text-muted">没有可添加的用户</p></Show><Show when={memberSearchBusy()}><p class="px-3 py-5 text-center text-sm text-muted">正在搜索…</p></Show>
       </div></Show>
-      <div class="mt-4 divide-y divide-black/5"><div class="flex min-h-14 items-center gap-3"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">你</strong><small class="block truncate text-xs text-muted">{props.currentUserId} · 群主</small></span></div><For each={props.members}>{(member) => <div class="flex min-h-14 items-center gap-3"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{member.displayName}</strong><small class="block truncate text-xs text-muted">{member.userId}{member.role === "owner" ? " · 群主" : ""}</small></span><Show when={member.role !== "owner"}><button type="button" disabled={anyBusy()} class="h-10 shrink-0 rounded-lg px-3 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50" onClick={() => void removeMember(member.userId, member.displayName)}>{props.membershipBusyUserId === member.userId ? "正在更新…" : "移出"}</button></Show></div>}</For></div>
+      <div class="mt-4 divide-y divide-black/5"><div class="flex min-h-14 items-center gap-3"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">你</strong><small class="block truncate text-xs text-muted">{props.currentUserId} · 群主</small></span></div><For each={props.members}>{(member) => <div class="flex min-h-14 items-center gap-2"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{member.displayName}</strong><small class="block truncate text-xs text-muted">{member.userId}{member.role === "owner" ? " · 群主" : ""}</small></span><Show when={member.role !== "owner"}><div class="flex shrink-0 items-center gap-1"><button type="button" disabled={anyBusy() || !props.ownershipTransferSupported} class="h-10 rounded-lg px-2.5 text-sm font-semibold text-brand hover:bg-brand-soft disabled:opacity-50" onClick={() => void transferOwnership(member.userId, member.displayName)}>{props.ownershipBusyUserId === member.userId ? "转让中…" : "转让群主"}</button><button type="button" disabled={anyBusy()} class="h-10 rounded-lg px-2.5 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50" onClick={() => void removeMember(member.userId, member.displayName)}>{props.membershipBusyUserId === member.userId ? "正在更新…" : "移出"}</button></div></Show></div>}</For></div>
+      <Show when={!props.ownershipTransferSupported}><p class="mt-2 text-xs/5 text-muted">当前服务器版本不支持群主转让。</p></Show>
       <Show when={props.membershipBusyUserId}><p role="status" class="mt-3 text-xs/5 text-muted">正在更新群聊密钥，请保持页面打开。若网络中断，下次启动会自动继续。</p></Show>
     </section></Show>
     <Show when={props.identityMemberCount > 0}><section class="order-5 p-5" aria-labelledby="identity-verification-title">
