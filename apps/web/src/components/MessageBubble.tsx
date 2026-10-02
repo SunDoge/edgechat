@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal, createUniqueId, onCleanup } from "solid-js";
 import { IconArrowBackUp, IconArrowForwardUp, IconBookmark, IconChecks, IconCircleCheck, IconCircleCheckFilled, IconDotsVertical, IconEdit, IconMoodSmile, IconPaperclip, IconQuote, IconTrash } from "@tabler/icons-solidjs";
 import type { LocalMessage, LocalReactionSummary } from "@edgechat/db";
 import { EncryptedImage } from "./EncryptedImage";
@@ -8,6 +8,7 @@ import { outgoingReceiptLabel } from "../message-status";
 import { ContactCard } from "./ContactCard";
 import { firstMessageLink, messageTextSegments } from "../message-links";
 import { LinkCard } from "./LinkCard";
+import { handleMenuNavigation, openMenuFromTrigger } from "../menu-navigation";
 
 function expiryLabel(expiresAt: number): string {
   const remaining = Math.max(0, expiresAt - Date.now());
@@ -49,6 +50,11 @@ export function MessageBubble(props: {
   const [emojiOpen, setEmojiOpen] = createSignal(false);
   const [quoteSelection, setQuoteSelection] = createSignal("");
   let messageContentElement: HTMLDivElement | undefined;
+  let menuButton: HTMLButtonElement | undefined;
+  let menu: HTMLDivElement | undefined;
+  let focusLastOnOpen = false;
+  const menuId = createUniqueId();
+  const emojiMenuId = createUniqueId();
   const payload = () => normalizeMessagePayload((props.message.payload ?? {}) as MessagePayload, props.message.event_id);
   const attachments = () => messageAttachments(payload());
   const isImageAlbum = () => attachments().length > 1 && attachments().every((part) => part.kind === "image" && isPreviewableImage(part.attachment.type));
@@ -57,6 +63,29 @@ export function MessageBubble(props: {
   const botOrigin = () => payload().origin?.kind === "bot" ? payload().origin : undefined;
   const mine = () => props.message.sender === props.currentUserId && !botOrigin();
   const linkPreview = () => props.linkPreviews && props.message.plaintext ? firstMessageLink(props.message.plaintext) : null;
+
+  createEffect(() => {
+    if (!menuOpen()) return;
+    queueMicrotask(() => {
+      const items = [...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])') ?? [])];
+      items[focusLastOnOpen ? items.length - 1 : 0]?.focus(); focusLastOnOpen = false;
+    });
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!menu?.contains(target) && !menuButton?.contains(target)) { setMenuOpen(false); setEmojiOpen(false); }
+    };
+    document.addEventListener("pointerdown", outside);
+    onCleanup(() => document.removeEventListener("pointerdown", outside));
+  });
+
+  const closeMenu = (restoreFocus: boolean) => {
+    setMenuOpen(false); setEmojiOpen(false);
+    if (restoreFocus) queueMicrotask(() => menuButton?.focus());
+  };
+  const menuKeyDown = (event: KeyboardEvent) => {
+    const items = [...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])') ?? [])];
+    handleMenuNavigation(event, items, items.indexOf(document.activeElement as HTMLButtonElement), closeMenu);
+  };
 
   function captureQuoteSelection(): string {
     const selection = window.getSelection();
@@ -96,16 +125,16 @@ export function MessageBubble(props: {
         <Show when={props.message.expires_at}>{(expiresAt) => <span title={`预计于 ${new Date(Number(expiresAt())).toLocaleString("zh-CN")} 从本机移除`} class={`text-[0.6875rem] ${mine() ? "text-white/65" : "text-neutral-400"}`}>{expiryLabel(Number(expiresAt()))} ·</span>}</Show>
         <time class={`text-[0.6875rem] tabular-nums ${mine() ? "text-white/65" : "text-neutral-400"}`}>{new Date(Number(props.message.created_at)).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}{props.message.edited_at ? " · 已编辑" : ""}{mine() && !props.message.deleted_at ? ` · ${outgoingReceiptLabel(props.readBy, props.deliveredBy, props.group)}` : ""}</time>
         <Show when={!props.message.deleted_at && !props.selecting}>
-          <div class="relative" onFocusOut={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) { setMenuOpen(false); setEmojiOpen(false); } }} onKeyDown={(event) => { if (event.key === "Escape") { setMenuOpen(false); setEmojiOpen(false); } }}>
-            <button type="button" aria-label="消息操作" aria-expanded={menuOpen()} class={`grid size-9 place-items-center rounded-md opacity-65 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-1 ${mine() ? "hover:bg-white/10 focus-visible:outline-white" : "hover:bg-neutral-100 focus-visible:outline-brand"} sm:size-7 sm:opacity-0 sm:group-hover:opacity-70`} onPointerDown={() => setQuoteSelection(captureQuoteSelection())} onClick={(event) => { const opening = !menuOpen(); if (opening && event.detail === 0) setQuoteSelection(captureQuoteSelection()); setMenuOpen(opening); setEmojiOpen(false); }}><IconDotsVertical class="size-3.5 stroke-current"/></button>
-            <Show when={menuOpen()}><div role="menu" class={`max-h-[min(70dvh,28rem)] min-w-40 overflow-y-auto rounded-xl border border-black/8 bg-white p-1 text-sm text-ink shadow-xl absolute bottom-9 z-20 sm:bottom-8 ${mine() ? "right-0" : "left-0"}`}>
+          <div class="relative" onFocusOut={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) { setMenuOpen(false); setEmojiOpen(false); } }}>
+            <button ref={menuButton} type="button" aria-label="消息操作" aria-haspopup="menu" aria-controls={menuOpen() ? menuId : undefined} aria-expanded={menuOpen()} class={`grid size-9 place-items-center rounded-md opacity-65 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-1 ${mine() ? "hover:bg-white/10 focus-visible:outline-white" : "hover:bg-neutral-100 focus-visible:outline-brand"} sm:size-7 sm:opacity-0 sm:group-hover:opacity-70`} onPointerDown={() => setQuoteSelection(captureQuoteSelection())} onClick={(event) => { const opening = !menuOpen(); focusLastOnOpen = false; if (opening && event.detail === 0) setQuoteSelection(captureQuoteSelection()); setMenuOpen(opening); setEmojiOpen(false); }} onKeyDown={(event) => { openMenuFromTrigger(event, (last) => { focusLastOnOpen = last; setQuoteSelection(captureQuoteSelection()); setMenuOpen(true); setEmojiOpen(false); }); }}><IconDotsVertical class="size-3.5 stroke-current"/></button>
+            <Show when={menuOpen()}><div ref={menu} id={menuId} role="menu" aria-label="消息操作" onKeyDown={menuKeyDown} class={`max-h-[min(70dvh,28rem)] min-w-40 overflow-y-auto rounded-xl border border-black/8 bg-white p-1 text-sm text-ink shadow-xl absolute bottom-9 z-20 sm:bottom-8 ${mine() ? "right-0" : "left-0"}`}>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.reply(props.message); setMenuOpen(false); }}><IconArrowBackUp class="size-4 stroke-muted"/>回复</button>
               <Show when={messageText(payload()).trim()}><button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.quote(props.message, quoteSelection() || undefined); setMenuOpen(false); }}><IconQuote class="size-4 stroke-muted"/>{quoteSelection() ? "引用所选文字" : "引用文字"}</button></Show>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.forward(props.message); setMenuOpen(false); }}><IconArrowForwardUp class="size-4 stroke-muted"/>转发</button>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.select(props.message); setMenuOpen(false); }}><IconChecks class="size-4 stroke-muted"/>选择</button>
               <Show when={props.canSave}><button role="menuitem" type="button" disabled={props.saving} class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100 disabled:opacity-50" onClick={() => { props.save(props.message); setMenuOpen(false); }}><IconBookmark class="size-4 stroke-muted"/>{props.saving ? "正在保存…" : "保存"}</button></Show>
-              <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => setEmojiOpen((value) => !value)}><IconMoodSmile class="size-4 stroke-muted"/>回应</button>
-              <Show when={emojiOpen()}><div class="flex gap-0.5 border-y border-black/5 px-1 py-1"><For each={["👍", "❤️", "😂", "😮", "😢"]}>{(emoji) => <button type="button" aria-label={`回应 ${emoji}`} class="grid size-10 place-items-center rounded-md text-base hover:bg-neutral-100" onClick={() => { props.react(props.message, emoji); setMenuOpen(false); setEmojiOpen(false); }}>{emoji}</button>}</For></div></Show>
+              <button role="menuitem" type="button" aria-expanded={emojiOpen()} aria-controls={emojiOpen() ? emojiMenuId : undefined} class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => setEmojiOpen((value) => !value)}><IconMoodSmile class="size-4 stroke-muted"/>回应</button>
+              <Show when={emojiOpen()}><div id={emojiMenuId} role="group" aria-label="选择回应" class="flex gap-0.5 border-y border-black/5 px-1 py-1"><For each={["👍", "❤️", "😂", "😮", "😢"]}>{(emoji) => <button role="menuitem" type="button" aria-label={`回应 ${emoji}`} class="grid size-10 place-items-center rounded-md text-base hover:bg-neutral-100" onClick={() => { props.react(props.message, emoji); setMenuOpen(false); setEmojiOpen(false); }}>{emoji}</button>}</For></div></Show>
               <Show when={mine()}><button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.edit(props.message); setMenuOpen(false); }}><IconEdit class="size-4 stroke-muted"/>编辑</button><button role="menuitem" type="button" disabled={props.retracting} class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 text-red-600 hover:bg-red-50 disabled:opacity-50" onClick={() => { props.retract(props.message); setMenuOpen(false); }}><IconTrash class="size-4 stroke-red-500"/>{props.retracting ? "正在撤回" : "撤回"}</button></Show>
             </div></Show>
           </div>

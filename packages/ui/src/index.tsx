@@ -1,4 +1,4 @@
-import { children, createEffect, createMemo, createSignal, For, onCleanup, onMount, type JSX } from "solid-js";
+import { children, createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, onMount, type JSX } from "solid-js";
 import { chatUi } from "./styles";
 
 export { chatUi } from "./styles";
@@ -75,7 +75,7 @@ export function ChatViewport(props: { header: JSX.Element; messages?: JSX.Elemen
       viewport.removeEventListener("scroll", update);
     });
   });
-  return <section class={chatUi.viewport} style={{ "--keyboard-inset": `${keyboardInset()}px` }}>
+  return <section aria-label="当前对话" class={chatUi.viewport} style={{ "--keyboard-inset": `${keyboardInset()}px` }}>
     <div class={chatUi.header}>{props.header}</div>
     {props.messageList ?? <MessageList>{props.messages}</MessageList>}
     <div class={chatUi.composerSlot}>{props.composer}</div>
@@ -266,8 +266,10 @@ export function ChatComposer(props: {
   accessory?: JSX.Element;
   hasContent?: boolean;
   placeholder?: string;
+  disabledReason?: string;
 }) {
   let textarea: HTMLTextAreaElement | undefined;
+  const descriptionId = createUniqueId();
   const [composing, setComposing] = createSignal(false);
   createEffect(() => {
     props.value;
@@ -289,7 +291,8 @@ export function ChatComposer(props: {
   return <form class={chatUi.composer} onSubmit={submit}>
     {props.accessory}
     <textarea class={chatUi.textarea} ref={textarea} value={props.value} disabled={props.disabled} onInput={(event) => props.onChange(event.currentTarget.value)} onKeyDown={keyDown}
-      onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} rows={1} name="message" placeholder={props.placeholder ?? "写一条消息"} aria-label="消息"/>
+      onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} rows={1} name="message" placeholder={props.placeholder ?? "写一条消息"} aria-label="消息" aria-describedby={props.disabled && props.disabledReason ? descriptionId : undefined}/>
     <button class={chatUi.send} type="submit" disabled={props.disabled || !canSend()}>发送</button>
+    {props.disabled && props.disabledReason ? <span id={descriptionId} class="sr-only">{props.disabledReason}</span> : null}
   </form>;
 }
