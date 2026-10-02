@@ -40,6 +40,7 @@ export type PortableBackupContents = {
 
 type BackupOptions = { chunkBytes?: number; iterations?: number };
 type ByteWriter = (bytes: Uint8Array) => Promise<void>;
+export type PortableBackupDatabaseContents = Omit<PortableBackupContents, "databaseSnapshot"> & { databaseBytes: number };
 
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
@@ -79,6 +80,21 @@ function validateHeader(value: unknown): BackupHeader {
     || !Number.isSafeInteger(header.plaintext_bytes) || Number(header.plaintext_bytes) < 5 || Number(header.plaintext_bytes) > MAX_BACKUP_BYTES
     || !Number.isFinite(header.created_at)) throw new Error("无法识别这个备份文件");
   return header as BackupHeader;
+}
+
+function validateMetadata(value: unknown, expectedOrigin?: string): BackupMetadata {
+  if (!value || typeof value !== "object") throw new Error("备份内容无效");
+  const metadata = value as Partial<BackupMetadata>;
+  const portableIdentity = metadata.identity as Partial<PortableDeviceIdentity> | undefined;
+  if (metadata.version !== 1 || metadata.database_format !== "pglite-datadir-gzip-v1"
+    || !Number.isSafeInteger(metadata.database_bytes) || Number(metadata.database_bytes) <= 0 || Number(metadata.database_bytes) > MAX_BACKUP_BYTES
+    || typeof metadata.user_id !== "string" || typeof metadata.server_origin !== "string"
+    || typeof metadata.backup_checkpoint !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(metadata.backup_checkpoint) || !portableIdentity
+    || typeof portableIdentity.device_id !== "string" || portableIdentity.device_id.length === 0
+    || portableIdentity.version !== 1 || typeof portableIdentity.signing_private_key !== "object"
+    || typeof portableIdentity.encryption_private_key !== "object" || typeof portableIdentity.mls_state !== "string") throw new Error("备份内容无效");
+  if (expectedOrigin && metadata.server_origin !== expectedOrigin) throw new Error("这个备份属于另一台 EdgeChat 服务器");
+  return metadata as BackupMetadata;
 }
 
 export async function writePortableBackup(
@@ -134,7 +150,12 @@ export async function createPortableBackupBlob(
   return new Blob(parts, { type: "application/vnd.edgechat.backup" });
 }
 
-export async function readPortableBackup(file: Blob, password: string, expectedOrigin?: string): Promise<PortableBackupContents> {
+export async function streamPortableBackupDatabase(
+  file: Blob,
+  password: string,
+  write: ByteWriter,
+  expectedOrigin?: string,
+): Promise<PortableBackupDatabaseContents> {
   if (file.size < MAGIC.length + 4 || file.size > MAX_BACKUP_BYTES + 2 * 1024 * 1024) throw new Error("无法识别这个备份文件");
   const prefix = new Uint8Array(await file.slice(0, MAGIC.length + 4).arrayBuffer());
   if (!MAGIC.every((byte, index) => prefix[index] === byte)) throw new Error("无法识别这个备份文件");
@@ -147,37 +168,63 @@ export async function readPortableBackup(file: Blob, password: string, expectedO
   const salt = decodeBase64Url(header.kdf.salt);
   if (salt.length !== 16) throw new Error("无法识别这个备份文件");
   const key = await deriveKey(password, salt, header.kdf.iterations);
-  const plaintextParts: BlobPart[] = [];
   let offset = MAGIC.length + 4 + headerLength;
   let plaintextBytes = 0;
-  try {
-    for (let index = 0; index < header.chunk_count; index += 1) {
-      if (offset + 16 > file.size) throw new Error("truncated");
-      const record = new Uint8Array(await file.slice(offset, offset + 16).arrayBuffer());
-      const ciphertextLength = readU32(record.subarray(0, 4));
-      if (ciphertextLength < 17 || ciphertextLength > header.chunk_bytes + 16 || offset + 16 + ciphertextLength > file.size) throw new Error("invalid record");
-      const nonce = record.subarray(4, 16);
-      const ciphertext = await file.slice(offset + 16, offset + 16 + ciphertextLength).arrayBuffer();
-      const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ownedBuffer(nonce), additionalData: ownedBuffer(aad(headerBytes, index)) }, key, ciphertext);
-      plaintextParts.push(plaintext); plaintextBytes += plaintext.byteLength; offset += 16 + ciphertextLength;
+  let metadataParts: Uint8Array[] = [];
+  let bufferedMetadataBytes = 0;
+  let metadataLength: number | null = null;
+  let metadata: BackupMetadata | null = null;
+  let databaseBytes = 0;
+  for (let index = 0; index < header.chunk_count; index += 1) {
+    if (offset + 16 > file.size) throw new Error("备份密码错误，或文件已经损坏");
+    const record = new Uint8Array(await file.slice(offset, offset + 16).arrayBuffer());
+    const ciphertextLength = readU32(record.subarray(0, 4));
+    if (ciphertextLength < 17 || ciphertextLength > header.chunk_bytes + 16 || offset + 16 + ciphertextLength > file.size) throw new Error("备份密码错误，或文件已经损坏");
+    const nonce = record.subarray(4, 16);
+    const ciphertext = await file.slice(offset + 16, offset + 16 + ciphertextLength).arrayBuffer();
+    let plaintext: Uint8Array;
+    try {
+      plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: ownedBuffer(nonce), additionalData: ownedBuffer(aad(headerBytes, index)) }, key, ciphertext));
+    } catch { throw new Error("备份密码错误，或文件已经损坏"); }
+    plaintextBytes += plaintext.byteLength; offset += 16 + ciphertextLength;
+    if (!metadata) {
+      metadataParts.push(plaintext); bufferedMetadataBytes += plaintext.byteLength;
+      if (metadataLength === null && bufferedMetadataBytes >= 4) {
+        const lengthBytes = new Uint8Array(4); let lengthOffset = 0;
+        for (const part of metadataParts) {
+          const take = Math.min(part.byteLength, 4 - lengthOffset);
+          lengthBytes.set(part.subarray(0, take), lengthOffset); lengthOffset += take;
+          if (lengthOffset === 4) break;
+        }
+        metadataLength = readU32(lengthBytes);
+        if (metadataLength < 32 || metadataLength > Math.min(16 * 1024 * 1024, header.plaintext_bytes - 4)) throw new Error("备份内容无效");
+      }
+      if (metadataLength !== null && bufferedMetadataBytes >= 4 + metadataLength) {
+        const metadataBytes = new Uint8Array(bufferedMetadataBytes); let bufferedOffset = 0;
+        for (const part of metadataParts) { metadataBytes.set(part, bufferedOffset); bufferedOffset += part.byteLength; }
+        let parsed: unknown;
+        try { parsed = JSON.parse(decoder.decode(metadataBytes.subarray(4, 4 + metadataLength))); }
+        catch { throw new Error("备份内容无效"); }
+        metadata = validateMetadata(parsed, expectedOrigin);
+        const databaseStart = 4 + metadataLength;
+        if (metadataBytes.byteLength > databaseStart) {
+          const bytes = metadataBytes.subarray(databaseStart);
+          await write(bytes); databaseBytes += bytes.byteLength;
+        }
+        metadataParts = []; bufferedMetadataBytes = 0;
+      }
+    } else {
+      await write(plaintext); databaseBytes += plaintext.byteLength;
     }
-  } catch { throw new Error("备份密码错误，或文件已经损坏"); }
+  }
   if (offset !== file.size || plaintextBytes !== header.plaintext_bytes) throw new Error("备份文件不完整或包含多余数据");
+  if (!metadata || databaseBytes !== metadata.database_bytes) throw new Error("备份内容无效");
+  return { userId: metadata.user_id, serverOrigin: metadata.server_origin, identity: metadata.identity, databaseBytes, createdAt: header.created_at, backupCheckpoint: metadata.backup_checkpoint };
+}
 
-  const payload = new Blob(plaintextParts);
-  const metadataLength = readU32(new Uint8Array(await payload.slice(0, 4).arrayBuffer()));
-  if (metadataLength < 32 || metadataLength > Math.min(16 * 1024 * 1024, payload.size - 4)) throw new Error("备份内容无效");
-  let metadata: BackupMetadata;
-  try { metadata = JSON.parse(decoder.decode(await payload.slice(4, 4 + metadataLength).arrayBuffer())) as BackupMetadata; }
-  catch { throw new Error("备份内容无效"); }
-  const databaseSnapshot = payload.slice(4 + metadataLength);
-  const portableIdentity = metadata.identity as Partial<PortableDeviceIdentity> | undefined;
-  if (metadata.version !== 1 || metadata.database_format !== "pglite-datadir-gzip-v1" || metadata.database_bytes !== databaseSnapshot.size
-    || typeof metadata.user_id !== "string" || typeof metadata.server_origin !== "string"
-    || typeof metadata.backup_checkpoint !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(metadata.backup_checkpoint) || !portableIdentity
-    || typeof portableIdentity.device_id !== "string" || portableIdentity.device_id.length === 0
-    || portableIdentity.version !== 1 || typeof portableIdentity.signing_private_key !== "object"
-    || typeof portableIdentity.encryption_private_key !== "object" || typeof portableIdentity.mls_state !== "string") throw new Error("备份内容无效");
-  if (expectedOrigin && metadata.server_origin !== expectedOrigin) throw new Error("这个备份属于另一台 EdgeChat 服务器");
-  return { userId: metadata.user_id, serverOrigin: metadata.server_origin, identity: metadata.identity, databaseSnapshot, createdAt: header.created_at, backupCheckpoint: metadata.backup_checkpoint };
+export async function readPortableBackup(file: Blob, password: string, expectedOrigin?: string): Promise<PortableBackupContents> {
+  const parts: BlobPart[] = [];
+  const contents = await streamPortableBackupDatabase(file, password, async (bytes) => { parts.push(ownedBuffer(bytes)); }, expectedOrigin);
+  const { databaseBytes: _, ...metadata } = contents;
+  return { ...metadata, databaseSnapshot: new Blob(parts) };
 }

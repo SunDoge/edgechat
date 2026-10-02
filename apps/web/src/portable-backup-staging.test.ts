@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PortableDeviceIdentity } from "@edgechat/messaging-core";
-import { readPortableBackup } from "./portable-backup";
-import { canCreateMemoryPortableBackup, clearPortableBackupStaging, MAX_MEMORY_BACKUP_SNAPSHOT_BYTES, stagePortableBackup } from "./portable-backup-staging";
+import { createPortableBackupBlob, readPortableBackup } from "./portable-backup";
+import { canCreateMemoryPortableBackup, clearPortableBackupRestoreStaging, clearPortableBackupStaging, isPortableBackupStorageError, MAX_MEMORY_BACKUP_SNAPSHOT_BYTES, stagePortableBackup, stagePortableBackupRestore } from "./portable-backup-staging";
 
 const PROFILE = "11111111-1111-4111-8111-111111111111";
 const OTHER_PROFILE = "22222222-2222-4222-8222-222222222222";
@@ -94,6 +94,33 @@ describe("portable backup OPFS staging", () => {
     expect([...opfs.directories.values()][0]?.size).toBe(0);
   });
 
+  it("decrypts a restore incrementally into a temporary local database file", async () => {
+    const encrypted = await createPortableBackupBlob(backupInput(), { chunkBytes: 64 * 1024, iterations: 100_000 });
+    const opfs = fakeOpfs();
+    const staged = await stagePortableBackupRestore(PROFILE, encrypted, PASSWORD, "https://chat.example.com", { rootProvider: async () => opfs.root });
+    expect(opfs.writes()).toBeGreaterThan(2);
+    expect(staged.databaseSnapshot.size).toBe(150_000);
+    expect(new Uint8Array(await staged.databaseSnapshot.slice(0, 3).arrayBuffer())).toEqual(new Uint8Array([7, 7, 7]));
+    await staged.cleanup();
+    expect([...opfs.directories.values()][0]?.size).toBe(0);
+  });
+
+  it("removes a partial plaintext restore when a later write fails", async () => {
+    const encrypted = await createPortableBackupBlob(backupInput(), { chunkBytes: 64 * 1024, iterations: 100_000 });
+    const opfs = fakeOpfs(2);
+    await expect(stagePortableBackupRestore(PROFILE, encrypted, PASSWORD, undefined, { rootProvider: async () => opfs.root })).rejects.toThrow("disk full");
+    expect([...opfs.directories.values()][0]?.size).toBe(0);
+  });
+
+  it("removes already-decrypted chunks when a later authentication tag is invalid", async () => {
+    const encrypted = await createPortableBackupBlob(backupInput(), { chunkBytes: 64 * 1024, iterations: 100_000 });
+    const bytes = new Uint8Array(await encrypted.arrayBuffer()); bytes[bytes.length - 1] ^= 1;
+    const opfs = fakeOpfs();
+    await expect(stagePortableBackupRestore(PROFILE, new Blob([bytes]), PASSWORD, undefined, { rootProvider: async () => opfs.root })).rejects.toThrow("密码错误");
+    expect(opfs.writes()).toBeGreaterThan(0);
+    expect([...opfs.directories.values()][0]?.size).toBe(0);
+  });
+
   it("clears only staging files owned by the selected local profile", async () => {
     const opfs = fakeOpfs();
     const first = await stagePortableBackup(PROFILE, backupInput(1024), { rootProvider: async () => opfs.root, backupOptions: { chunkBytes: 64 * 1024, iterations: 100_000 } });
@@ -117,9 +144,25 @@ describe("portable backup OPFS staging", () => {
     await old.cleanup();
   });
 
+  it("clears crash-left plaintext restore staging for the current profile", async () => {
+    const encrypted = await createPortableBackupBlob(backupInput(1024), { chunkBytes: 64 * 1024, iterations: 100_000 });
+    const opfs = fakeOpfs();
+    await stagePortableBackupRestore(PROFILE, encrypted, PASSWORD, undefined, { rootProvider: async () => opfs.root });
+    await stagePortableBackupRestore(OTHER_PROFILE, encrypted, PASSWORD, undefined, { rootProvider: async () => opfs.root });
+    await clearPortableBackupRestoreStaging(PROFILE, async () => opfs.root);
+    const restoreDirectory = [...opfs.directories.values()][0]!;
+    expect([...restoreDirectory.keys()]).toHaveLength(1);
+    expect([...restoreDirectory.keys()][0]).toMatch(new RegExp(`^${OTHER_PROFILE}-`));
+    await clearPortableBackupStaging(OTHER_PROFILE, async () => opfs.root);
+    expect(restoreDirectory.size).toBe(0);
+  });
+
   it("caps the whole-blob fallback to small snapshots", () => {
     expect(canCreateMemoryPortableBackup(MAX_MEMORY_BACKUP_SNAPSHOT_BYTES)).toBe(true);
     expect(canCreateMemoryPortableBackup(MAX_MEMORY_BACKUP_SNAPSHOT_BYTES + 1)).toBe(false);
     expect(canCreateMemoryPortableBackup(0)).toBe(false);
+    expect(isPortableBackupStorageError(new DOMException("full", "QuotaExceededError"))).toBe(true);
+    expect(isPortableBackupStorageError(new DOMException("cancelled", "AbortError"))).toBe(false);
+    expect(isPortableBackupStorageError(new Error("wrong password"))).toBe(false);
   });
 });

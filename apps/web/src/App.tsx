@@ -36,7 +36,7 @@ import { LocalImageSemanticSearch } from "./semantic-search";
 import { replenishMlsKeyPackages } from "./key-package-replenishment";
 import { applyRoomPreferenceAction, defaultRoomPreference, organizedRooms, type RoomPreferenceAction } from "./room-preferences";
 import { createPortableBackupBlob, readPortableBackup, writePortableBackup } from "./portable-backup";
-import { canCreateMemoryPortableBackup, clearPortableBackupStaging, stagePortableBackup } from "./portable-backup-staging";
+import { canCreateMemoryPortableBackup, clearPortableBackupRestoreStaging, clearPortableBackupStaging, isPortableBackupStorageError, stagePortableBackup, stagePortableBackupRestore } from "./portable-backup-staging";
 import { DeviceLinkApprovalDialog } from "./components/DeviceLinkApprovalDialog";
 import { VoiceRecorder } from "./components/VoiceRecorder";
 import { DRAFT_SAVE_DELAY_MS, canApplyLoadedDraft, composerDraftPreview } from "./composer-drafts";
@@ -844,6 +844,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   onMount(() => {
     void (async () => {
       try {
+        await clearPortableBackupRestoreStaging(profileId).catch(() => undefined);
         if (startupFailure()) return;
         if (sessionStorage.getItem(restoreCheckpointKey)) { api.setToken(null); return; }
         const storedIdentity = await loadIdentity(profileId);
@@ -2006,10 +2007,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         let backup: Blob;
         const localStorageManager = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
         if (localStorageManager?.getDirectory) {
-          const staged = await stagePortableBackup(profileId, input);
-          backup = staged.file; stagedCleanup = staged.cleanup;
+          try {
+            const staged = await stagePortableBackup(profileId, input);
+            backup = staged.file; stagedCleanup = staged.cleanup;
+          } catch (cause) {
+            if (!isPortableBackupStorageError(cause)) throw cause;
+            if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new Error("本机可用空间不足，无法安全保存这个大型备份。请释放一些设备空间后重试");
+            backup = await createPortableBackupBlob(input);
+          }
         } else {
-          if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new Error("这个备份较大，当前浏览器无法安全保存。请使用支持网站持久存储的新版浏览器，或在桌面浏览器中重试");
+          if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new Error("这个备份较大，当前浏览器无法安全保存。请更新当前浏览器，或改用新版桌面浏览器重试");
           backup = await createPortableBackupBlob(input);
         }
         const url = URL.createObjectURL(backup); const anchor = document.createElement("a");
@@ -2028,37 +2035,51 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function restorePortableBackup(file: File, password: string, accountPassword: string): Promise<void> {
-    const contents = await readPortableBackup(file, password, location.origin);
-    const restoredIdentity = await core.importPortableIdentity(contents.identity);
-    let validation: OpenMlsMessagingCore | null = null;
-    try { validation = await OpenMlsMessagingCore.create(restoredIdentity.deviceId, restoredIdentity.mlsState); }
-    catch { throw new Error("备份中的群聊加密状态无效"); }
-    finally { validation?.destroy(); }
-    const publicKeys = await core.exportPublicIdentity(restoredIdentity);
-    await api.checkBackupRestore({
-      user_id: contents.userId, password: accountPassword, device_id: restoredIdentity.deviceId,
-      backup_checkpoint: contents.backupCheckpoint, ...publicKeys,
-    });
-    const previousIdentity = await loadIdentity(profileId);
-    sessionStorage.setItem(restorePhaseKey, "preparing");
-    sessionStorage.setItem(restoreUserKey, contents.userId);
-    sessionStorage.setItem(restoreCheckpointKey, contents.backupCheckpoint);
-    let staged = false;
-    try {
-      await saveIdentity(profileId, restoredIdentity);
-      await db.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId);
-      staged = true;
-      await clearLocalProfileToken(profileId); api.setToken(null);
-      sessionStorage.setItem(restorePhaseKey, "ready");
+    const localStorageManager = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
+    let stagedBackup: Awaited<ReturnType<typeof stagePortableBackupRestore>> | null = null;
+    if (localStorageManager?.getDirectory) {
+      try { stagedBackup = await stagePortableBackupRestore(profileId, file, password, location.origin); }
+      catch (cause) {
+        if (!isPortableBackupStorageError(cause)) throw cause;
+        if (!canCreateMemoryPortableBackup(file.size)) throw new Error("本机可用空间不足，无法安全恢复这个大型备份。请释放一些设备空间后重试");
+      }
     }
-    catch (cause) {
-      if (!staged) {
-        if (previousIdentity) await saveIdentity(profileId, previousIdentity); else await clearIdentity(profileId);
-        sessionStorage.removeItem(restoreUserKey);
-        sessionStorage.removeItem(restoreCheckpointKey);
-        sessionStorage.removeItem(restorePhaseKey);
-      } else setStartupFailure(INTERRUPTED_RESTORE_FAILURE);
-      throw cause;
+    if (!stagedBackup && !canCreateMemoryPortableBackup(file.size)) throw new Error("这个备份较大，当前浏览器无法安全恢复。请更新当前浏览器，或改用新版桌面浏览器重试");
+    const contents = stagedBackup ?? await readPortableBackup(file, password, location.origin);
+    try {
+      const restoredIdentity = await core.importPortableIdentity(contents.identity);
+      let validation: OpenMlsMessagingCore | null = null;
+      try { validation = await OpenMlsMessagingCore.create(restoredIdentity.deviceId, restoredIdentity.mlsState); }
+      catch { throw new Error("备份中的群聊加密状态无效"); }
+      finally { validation?.destroy(); }
+      const publicKeys = await core.exportPublicIdentity(restoredIdentity);
+      await api.checkBackupRestore({
+        user_id: contents.userId, password: accountPassword, device_id: restoredIdentity.deviceId,
+        backup_checkpoint: contents.backupCheckpoint, ...publicKeys,
+      });
+      const previousIdentity = await loadIdentity(profileId);
+      sessionStorage.setItem(restorePhaseKey, "preparing");
+      sessionStorage.setItem(restoreUserKey, contents.userId);
+      sessionStorage.setItem(restoreCheckpointKey, contents.backupCheckpoint);
+      let staged = false;
+      try {
+        await saveIdentity(profileId, restoredIdentity);
+        await db.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId);
+        staged = true;
+        await clearLocalProfileToken(profileId); api.setToken(null);
+        sessionStorage.setItem(restorePhaseKey, "ready");
+      }
+      catch (cause) {
+        if (!staged) {
+          if (previousIdentity) await saveIdentity(profileId, previousIdentity); else await clearIdentity(profileId);
+          sessionStorage.removeItem(restoreUserKey);
+          sessionStorage.removeItem(restoreCheckpointKey);
+          sessionStorage.removeItem(restorePhaseKey);
+        } else setStartupFailure(INTERRUPTED_RESTORE_FAILURE);
+        throw cause;
+      }
+    } finally {
+      await stagedBackup?.cleanup().catch(() => undefined);
     }
     location.reload();
   }

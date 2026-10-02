@@ -1,7 +1,9 @@
-import { writePortableBackup } from "./portable-backup";
+import { streamPortableBackupDatabase, writePortableBackup, type PortableBackupContents } from "./portable-backup";
 
-const DIRECTORY_NAME = "edgechat-portable-backup-staging-v1";
+const EXPORT_DIRECTORY_NAME = "edgechat-portable-backup-staging-v1";
+const RESTORE_DIRECTORY_NAME = "edgechat-portable-backup-restore-v1";
 const BACKUP_SUFFIX = ".edgechat-backup";
+const RESTORE_SUFFIX = ".pglite-gzip";
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
 
@@ -15,6 +17,8 @@ export type StagedPortableBackup = {
   file: File;
   cleanup(): Promise<void>;
 };
+
+export type StagedPortableBackupRestore = PortableBackupContents & { cleanup(): Promise<void> };
 
 function defaultRootProvider(): Promise<FileSystemDirectoryHandle> {
   const storage = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
@@ -37,11 +41,11 @@ async function removeExact(directory: FileSystemDirectoryHandle, filename: strin
   }
 }
 
-async function removeStaleProfileFiles(directory: FileSystemDirectoryHandle, profileId: string, now: number): Promise<void> {
+async function removeStaleProfileFiles(directory: FileSystemDirectoryHandle, profileId: string, suffix: string, now: number): Promise<void> {
   const iterable = directory as FileSystemDirectoryHandle & { values?: () => AsyncIterableIterator<FileSystemHandle> };
   if (!iterable.values) return;
   for await (const handle of iterable.values()) {
-    if (handle.kind !== "file" || !handle.name.startsWith(filenamePrefix(profileId)) || !handle.name.endsWith(BACKUP_SUFFIX)) continue;
+    if (handle.kind !== "file" || !handle.name.startsWith(filenamePrefix(profileId)) || !handle.name.endsWith(suffix)) continue;
     try {
       const file = await (handle as FileSystemFileHandle).getFile();
       if (now - file.lastModified >= STALE_AFTER_MS) await removeExact(directory, handle.name);
@@ -55,6 +59,10 @@ export function canCreateMemoryPortableBackup(snapshotBytes: number): boolean {
   return Number.isSafeInteger(snapshotBytes) && snapshotBytes > 0 && snapshotBytes <= MAX_MEMORY_BACKUP_SNAPSHOT_BYTES;
 }
 
+export function isPortableBackupStorageError(cause: unknown): boolean {
+  return cause instanceof DOMException && ["InvalidStateError", "NotAllowedError", "NotSupportedError", "QuotaExceededError", "UnknownError"].includes(cause.name);
+}
+
 export async function stagePortableBackup(
   profileId: string,
   input: BackupInput,
@@ -62,8 +70,8 @@ export async function stagePortableBackup(
 ): Promise<StagedPortableBackup> {
   assertProfileId(profileId);
   const root = await (options.rootProvider ?? defaultRootProvider)();
-  const directory = await root.getDirectoryHandle(DIRECTORY_NAME, { create: true });
-  await removeStaleProfileFiles(directory, profileId, options.now ?? Date.now());
+  const directory = await root.getDirectoryHandle(EXPORT_DIRECTORY_NAME, { create: true });
+  await removeStaleProfileFiles(directory, profileId, BACKUP_SUFFIX, options.now ?? Date.now());
   const filename = `${filenamePrefix(profileId)}${crypto.randomUUID()}${BACKUP_SUFFIX}`;
   const handle = await directory.getFileHandle(filename, { create: true });
   const writable = await handle.createWritable();
@@ -81,17 +89,43 @@ export async function stagePortableBackup(
   }
 }
 
-export async function clearPortableBackupStaging(profileId: string, rootProvider?: RootProvider): Promise<void> {
+export async function stagePortableBackupRestore(
+  profileId: string,
+  encryptedBackup: Blob,
+  password: string,
+  expectedOrigin?: string,
+  options: { rootProvider?: RootProvider; now?: number } = {},
+): Promise<StagedPortableBackupRestore> {
   assertProfileId(profileId);
-  let root: FileSystemDirectoryHandle;
-  if (rootProvider) root = await rootProvider();
-  else {
-    const storage = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
-    if (!storage?.getDirectory) return;
-    root = await storage.getDirectory();
+  const root = await (options.rootProvider ?? defaultRootProvider)();
+  const directory = await root.getDirectoryHandle(RESTORE_DIRECTORY_NAME, { create: true });
+  await removeStaleProfileFiles(directory, profileId, RESTORE_SUFFIX, options.now ?? Date.now());
+  const filename = `${filenamePrefix(profileId)}${crypto.randomUUID()}${RESTORE_SUFFIX}`;
+  const handle = await directory.getFileHandle(filename, { create: true });
+  const writable = await handle.createWritable();
+  let closed = false;
+  try {
+    const contents = await streamPortableBackupDatabase(
+      encryptedBackup,
+      password,
+      async (bytes) => writable.write(bytes.slice().buffer as ArrayBuffer),
+      expectedOrigin,
+    );
+    await writable.close(); closed = true;
+    const databaseSnapshot = await handle.getFile();
+    if (databaseSnapshot.size !== contents.databaseBytes) throw new Error("备份内容无效");
+    const { databaseBytes: _, ...metadata } = contents;
+    return { ...metadata, databaseSnapshot, cleanup: () => removeExact(directory, filename) };
+  } catch (cause) {
+    if (!closed) await writable.abort(cause).catch(() => undefined);
+    await removeExact(directory, filename).catch(() => undefined);
+    throw cause;
   }
+}
+
+async function clearProfileDirectory(profileId: string, root: FileSystemDirectoryHandle, directoryName: string, suffix: string): Promise<void> {
   let directory: FileSystemDirectoryHandle;
-  try { directory = await root.getDirectoryHandle(DIRECTORY_NAME); }
+  try { directory = await root.getDirectoryHandle(directoryName); }
   catch (cause) {
     if (cause instanceof DOMException && cause.name === "NotFoundError") return;
     throw cause;
@@ -99,8 +133,26 @@ export async function clearPortableBackupStaging(profileId: string, rootProvider
   const iterable = directory as FileSystemDirectoryHandle & { values?: () => AsyncIterableIterator<FileSystemHandle> };
   if (!iterable.values) throw new Error("Browser cannot enumerate backup staging storage");
   for await (const handle of iterable.values()) {
-    if (handle.kind === "file" && handle.name.startsWith(filenamePrefix(profileId)) && handle.name.endsWith(BACKUP_SUFFIX)) {
-      await removeExact(directory, handle.name);
-    }
+    if (handle.kind === "file" && handle.name.startsWith(filenamePrefix(profileId)) && handle.name.endsWith(suffix)) await removeExact(directory, handle.name);
   }
+}
+
+async function defaultRootIfSupported(): Promise<FileSystemDirectoryHandle | null> {
+  const storage = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
+  return storage?.getDirectory ? storage.getDirectory() : null;
+}
+
+export async function clearPortableBackupStaging(profileId: string, rootProvider?: RootProvider): Promise<void> {
+  assertProfileId(profileId);
+  const root = rootProvider ? await rootProvider() : await defaultRootIfSupported();
+  if (!root) return;
+  await clearProfileDirectory(profileId, root, EXPORT_DIRECTORY_NAME, BACKUP_SUFFIX);
+  await clearProfileDirectory(profileId, root, RESTORE_DIRECTORY_NAME, RESTORE_SUFFIX);
+}
+
+export async function clearPortableBackupRestoreStaging(profileId: string, rootProvider?: RootProvider): Promise<void> {
+  assertProfileId(profileId);
+  const root = rootProvider ? await rootProvider() : await defaultRootIfSupported();
+  if (!root) return;
+  await clearProfileDirectory(profileId, root, RESTORE_DIRECTORY_NAME, RESTORE_SUFFIX);
 }
