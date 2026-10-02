@@ -124,6 +124,22 @@ describe("RoomDurableObject", () => {
     aliceSocket.close(1000, "done"); bobSocket.close(1000, "done");
   });
 
+  it("closes only another device's live socket after a password change", async () => {
+    const room = env.ROOMS.getByName(roomId);
+    await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());
+    const connect = async (deviceId: string) => {
+      const response = await room.fetch(new Request("https://room.test/socket", { headers: { upgrade: "websocket", "x-edgechat-user": alice, "x-edgechat-device": deviceId } }));
+      const socket = response.webSocket!; socket.accept(); return socket;
+    };
+    const current = await connect("device-current");
+    const other = await connect("device-other");
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => other.addEventListener("close", (event) => resolve({ code: event.code, reason: event.reason }), { once: true }));
+    expect(await room.closeOtherDeviceSockets(alice, "device-current")).toBe(1);
+    await expect(closed).resolves.toEqual({ code: 4007, reason: "signed out after password change" });
+    expect(current.readyState).toBe(WebSocket.OPEN);
+    current.close(1000, "done");
+  });
+
   it("shares opt-in presence ephemerally and aggregates multiple devices", async () => {
     const room = env.ROOMS.getByName(roomId);
     await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());

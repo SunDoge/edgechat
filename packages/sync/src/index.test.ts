@@ -578,6 +578,40 @@ describe("SyncEngine event ingestion", () => {
     expect(invalidated).toHaveBeenCalledOnce();
     expect(wsTicket).toHaveBeenCalledOnce();
   });
+
+  it("stops every room connection when another session is ended by a password change", async () => {
+    const network = new EventTarget();
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      constructor() { sockets.push(this); }
+      close(): void { this.readyState = 3; }
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket } as unknown as ApiClient;
+    const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
+    const engine = new SyncEngine(api, db, async () => null, undefined, network);
+    const expired = vi.fn(); engine.addEventListener("session-expired", expired);
+
+    await engine.start();
+    await engine.connectRoom("!password-room-0001:example.com");
+    await engine.connectRoom("!password-room-0002:example.com");
+    sockets[0].readyState = 3;
+    sockets[0].onclose?.({ code: 4007 });
+    network.dispatchEvent(new Event("online"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    vi.unstubAllGlobals();
+
+    expect(expired).toHaveBeenCalledOnce();
+    expect(sockets.map((socket) => socket.readyState)).toEqual([3, 3]);
+    expect(wsTicket).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("ApiClient protocol negotiation", () => {

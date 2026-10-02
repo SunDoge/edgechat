@@ -1215,6 +1215,47 @@ async function register(request: Request, env: Env): Promise<Response> {
   return json({ access_token: token, user_id: userId, device_id: deviceId, display_name: displayName, avatar_url: null, server_name: env.SERVER_NAME, ...sessionCapabilities(env) }, 201);
 }
 
+async function changePassword(request: Request, env: Env, auth: AuthContext): Promise<Response> {
+  requireUser(auth);
+  await limitUnauthenticatedRequest(request, env, "password-change", auth.userId);
+  const body = await readJson(request, 2_048);
+  const currentPassword = stringField(body, "current_password", 256);
+  const newPassword = stringField(body, "new_password", 256);
+  if (typeof body.logout_other_devices !== "boolean") throw new HttpError(400, "Invalid logout option", "invalid_input");
+  if (newPassword === currentPassword) throw new HttpError(400, "New password must be different", "password_unchanged");
+  if (newPassword.length < 10) throw new HttpError(400, "Password must be at least 10 characters", "weak_password");
+
+  const db = createDatabase(env.DB);
+  const user = await db.selectFrom("users").select(["password_hash", "password_salt"])
+    .where("user_id", "=", auth.userId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirst();
+  let verified = false;
+  try { verified = Boolean(user) && currentPassword.length >= 10 && await verifyPassword(currentPassword, user!.password_hash, user!.password_salt); }
+  catch { verified = false; }
+  if (!verified) {
+    await recordLoginFailure(env, auth.userId);
+    throw new HttpError(401, "Current password is incorrect", "invalid_credentials");
+  }
+
+  const credential = await passwordHash(newPassword);
+  const logoutOtherDevices = body.logout_other_devices;
+  await batch(env.DB, [
+    db.updateTable("users").set({ password_hash: credential.hash, password_salt: credential.salt }).where("user_id", "=", auth.userId),
+    db.deleteFrom("login_failure_state").where("user_id", "=", auth.userId),
+    ...(logoutOtherDevices ? [
+      db.deleteFrom("sessions").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId),
+      db.deleteFrom("ws_tickets").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId),
+      db.deleteFrom("push_subscriptions").where("device_id", "in", db.selectFrom("devices").select("device_id").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId)),
+    ] : []),
+  ]);
+  if (logoutOtherDevices) {
+    const rooms = await db.selectFrom("room_members").select("room_id")
+      .where("user_id", "=", auth.userId).where("removed_at", "is", null).execute();
+    await Promise.allSettled(rooms.map((room) => env.ROOMS.getByName(room.room_id).closeOtherDeviceSockets(auth.userId, auth.deviceId)));
+  }
+  logSecurityEvent("info", "security.password_changed", { other_sessions_revoked: logoutOtherDevices });
+  return json({ changed: true, other_sessions_revoked: logoutOtherDevices });
+}
+
 type AppealCategory = "login_locked" | "device_lost" | "account_access";
 
 function appealReceipt(now = Date.now()): string {
@@ -4475,6 +4516,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (path === "/api/v1/account/deletion" && request.method === "GET") return accountDeletionStatus(env, auth);
   if (auth.accountDeletionRequested) throw new HttpError(409, "Account deletion is in progress", "account_deletion_pending");
   if (path === "/api/v1/account-removals" && request.method === "GET") return accountRemovalTasks(env, auth);
+  if (path === "/api/v1/account/password" && request.method === "PUT") return changePassword(request, env, auth);
   const accountRemovalCommit = path.match(/^\/api\/v1\/account-removals\/([^/]+)\/rooms\/([^/]+)$/);
   if (accountRemovalCommit && request.method === "POST") {
     const roomId = decodeURIComponent(accountRemovalCommit[2]);

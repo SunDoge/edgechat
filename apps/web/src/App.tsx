@@ -49,6 +49,7 @@ import { ContactShareDialog } from "./components/ContactShareDialog";
 import { IdentityVerificationDialog } from "./components/IdentityVerificationDialog";
 import { ProfileDialog, type ProfileAvatarChange } from "./components/ProfileDialog";
 import { LocalProfilesDialog } from "./components/LocalProfilesDialog";
+import { PasswordChangeDialog } from "./components/PasswordChangeDialog";
 import { activeIdentityDevices, deviceTrustState, verificationKey, type DeviceTrustState } from "./device-verification";
 import { ShareTargetDialog } from "./components/ShareTargetDialog";
 import { createDeviceHistoryManifest, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
@@ -163,6 +164,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [deviceLinkOpen, setDeviceLinkOpen] = createSignal(false);
   const [accountDeletionOpen, setAccountDeletionOpen] = createSignal(false);
   const [backupOpen, setBackupOpen] = createSignal(false);
+  const [passwordChangeOpen, setPasswordChangeOpen] = createSignal(false);
   const [lastBackup, setLastBackup] = createSignal<LocalBackupExport | null>(localBackupExport(props.localProfile));
   const [accountExportBusy, setAccountExportBusy] = createSignal(false);
   const [conversationExportBusy, setConversationExportBusy] = createSignal(false);
@@ -342,7 +344,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const unsubscribeUpdates = subscribePwaUpdates(setPwaUpdateState);
     const unsubscribeInstall = subscribePwaInstall(setPwaInstallState);
     const prepareHandoff = () => {
-      const sensitiveOperation = sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy() || deviceLinkOpen() || backupOpen() || accountDeletionOpen()
+      const sensitiveOperation = sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy() || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen()
         || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
         || Boolean(accountRemovalRun || keyPackageRefill || retentionRun || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun);
       if (files().length || voiceRecording() || sensitiveOperation) {
@@ -2187,6 +2189,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setLocalStorageHealth(result.health);
     return result;
   }
+  async function changeAccountPassword(currentPassword: string, newPassword: string, logoutOtherDevices: boolean): Promise<void> {
+    try {
+      const result = await api.changePassword(currentPassword, newPassword, logoutOtherDevices);
+      setNotice(result.other_sessions_revoked ? "登录密码已修改，其他设备已退出服务器" : "登录密码已修改，其他设备仍保持登录");
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.code === "invalid_credentials") throw new Error("当前密码不正确");
+      if (cause instanceof ApiError && cause.code === "authentication_rate_limited") throw new Error("尝试次数过多，请稍后再试");
+      if (cause instanceof ApiError && cause.code === "weak_password") throw new Error("新密码至少需要 10 个字符");
+      if (cause instanceof ApiError && cause.code === "password_unchanged") throw new Error("新密码不能与当前密码相同");
+      throw cause;
+    }
+  }
   async function updateProfile(displayName: string, bio: string, avatar: ProfileAvatarChange): Promise<void> {
     let result = await api.updateProfile(displayName, bio);
     if (avatar.kind === "replace") result = await api.updateProfileAvatar(avatar.blob);
@@ -3046,7 +3060,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     return ciphertext ? core.decryptAttachment(ciphertext, attachment.key, attachment.nonce) : null;
   }
   function profileChangeBlocked(): boolean {
-    return files().length > 0 || voiceRecording() || sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy() || deviceLinkOpen() || backupOpen() || accountDeletionOpen()
+    return files().length > 0 || voiceRecording() || sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy() || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen()
       || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
       || Boolean(roomMembershipRun || accountRemovalRun || keyPackageRefill || retentionRun || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun);
   }
@@ -3094,7 +3108,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   const Workspace = () => {
     const currentSession = () => session()!;
-    return <main inert={newRoom() || contactShareOpen() || Boolean(forwardingMessages()) || Boolean(incomingShare()) || searchOpen() || devicesOpen() || localProfilesOpen() || profileOpen() || deviceLinkOpen() || backupOpen() || accountDeletionOpen() || roomSettingsOpen() || identityVerificationOpen() ? true : undefined} class="isolate h-dvh bg-white antialiased md:grid md:grid-cols-[360px_minmax(0,1fr)]">
+    return <main inert={newRoom() || contactShareOpen() || Boolean(forwardingMessages()) || Boolean(incomingShare()) || searchOpen() || devicesOpen() || localProfilesOpen() || profileOpen() || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen() || roomSettingsOpen() || identityVerificationOpen() ? true : undefined} class="isolate h-dvh bg-white antialiased md:grid md:grid-cols-[360px_minmax(0,1fr)]">
       <Show when={selected()}><a href="#current-conversation" class="fixed left-3 top-3 z-50 -translate-y-20 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-brand shadow-xl ring-2 ring-brand transition-transform focus:translate-y-0">跳到当前对话</a></Show>
       <aside aria-label="对话列表" class={`h-full min-w-0 border-r border-black/8 bg-white ${selected() ? "max-md:hidden" : ""}`}>
         <div class="grid h-full grid-rows-[64px_auto_1fr_36px]">
@@ -3180,10 +3194,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} ownershipTransferSupported={serverSupports(currentSession().protocol, "rooms.owner-transfer.v1")} ownershipBusyUserId={roomOwnershipBusy()} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onTransferOwnership={(userId) => transferRoomOwnership(room(), userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} clearHistoryBusy={historyClearBusy()} onClearHistory={() => clearLocalRoomHistory(room())} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onOpenMedia={() => { setRoomSettingsOpen(false); setConversationMediaOpen(true); }} exportBusy={conversationExportBusy()} onExportConversation={() => exportConversation(room())} onCancelExport={() => conversationExportAbort?.abort()} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
       <Show when={conversationMediaOpen() && selected()}>{(room) => <ConversationMediaDialog roomTitle={roomTitle(room(), currentSession().user_id)} coverageComplete={coverageComplete()} loadPage={(cursor: LocalRoomAttachmentCursor | null) => db.roomAttachments(room().room_id, cursor)} loadCachedImage={decryptCachedAttachment} displayName={(userId) => memberName(room(), userId)} onOpenMessage={(messageId) => { setConversationMediaOpen(false); openSearchResult(room().room_id, messageId); }} onClose={() => setConversationMediaOpen(false)}/>}</Show>
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>
-      <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} backup={lastBackup()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
+      <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} backup={lastBackup()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} passwordChangeSupported={serverSupports(currentSession().protocol, "account.password-change.v1")} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onChangePassword={() => { setDevicesOpen(false); setPasswordChangeOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
       <Show when={profileOpen() && profile()}>{(currentProfile) => <ProfileDialog profile={currentProfile()} onSave={updateProfile} onClose={() => setProfileOpen(false)}/>}</Show>
       <Show when={deviceLinkOpen()}><DeviceLinkApprovalDialog api={api} onApprove={(linkId) => executeDeviceLink(linkId)} onClose={() => setDeviceLinkOpen(false)}/></Show>
       <Show when={backupOpen()}><BackupDialog onCreate={exportPortableBackup} onClose={() => setBackupOpen(false)}/></Show>
+      <Show when={passwordChangeOpen()}><PasswordChangeDialog onChange={changeAccountPassword} onClose={() => setPasswordChangeOpen(false)}/></Show>
       <Show when={accountDeletionOpen()}><AccountDeletionDialog onDelete={deleteAccount} onClose={() => setAccountDeletionOpen(false)}/></Show>
       <Show when={pwaUpdateState() !== "idle"}><aside aria-live="polite" class="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-30 rounded-xl border border-black/8 bg-white p-3 shadow-xl md:inset-x-auto md:bottom-5 md:right-5 md:w-80"><strong class="block text-sm font-semibold text-ink">新版本已准备好</strong><p class="mt-1 text-xs/5 text-muted">更新前会保存当前文字草稿，随后重新打开应用。</p><div class="mt-3 flex justify-end gap-2"><Show when={pwaUpdateState() === "ready"} fallback={<span class="px-3 py-2 text-xs font-medium text-muted">正在更新…</span>}><button type="button" class="min-h-10 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={dismissPwaUpdate}>稍后</button><button type="button" class="min-h-10 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:brightness-95" onClick={() => void installPwaUpdate()}>更新并重启</button></Show></div></aside></Show>
       <Show when={notice()}><div role="status" class={`fixed left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg bg-neutral-900 px-3 py-2 text-sm text-white shadow-lg ${pwaUpdateState() === "idle" ? "bottom-5" : "top-5"}`}><span class="min-w-0">{notice()}</span><button type="button" aria-label="关闭通知" class="grid size-8 shrink-0 place-items-center rounded-md hover:bg-white/10" onClick={() => setNotice("")}><IconX class="size-4 stroke-white"/></button></div></Show>

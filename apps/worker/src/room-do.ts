@@ -390,6 +390,18 @@ export class RoomDurableObject extends DurableObject<Env> {
     return closed;
   }
 
+  /** Close live sessions on this room without revoking the device's MLS membership. */
+  async closeOtherDeviceSockets(userId: UserId, currentDeviceId: string): Promise<number> {
+    let closed = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as Partial<SocketAttachment> | null;
+      if (attachment?.userId !== userId || attachment.deviceId === currentDeviceId) continue;
+      ws.close(4007, "signed out after password change");
+      closed += 1;
+    }
+    return closed;
+  }
+
   /** Close sockets after a direct-chat block without changing MLS membership. */
   async closeUserSockets(userId: UserId, code = 4005, reason = "conversation unavailable"): Promise<number> {
     let closed = 0;

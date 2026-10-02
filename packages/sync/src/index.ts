@@ -163,6 +163,11 @@ export class ApiClient {
   updateProfile(displayName: string, bio: string) { return this.request<{ profile: UserProfile }>("/api/v1/profile", { method: "PUT", body: JSON.stringify({ display_name: displayName, bio }) }); }
   updateProfileAvatar(blob: Blob) { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "PUT", body: blob, headers: { "content-type": "image/webp" } }); }
   deleteProfileAvatar() { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "DELETE" }); }
+  changePassword(currentPassword: string, newPassword: string, logoutOtherDevices: boolean) {
+    return this.request<{ changed: true; other_sessions_revoked: boolean }>("/api/v1/account/password", {
+      method: "PUT", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, logout_other_devices: logoutOtherDevices }),
+    });
+  }
   storageUsage() { return this.request<StorageUsage>("/api/v1/storage"); }
   privacy() { return this.request<{ invitation_policy: InvitationPolicy }>("/api/v1/privacy"); }
   setInvitationPolicy(invitationPolicy: InvitationPolicy) { return this.request<{ invitation_policy: InvitationPolicy }>("/api/v1/privacy", { method: "PUT", body: JSON.stringify({ invitation_policy: invitationPolicy }) }); }
@@ -775,6 +780,10 @@ export class SyncEngine extends EventTarget {
     this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: false } }));
     if (code === 4006) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("account-deletion", { detail: { roomId } })); return; }
     if (code === 4004) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("device-revoked", { detail: { roomId } })); return; }
+    if (code === 4007) {
+      this.expireSession(new ApiError("Session ended after password change", 401, "session_expired"));
+      return;
+    }
     if (code === 4003 || code === 4005) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("room-unavailable", { detail: { roomId } })); return; }
     this.scheduleReconnect(roomId);
   }
@@ -810,9 +819,15 @@ export class SyncEngine extends EventTarget {
       return;
     }
     if (error && typeof error === "object" && "status" in error && error.status === 401) {
-      this.dispatchEvent(new CustomEvent("session-expired", { detail: error }));
+      this.expireSession(error);
     }
     this.dispatchEvent(new CustomEvent("error", { detail: error }));
+  }
+
+  private expireSession(error: unknown): void {
+    if (!this.running) return;
+    this.stop();
+    this.dispatchEvent(new CustomEvent("session-expired", { detail: error }));
   }
 
   private blockRoom(error: RoomHistoryTransferRequiredError): void {

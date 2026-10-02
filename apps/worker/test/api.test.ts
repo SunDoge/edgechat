@@ -40,7 +40,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
   expect(tooNew.status).toBe(426);
@@ -274,6 +274,58 @@ async function acceptRequest(roomId: RoomId, accessToken: string): Promise<void>
   });
   expect(response.status, await response.clone().text()).toBe(200);
 }
+
+it("changes the account password and optionally expires other device sessions without R2", async () => {
+  const currentDevice = await device(`password-current-${crypto.randomUUID()}`);
+  const account = await register(`password_${crypto.randomUUID().slice(0, 8)}`, currentDevice);
+  const otherDevice = await device(`password-other-${crypto.randomUUID()}`);
+  const otherSession = await loginDevice(account.user_id, otherDevice);
+  const currentHeaders = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
+  const otherHeaders = { authorization: `Bearer ${otherSession.access_token}`, "content-type": "application/json" };
+  const endpoint = `https://push.example.test/${crypto.randomUUID()}`;
+  expect((await SELF.fetch("https://edgechat.test/api/v1/push/subscribe", {
+    method: "POST", headers: otherHeaders, body: JSON.stringify({ endpoint, p256dh: "A".repeat(87), auth: "B".repeat(22) }),
+  })).status).toBe(201);
+
+  const wrong = await SELF.fetch("https://edgechat.test/api/v1/account/password", {
+    method: "PUT", headers: currentHeaders,
+    body: JSON.stringify({ current_password: "wrong-password", new_password: "new-correct-horse-battery", logout_other_devices: true }),
+  });
+  expect(wrong.status).toBe(401);
+  expect(await wrong.json()).toMatchObject({ code: "invalid_credentials" });
+  expect((await SELF.fetch("https://edgechat.test/api/v1/me", { headers: otherHeaders })).status).toBe(200);
+
+  const changed = await SELF.fetch("https://edgechat.test/api/v1/account/password", {
+    method: "PUT", headers: currentHeaders,
+    body: JSON.stringify({ current_password: "correct-horse-battery", new_password: "new-correct-horse-battery", logout_other_devices: true }),
+  });
+  expect(changed.status, await changed.clone().text()).toBe(200);
+  expect(await changed.json()).toEqual({ changed: true, other_sessions_revoked: true });
+  expect((await SELF.fetch("https://edgechat.test/api/v1/me", { headers: currentHeaders })).status).toBe(200);
+  expect((await SELF.fetch("https://edgechat.test/api/v1/me", { headers: otherHeaders })).status).toBe(401);
+  expect(await env.DB.prepare("SELECT device_id FROM push_subscriptions WHERE endpoint = ?").bind(endpoint).first()).toBeNull();
+  expect(await env.DB.prepare("SELECT user_id FROM login_failure_state WHERE user_id = ?").bind(account.user_id).first()).toBeNull();
+
+  const oldLogin = await SELF.fetch("https://edgechat.test/api/v1/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: account.user_id, password: "correct-horse-battery", device: otherDevice.body }),
+  });
+  expect(oldLogin.status).toBe(401);
+  const newLogin = await SELF.fetch("https://edgechat.test/api/v1/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: account.user_id, password: "new-correct-horse-battery", device: otherDevice.body }),
+  });
+  expect(newLogin.status, await newLogin.clone().text()).toBe(200);
+  const renewed = await newLogin.json() as { access_token: string };
+
+  const kept = await SELF.fetch("https://edgechat.test/api/v1/account/password", {
+    method: "PUT", headers: currentHeaders,
+    body: JSON.stringify({ current_password: "new-correct-horse-battery", new_password: "newer-correct-horse-battery", logout_other_devices: false }),
+  });
+  expect(await kept.json()).toEqual({ changed: true, other_sessions_revoked: false });
+  expect((await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { authorization: `Bearer ${renewed.access_token}` } })).status).toBe(200);
+  expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+});
 
 describe("single-server durable delivery", () => {
   it("rejects plaintext group names before room or R2 allocation", async () => {

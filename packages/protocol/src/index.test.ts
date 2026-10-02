@@ -47,6 +47,7 @@ describe("federation-ready identifiers", () => {
     expect(serverSupports(currentServerProtocol, "rooms.profile.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.leave.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.owner-transfer.v1")).toBe(true);
+    expect(serverSupports(currentServerProtocol, "account.password-change.v1")).toBe(true);
   });
 
   it("rejects malformed or incompatible server capability envelopes", () => {
