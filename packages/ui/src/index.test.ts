@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchoredScrollTop, buildVirtualLayout, shouldSubmitComposer, virtualRange } from "./index";
+import { anchoredScrollTop, buildVirtualLayout, isNearMessageListBottom, shouldSubmitComposer, virtualRange } from "./index";
 
 describe("chat composer IME handling", () => {
   it("does not submit while a CJK IME is composing", () => {
@@ -22,6 +22,11 @@ describe("message list scroll anchoring", () => {
   it("continues following the bottom only when the reader was already there", () => {
     expect(anchoredScrollTop(1_000, 1_120, 400, 600, true)).toBe(520);
     expect(anchoredScrollTop(1_000, 900, 120, 600, false)).toBe(120);
+  });
+
+  it("uses a small bottom tolerance without treating older context as current", () => {
+    expect(isNearMessageListBottom(2_000, 1_320, 600)).toBe(true);
+    expect(isNearMessageListBottom(2_000, 1_299, 600)).toBe(false);
   });
 });
 

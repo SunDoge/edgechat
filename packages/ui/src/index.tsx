@@ -12,6 +12,10 @@ export function anchoredScrollTop(previousHeight: number, nextHeight: number, cu
   return Math.max(0, currentTop + Math.max(0, nextHeight - previousHeight));
 }
 
+export function isNearMessageListBottom(scrollHeight: number, scrollTop: number, clientHeight: number, threshold = 100): boolean {
+  return scrollHeight - scrollTop - clientHeight < Math.max(0, threshold);
+}
+
 export interface VirtualLayoutItem {
   key: string;
   index: number;
@@ -59,6 +63,8 @@ export function virtualRange(layout: VirtualLayout, scrollTop: number, viewportH
 
 export interface VirtualMessageListHandle {
   scrollToKey(key: string, align?: "start" | "center" | "end"): boolean;
+  scrollToEnd(): void;
+  isNearBottom(): boolean;
 }
 
 export function ChatViewport(props: { header: JSX.Element; messages?: JSX.Element; messageList?: JSX.Element; composer: JSX.Element }) {
@@ -92,6 +98,7 @@ export function VirtualMessageList(props: {
   estimateHeight?: number;
   overscan?: number;
   onReady?: (handle: VirtualMessageListHandle | null) => void;
+  onNearBottomChange?: (nearBottom: boolean) => void;
 }) {
   let element: HTMLDivElement | undefined;
   let contentElement: HTMLDivElement | undefined;
@@ -113,9 +120,15 @@ export function VirtualMessageList(props: {
   });
   const visibleItems = createMemo(() => layout().items.slice(visible().start, visible().end));
 
-  function captureAnchor(currentLayout = layout()) {
+  function updateNearBottom(next: boolean) {
+    if (nearBottom === next) return;
+    nearBottom = next;
+    props.onNearBottomChange?.(next);
+  }
+
+  function captureAnchor(currentLayout = layout(), measureBottom = true) {
     if (!element) return;
-    nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 100;
+    if (measureBottom) updateNearBottom(isNearMessageListBottom(element.scrollHeight, element.scrollTop, element.clientHeight));
     const virtualTop = Math.max(0, element.scrollTop - (contentElement?.offsetTop ?? 0) - beforeHeight());
     const item = currentLayout.items.find((candidate) => candidate.top + candidate.height > virtualTop) ?? currentLayout.items.at(-1);
     anchorKey = item?.key;
@@ -151,19 +164,25 @@ export function VirtualMessageList(props: {
       if (!item) return false;
       const top = (contentElement?.offsetTop ?? 0) + beforeHeight() + item.top;
       const offset = align === "center" ? (element.clientHeight - item.height) / 2 : align === "end" ? element.clientHeight - item.height : 0;
-      nearBottom = false;
       element.scrollTop = Math.max(0, top - offset);
       setScrollTop(element.scrollTop);
       captureAnchor();
       return true;
     },
+    scrollToEnd() {
+      if (!element) return;
+      element.scrollTop = element.scrollHeight;
+      setScrollTop(element.scrollTop);
+      captureAnchor();
+    },
+    isNearBottom() { return nearBottom; },
   };
 
   onMount(() => {
     if (!element) return;
     setViewportHeight(element.clientHeight);
     resizeObserver = new ResizeObserver((entries) => {
-      captureAnchor();
+      captureAnchor(layout(), false);
       let next = measuredHeights();
       let changed = false;
       for (const entry of entries) {
@@ -207,7 +226,7 @@ export function VirtualMessageList(props: {
     if (!element) return;
     if (context !== initializedContext) {
       initializedContext = context;
-      nearBottom = true;
+      updateNearBottom(true);
       anchorKey = undefined;
     }
     scheduleRestore();

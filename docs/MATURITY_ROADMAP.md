@@ -51,7 +51,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] Single-message text/image/file forwarding with destination-scoped aliases and zero-copy R2 reference accounting.
 - [x] Ordered multi-select forwarding with a 100-message bound, partial-failure retry state, durable local outbox admission and the same zero-copy R2 attachment grants.
 - [x] Explicit encrypted quote-block composition with whole-message/selected-text capture, stable references, bounded snapshots, local draft recovery and no extra R2 objects.
-- [x] MLS-encrypted read receipts, local unread counts, retry indicators, first-unread positioning with a stable local boundary, bounded arbitrary-local-history search navigation, jump-to-message without falsely reading new arrivals while inspecting old context, local-calendar date separators, and clipboard copying of decrypted text without network traffic.
+- [x] MLS-encrypted read receipts, local unread counts, retry indicators, first-unread positioning with a stable local boundary, bottom-aware read advancement, anchored new-message counts and return-to-latest controls, bounded arbitrary-local-history search navigation, jump-to-message without falsely reading new arrivals while inspecting old context, local-calendar date separators, and clipboard copying of decrypted text without network traffic.
 - [x] Authenticated, expiring WebSocket typing presence with no durable/R2 writes.
 - [x] MLS-encrypted, coalesced delivery receipts with per-user group counts and reload recovery.
 - [x] Device-local, opt-in online presence aggregated across a user's room sockets, with immediate disconnect reset, hidden-member filtering, no last-seen history, no stranger-request exposure, and no D1/R2 writes.

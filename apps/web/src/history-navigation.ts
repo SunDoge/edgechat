@@ -6,6 +6,14 @@ export function canApplyHistoryNavigation(expectedRevision: number, currentRevis
   return expectedRevision === currentRevision && requestedRoomId === selectedRoomId;
 }
 
-export function shouldMarkIncomingRead(focus: ActiveHistoryFocus, roomId: RoomId): boolean {
-  return focus?.roomId !== roomId;
+export function shouldMarkIncomingRead(focus: ActiveHistoryFocus, roomId: RoomId, nearBottom = true): boolean {
+  return nearBottom && focus?.roomId !== roomId;
+}
+
+export function countIncomingMessagesAfter(
+  messages: readonly { seq: number; sender: string; deleted_at: number | null }[],
+  currentUserId: string,
+  afterSeq: number,
+): number {
+  return messages.filter((message) => Number(message.seq) > afterSeq && message.sender !== currentUserId && !message.deleted_at).length;
 }
