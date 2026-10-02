@@ -61,6 +61,7 @@ import { canApplyHistoryNavigation, shouldMarkIncomingRead } from "./history-nav
 import { PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT } from "./tab-coordination";
 import { localRetentionCoverage } from "./retention-coverage";
 import { AttachmentCiphertextCache } from "./attachment-cache";
+import { AttachmentCiphertextLoader } from "./attachment-loader";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
 import { createDeviceHistoryBundle } from "./device-history-bundle";
 import { openRoomPeerRecovery, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
@@ -93,6 +94,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const api = new ApiClient("", props.accessToken);
   const db = new LocalDatabase(profileId);
   const attachmentCache = new AttachmentCiphertextCache(profileId);
+  const attachmentLoader = new AttachmentCiphertextLoader(
+    attachmentCache,
+    (id) => api.downloadAttachment(id),
+    async (id) => (await api.acknowledgeAttachmentRetention(id)).attachment_id,
+  );
   const archiveSegmentCache = new ArchiveSegmentCiphertextCache(profileId);
   const deviceHistoryStaging = deviceHistoryStagingFor(profileId);
   const initialNotice = sessionStorage.getItem("edgechat.local-profile-notice") ?? "";
@@ -1185,7 +1191,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const upload = await api.uploadAttachment(room.room_id, encryptedFile.ciphertext);
         uploadedIds.push(upload.attachment_id);
         if (await attachmentCache.put(upload.attachment_id, encryptedFile.ciphertext)) {
-          await acknowledgeCachedAttachment(upload.attachment_id, encryptedFile.ciphertext);
+          await attachmentLoader.acknowledgeCached(upload.attachment_id, encryptedFile.ciphertext);
         }
         attachments.push({ id: upload.attachment_id, name: selectedFile.name, type: selectedFile.type || "application/octet-stream", size: selectedFile.size, key: encryptedFile.key, nonce: encryptedFile.nonce, ...(dimensions ?? {}), ...(durationMs && selectedFiles.length === 1 ? { duration_ms: durationMs } : {}) });
       }
@@ -1319,6 +1325,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
       await outboxRef!.enqueue({ ...unsigned, signature }, messageText(payload), payload as unknown as Record<string, unknown>);
     });
+    await Promise.all(attachmentAliases.map((alias, index) => attachmentLoader.aliasCached(attachments[index]!.attachment.id, alias)));
     if (selectedRef === targetRoomId) setPendingMessages(await db.outbox(targetRoomId));
     if (successNotice !== false) setNotice(successNotice ?? `已转发到 ${roomTitle(targetRoom, currentSession.user_id)}`);
   }
@@ -2510,18 +2517,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     } catch (cause) { setNotice(cause instanceof Error ? cause.message : "附件解密失败"); }
   }
   async function loadAttachmentCiphertext(id: string): Promise<ArrayBuffer> {
-    const cached = await attachmentCache.get(id).catch(() => null);
-    if (cached) {
-      void acknowledgeCachedAttachment(id, cached).catch(() => undefined);
-      return cached;
-    }
-    const ciphertext = await api.downloadAttachment(id);
-    if (await attachmentCache.put(id, ciphertext)) void acknowledgeCachedAttachment(id, ciphertext).catch(() => undefined);
-    return ciphertext;
-  }
-  async function acknowledgeCachedAttachment(id: string, ciphertext: ArrayBuffer): Promise<void> {
-    const canonical = await api.acknowledgeAttachmentRetention(id);
-    if (canonical.attachment_id !== id) await attachmentCache.put(canonical.attachment_id, ciphertext);
+    return attachmentLoader.load(id);
   }
   async function decryptAttachment(attachment: AttachmentMetadata) {
     const ciphertext = await loadAttachmentCiphertext(attachment.id);

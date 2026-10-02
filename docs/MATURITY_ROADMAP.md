@@ -98,6 +98,7 @@ Voice/video calling and an in-chat application platform are later product decisi
 R2 is the encrypted blob/archive plane, never the live event database or search index.
 
 - Attachments use one opaque object because they have independent authorization and deletion lifecycles. Do not create thumbnail objects by default; derive/cache thumbnails locally.
+- Attachment reads are OPFS-first and single-flight per opaque ID. Concurrent render/save consumers share one cold R2 GET, successful retention acknowledgements are coalesced for the app session, and zero-copy forwarding aliases any available local ciphertext without an object read or write.
 - Profile avatars use one current client-resized WebP object per account, capped at 128 KiB. They are quota-accounted, content-addressed for idempotent retry, addressed publicly only through an opaque active ID, and replaced through an exact-key deletion ledger; no old versions or server thumbnails are retained.
 - A voice note is one ordinary encrypted attachment object. Timeline rendering must not auto-fetch it; the first explicit play/save action performs the authorized object read. Do not create server-side waveform, transcoding, or alternate-codec objects.
 - Device-local retention deletes local decrypted projections, indexes, and matching signed repair envelopes. It performs no R2 request and must not be presented as cloud quota reclamation; sender retraction/account deletion remain the flows that can schedule exact-key attachment deletion.
