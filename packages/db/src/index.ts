@@ -84,6 +84,11 @@ export const ROOM_UNREAD_COUNTS_SQL = `SELECT r.room_id,
   LEFT JOIN messages m ON m.room_id = r.room_id AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
   GROUP BY r.room_id, s.last_read_seq, p.manually_unread`;
 
+export const FIRST_UNREAD_VISIBLE_MESSAGE_SQL = `SELECT message_id, seq FROM messages m
+  WHERE room_id = $1 AND seq > $2 AND sender <> $3 AND deleted_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
+  ORDER BY seq ASC LIMIT 1`;
+
 export const APPLY_ROOM_PROFILE_SQL = `INSERT INTO room_profiles (room_id,event_id,event_seq,name,avatar,updated_by,updated_at)
   VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
   ON CONFLICT (room_id) DO UPDATE SET event_id = EXCLUDED.event_id, event_seq = EXCLUDED.event_seq,
@@ -679,6 +684,15 @@ export class LocalDatabase {
       [roomId, currentUserId],
     );
     return Number(row?.seq ?? 0);
+  }
+
+  async firstUnreadVisibleMessage(roomId: RoomId, currentUserId: string, afterSeq: number): Promise<{ message_id: string; seq: number } | null> {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid read sequence");
+    const [row] = await this.query<{ message_id: string; seq: number | string }>(
+      FIRST_UNREAD_VISIBLE_MESSAGE_SQL,
+      [roomId, afterSeq, currentUserId],
+    );
+    return row ? { message_id: row.message_id, seq: Number(row.seq) } : null;
   }
 
   async markRoomRead(roomId: RoomId, upToSeq: number): Promise<void> {

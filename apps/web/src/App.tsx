@@ -25,6 +25,7 @@ import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
 import { AuthScreen } from "./components/AuthScreen";
 import { MessageBubble } from "./components/MessageBubble";
 import { MessageDateSeparator } from "./components/MessageDateSeparator";
+import { UnreadMessageSeparator } from "./components/UnreadMessageSeparator";
 import { NewRoomDialog } from "./components/NewRoomDialog";
 import { PendingMessageBubble } from "./components/PendingMessageBubble";
 import { RoomListItem } from "./components/RoomListItem";
@@ -86,6 +87,7 @@ type OlderMessagesState = "checking" | "idle" | "loading" | "error" | "end";
 type ComposerQuote = { message: LocalMessage; text: string; displayName?: string };
 type TimelineEntry = { kind: "message"; key: string; message: LocalMessage } | { kind: "pending"; key: string; message: OutboxItem };
 type HistoryFocus = { roomId: RoomId; messageId: string; status: "loading" | "ready"; hasNewer: boolean };
+type UnreadBoundary = { roomId: RoomId; messageId: string; seq: number };
 type RoomIdentityTrust = { status: DeviceTrustState; verified: number; total: number };
 type ExportWritable = { write(data: string | ArrayBuffer | Blob): Promise<void>; close(): Promise<void>; abort(reason?: unknown): Promise<void> };
 type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<{ createWritable(): Promise<ExportWritable> }> };
@@ -176,6 +178,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [semanticStatus, setSemanticStatus] = createSignal<"idle" | "loading" | "ready" | "error">("idle");
   const [coverageComplete, setCoverageComplete] = createSignal(false);
   const [historyFocus, setHistoryFocus] = createSignal<HistoryFocus | null>(null);
+  const [unreadBoundary, setUnreadBoundary] = createSignal<UnreadBoundary | null>(null);
   const [historyRecoveryRooms, setHistoryRecoveryRooms] = createSignal<Set<RoomId>>(new Set());
   const [historyRecoveryStates, setHistoryRecoveryStates] = createSignal<Record<string, HistoryRecoveryViewState>>({});
   let syncRef: SyncEngine | null = null;
@@ -1157,7 +1160,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   createEffect(on(selectedId, (roomId) => {
     timelineNavigationRevision += 1;
+    const selectionRevision = timelineNavigationRevision;
     setHistoryFocus(null);
+    setUnreadBoundary(null);
     if (selectedRef && selectedRef !== roomId) flushComposerDraft(selectedRef);
     selectedRef = roomId;
     const restoreRevision = ++composerRevision;
@@ -1176,7 +1181,31 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (draft.mode === "edit" && target && target.sender === session()?.user_id && !target.deleted_at) setEditingMessage(target);
       projectComposerDraft(roomId, draft);
     })().catch((cause) => console.warn(JSON.stringify({ message: "local composer draft restore failed", room_id: roomId, error: cause instanceof Error ? cause.message : String(cause) })));
-    void refreshRoomProjection(roomId).then(() => markRoomRead(roomId));
+    void (async () => {
+      const currentUserId = session()?.user_id;
+      const unread = currentUserId
+        ? db.readState(roomId).then((state) => db.firstUnreadVisibleMessage(roomId, currentUserId, Number(state.last_read_seq)))
+        : Promise.resolve(null);
+      const [firstUnread] = await Promise.all([unread, refreshRoomProjection(roomId)]);
+      if (!canApplyHistoryNavigation(selectionRevision, timelineNavigationRevision, roomId, selectedRef)) return;
+      if (firstUnread) {
+        const boundary = { roomId, messageId: firstUnread.message_id, seq: firstUnread.seq };
+        if (!messages().some((message) => message.message_id === boundary.messageId)) {
+          const page = await db.messageWindow(roomId, boundary.seq);
+          if (!canApplyHistoryNavigation(selectionRevision, timelineNavigationRevision, roomId, selectedRef)) return;
+          if (!page.messages.some((message) => message.message_id === boundary.messageId)) throw new Error("无法打开第一条未读消息");
+          setMessages(page.messages);
+          setOlderMessagesState(page.hasOlder ? "idle" : "end");
+          setHistoryFocus({ roomId, messageId: boundary.messageId, status: "ready", hasNewer: page.hasNewer });
+        }
+        setUnreadBoundary(boundary);
+        window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+          if (selectedRef === roomId && unreadBoundary()?.messageId === boundary.messageId) timelineRef?.scrollToKey(`message:${boundary.messageId}`, "start");
+        }));
+        if (historyFocus()?.roomId === roomId) return;
+      }
+      await markRoomRead(roomId);
+    })().catch((cause) => setNotice(cause instanceof Error ? cause.message : "无法打开对话"));
     void refreshRoomIdentityTrust(roomId);
     void db.coverage(roomId).then((value) => setCoverageComplete(value.history_complete));
     void syncRef?.connectRoom(roomId);
@@ -2070,7 +2099,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     timelineNavigationRevision += 1;
     setHistoryFocus(null);
     setOlderMessagesState("checking");
-    try { await refreshRoomProjection(roomId, true); }
+    try { await refreshRoomProjection(roomId, true); await markRoomRead(roomId); setUnreadBoundary(null); }
     catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法读取最新消息"); }
   }
   async function openDevices() {
@@ -2969,7 +2998,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             const target = () => payload().relation?.target.message_id ? messages().find((candidate) => candidate.message_id === payload().relation?.target.message_id) : undefined;
             const readBy = () => readReceipts().filter((receipt) => receipt.user_id !== currentSession().user_id && Number(receipt.last_read_seq) >= Number(message.seq)).length;
             const deliveredBy = () => deliveryReceipts().filter((receipt) => receipt.user_id !== currentSession().user_id && Number(receipt.last_delivered_seq) >= Number(message.seq)).length;
-            return <>{dateSeparator}<MessageBubble message={message} currentUserId={currentSession().user_id} group={room().kind === "group" && room().purpose === "chat"} displayName={(userId) => memberName(room(), userId)} linkPreviews={linkPreviews()} retracting={pendingDeleteTargets().has(message.event_id)} readBy={readBy()} deliveredBy={deliveredBy()} relationPreview={target() ? { sender: target()!.sender, text: target()!.plaintext, deleted: Boolean(target()!.deleted_at) } : undefined} reactions={reactions().filter((reaction) => reaction.message_id === message.message_id)} downloadAttachment={(attachment) => void downloadAttachment(attachment)} decryptAttachment={decryptAttachment} indexImage={indexImage} retract={(item) => void retractMessage(item)} reply={beginReply} quote={beginQuote} forward={(item) => setForwardingMessages([item])} save={(item) => void saveMessage(item)} copyText={(text) => void copyMessageText(text)} canSave={room().purpose !== "saved"} saving={savingMessageId() === message.message_id} selecting={selectedMessageIds().size > 0} selected={selectedMessageIds().has(message.message_id)} select={toggleMessageSelection} edit={beginEdit} react={(item, reaction) => void reactToMessage(item, reaction)} jumpToMessage={jumpToMessage} openMessageReference={openMessageReference} openContact={openSharedContact}/></>;
+            const unreadSeparator = unreadBoundary()?.roomId === room().room_id && unreadBoundary()?.messageId === message.message_id ? <UnreadMessageSeparator/> : null;
+            return <>{dateSeparator}{unreadSeparator}<MessageBubble message={message} currentUserId={currentSession().user_id} group={room().kind === "group" && room().purpose === "chat"} displayName={(userId) => memberName(room(), userId)} linkPreviews={linkPreviews()} retracting={pendingDeleteTargets().has(message.event_id)} readBy={readBy()} deliveredBy={deliveredBy()} relationPreview={target() ? { sender: target()!.sender, text: target()!.plaintext, deleted: Boolean(target()!.deleted_at) } : undefined} reactions={reactions().filter((reaction) => reaction.message_id === message.message_id)} downloadAttachment={(attachment) => void downloadAttachment(attachment)} decryptAttachment={decryptAttachment} indexImage={indexImage} retract={(item) => void retractMessage(item)} reply={beginReply} quote={beginQuote} forward={(item) => setForwardingMessages([item])} save={(item) => void saveMessage(item)} copyText={(text) => void copyMessageText(text)} canSave={room().purpose !== "saved"} saving={savingMessageId() === message.message_id} selecting={selectedMessageIds().size > 0} selected={selectedMessageIds().has(message.message_id)} select={toggleMessageSelection} edit={beginEdit} react={(item, reaction) => void reactToMessage(item, reaction)} jumpToMessage={jumpToMessage} openMessageReference={openMessageReference} openContact={openSharedContact}/></>;
           }}
         /><Show when={historyFocus()?.roomId === room().room_id ? historyFocus() : null}>{(focus) => <div class="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-4"><Show when={focus().status === "ready"} fallback={<div class="rounded-full bg-neutral-900/90 px-4 py-2 text-sm font-medium text-white shadow-lg" role="status">正在打开历史消息…</div>}><button type="button" class="pointer-events-auto flex min-h-10 items-center gap-1.5 rounded-full bg-neutral-900 px-4 text-sm font-semibold text-white shadow-lg hover:bg-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => void returnToLatestMessages()}><IconChevronDown class="size-4 stroke-white"/>{focus().hasNewer ? "回到最新消息" : "退出历史查看"}</button></Show></div>}</Show></div>}
         composer={<div>

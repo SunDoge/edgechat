@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
-import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, MARK_EVENT_PROCESSED_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
+import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
 import { LOCAL_CLEAR_ACCOUNT_DATA, LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
 import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4, LOCAL_SCHEMA_V5 } from "./migrations";
 import { purgeRoomBefore, setRoomRetention } from "./retention";
@@ -489,6 +489,12 @@ describe("PGlite local full-text index", () => {
        WHERE m.room_id = $1 AND m.seq > s.last_read_seq AND m.sender <> '@alice:example.com' AND m.deleted_at IS NULL`, [room],
     );
     expect(unread.rows[0].count).toBe(1);
+    await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload)
+      VALUES ('m4','$message4:example.com',$1,4,'@carol:example.com','c','message.text',4,'c','hidden','{}')`, [room]);
+    await db.query("INSERT INTO room_hidden_senders VALUES ($1,'@carol:example.com',4)", [room]);
+    expect((await db.query(FIRST_UNREAD_VISIBLE_MESSAGE_SQL, [room, 1, "@alice:example.com"])).rows)
+      .toEqual([{ message_id: "$message2:example.com", seq: 2 }]);
+    expect((await db.query(FIRST_UNREAD_VISIBLE_MESSAGE_SQL, [room, 2, "@alice:example.com"])).rows).toEqual([]);
     await db.query("UPDATE room_read_state SET last_read_seq = 3 WHERE room_id = $1", [room]);
     await db.query("INSERT INTO room_preferences (room_id,manually_unread,updated_at) VALUES ($1,TRUE,2)", [room]);
     expect((await db.query<{ unread_count: number; last_read_seq: number }>(ROOM_UNREAD_COUNTS_SQL, ["@alice:example.com"])).rows)
