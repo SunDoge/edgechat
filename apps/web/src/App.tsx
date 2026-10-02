@@ -36,6 +36,7 @@ import { LocalImageSemanticSearch } from "./semantic-search";
 import { replenishMlsKeyPackages } from "./key-package-replenishment";
 import { applyRoomPreferenceAction, defaultRoomPreference, organizedRooms, type RoomPreferenceAction } from "./room-preferences";
 import { createPortableBackupBlob, readPortableBackup, writePortableBackup } from "./portable-backup";
+import { canCreateMemoryPortableBackup, clearPortableBackupStaging, stagePortableBackup } from "./portable-backup-staging";
 import { DeviceLinkApprovalDialog } from "./components/DeviceLinkApprovalDialog";
 import { VoiceRecorder } from "./components/VoiceRecorder";
 import { DRAFT_SAVE_DELAY_MS, canApplyLoadedDraft, composerDraftPreview } from "./composer-drafts";
@@ -1994,6 +1995,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const filename = `edgechat-backup-${new Date().toISOString().slice(0, 10)}.edgechat-backup`;
     const pickerWindow = window as ExportPickerWindow;
     let writable: ExportWritable | null = null;
+    let stagedCleanup: (() => Promise<void>) | null = null;
     try {
       if (pickerWindow.showSaveFilePicker) {
         const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: "EdgeChat encrypted backup", accept: { "application/vnd.edgechat.backup": [".edgechat-backup"] } }] });
@@ -2001,14 +2003,25 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await writePortableBackup(input, async (bytes) => writable!.write(bytes.slice().buffer as ArrayBuffer));
         await writable.close(); writable = null;
       } else {
-        const backup = await createPortableBackupBlob(input);
+        let backup: Blob;
+        const localStorageManager = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
+        if (localStorageManager?.getDirectory) {
+          const staged = await stagePortableBackup(profileId, input);
+          backup = staged.file; stagedCleanup = staged.cleanup;
+        } else {
+          if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new Error("这个备份较大，当前浏览器无法安全保存。请使用支持网站持久存储的新版浏览器，或在桌面浏览器中重试");
+          backup = await createPortableBackupBlob(input);
+        }
         const url = URL.createObjectURL(backup); const anchor = document.createElement("a");
         anchor.href = url; anchor.download = filename; anchor.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        const cleanup = stagedCleanup;
+        window.setTimeout(() => { URL.revokeObjectURL(url); if (cleanup) void cleanup().catch(() => undefined); }, 5 * 60_000);
+        stagedCleanup = null;
       }
       setNotice("加密本机备份已保存；它没有占用服务器或 R2 存储");
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined);
+      await stagedCleanup?.().catch(() => undefined);
       if (cause instanceof DOMException && cause.name === "AbortError") throw new Error("已取消保存备份");
       throw cause;
     }
@@ -2057,7 +2070,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const registration = await navigator.serviceWorker.ready.catch(() => null);
       await registration?.pushManager.getSubscription().then((subscription) => subscription?.unsubscribe()).catch(() => undefined);
       await clearPushConfig().catch(() => undefined);
-      await Promise.all([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile()]);
+      await Promise.all([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId)]);
     } catch { localCleanupFailed = true; }
     semanticRef?.close(); semanticRef = null;
     mlsRef?.destroy(); mlsRef = null; identityRef = null;
@@ -2499,7 +2512,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function removeCurrentLocalProfile(): Promise<void> {
     syncRef?.stop(); outboxRef?.stop(); archiveRef?.close();
     await disablePush(api).catch(() => clearPushConfig());
-    const cleanup = await Promise.allSettled([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearIdentity(profileId)]);
+    const cleanup = await Promise.allSettled([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearIdentity(profileId)]);
     if (cleanup.some((result) => result.status === "rejected")) throw new Error("未能完全删除该身份的本机数据；身份仍保留，请重试或清除本站数据");
     clearPendingDeviceLink(profileId);
     localStorage.removeItem(profileSessionKey(profileId, "account-appeal-receipt"));

@@ -24,7 +24,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] Sender-only deletion/tombstone flow that removes local search content and decrements usage only after attachment object deletion succeeds.
 - [x] Paginated account export plus resumable account deletion covering local plaintext, exact-key R2 cleanup, private-room Durable Objects, shared-room ownership transfer, and client-produced MLS Remove Commits.
 - [x] Durable message outbox with unchanged-ciphertext retry, event-ID idempotency, reload recovery, exponential backoff and visible send states.
-- [x] Client-only backup/restore with versioned, chunk-authenticated encrypted PGlite, device-key, and OpenMLS snapshots; no R2/S3 duplication.
+- [x] Client-only backup/restore with versioned, chunk-authenticated encrypted PGlite, device-key, and OpenMLS snapshots; large exports stream to native files or encrypted profile-scoped OPFS staging, the whole-Blob fallback is capped at 128 MiB, interrupted/stale staging is bounded and cleaned, and no R2/S3 copy is created.
 - [x] Typed Dexie wrappers for device keys and temporary browser staging, preserving existing IndexedDB schemas while leaving PGlite storage exclusively under PGlite control.
 - [x] User-initiated browser persistent-storage protection with approximate origin quota pressure, explicit best-effort/unsupported states, and clear separation from cloud R2 quota and encrypted backup; zero network or object-storage traffic.
 
