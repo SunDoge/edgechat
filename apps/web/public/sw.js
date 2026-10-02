@@ -1,4 +1,5 @@
-const CACHE = "edgechat-shell-v8";
+const CACHE = "edgechat-shell-__BUILD_ID__";
+const PRECACHE = ["__EDGECHAT_PRECACHE__"].filter(path => path.startsWith("/assets/"));
 const SHARE_DATABASE = "edgechat-share-target";
 const SHARE_STORE = "shares";
 const PUSH_DATABASE = "edgechat-push";
@@ -115,11 +116,11 @@ async function stageShareTarget(request) {
 
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
-    await (await caches.open(CACHE)).addAll(["/", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png", "/apple-touch-icon.png", "/manifest.webmanifest"]);
+    await (await caches.open(CACHE)).addAll(["/", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png", "/apple-touch-icon.png", "/manifest.webmanifest", ...PRECACHE]);
     if (!self.registration.active) await self.skipWaiting();
   })());
 });
-self.addEventListener("activate", event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))); self.clients.claim(); });
+self.addEventListener("activate", event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith("edgechat-shell-") && key !== CACHE).map(key => caches.delete(key))))); self.clients.claim(); });
 self.addEventListener("message", event => {
   if (event.data?.type === "SKIP_WAITING") event.waitUntil(self.skipWaiting());
 });
@@ -131,11 +132,28 @@ self.addEventListener("fetch", event => {
   }
   if (event.request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
   const cacheKey = event.request.mode === "navigate" ? new Request("/") : event.request;
+  if (url.pathname.startsWith("/assets/") && !event.request.headers.has("range")) {
+    event.respondWith(caches.match(cacheKey).then(async hit => {
+      if (hit) return hit;
+      const response = await fetch(event.request);
+      if (response.ok) await (await caches.open(CACHE)).put(cacheKey, response.clone());
+      return response;
+    }));
+    return;
+  }
   const network = fetch(event.request);
   event.waitUntil(network.then(async response => {
     if (response.ok) await (await caches.open(CACHE)).put(cacheKey, response.clone());
   }).catch(() => undefined));
-  event.respondWith(network.catch(() => caches.match(cacheKey).then(hit => hit || caches.match("/"))));
+  event.respondWith(network.catch(async error => {
+    const hit = await caches.match(cacheKey);
+    if (hit) return hit;
+    if (event.request.mode === "navigate") {
+      const shell = await caches.match("/");
+      if (shell) return shell;
+    }
+    throw error;
+  }));
 });
 self.addEventListener("push", event => {
   const badge = typeof self.navigator?.setAppBadge === "function" ? self.navigator.setAppBadge().catch(() => undefined) : Promise.resolve();
