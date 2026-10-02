@@ -107,6 +107,10 @@ export type PeerRecoveryLease = {
   recovery_id: string; room_id: RoomId; target_device_id: string; after_seq: number; through_seq: number;
   encryption_key: JsonWebKey; token: string; lease_expires_at: number;
 };
+export type AccountAppealCategory = "login_locked" | "device_lost" | "account_access";
+export type AccountAppealStatus = "pending" | "approved" | "denied" | "expired";
+export type AccountAppealReceipt = { receipt: string; status: "pending"; expires_at: number };
+export type AccountAppealState = { status: AccountAppealStatus; expires_at: number; resolved_at: number | null };
 
 export class ApiClient {
   constructor(public readonly baseUrl = "", private token: string | null = null) {}
@@ -115,6 +119,10 @@ export class ApiClient {
 
   register(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/register", { method: "POST", body: JSON.stringify(payload) }); }
   login(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/login", { method: "POST", body: JSON.stringify(payload) }); }
+  createAccountAppeal(userId: string, password: string, category: AccountAppealCategory) {
+    return this.request<AccountAppealReceipt>("/api/v1/appeals", { method: "POST", body: JSON.stringify({ user_id: userId, password, category }) });
+  }
+  accountAppealStatus(receipt: string) { return this.request<AccountAppealState>(`/api/v1/appeals/${encodeURIComponent(receipt)}`); }
   createDeviceLink(payload: Record<string, unknown>) { return this.request<{ link_id: string; secret: string; expires_at: number; server_name: string }>("/api/v1/device-links", { method: "POST", body: JSON.stringify(payload) }); }
   deviceLinkStatus(linkId: string, secret: string) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/status`, { headers: { "x-device-link-secret": secret } }); }
   uploadDeviceLinkPackages(linkId: string, secret: string, packages: string[]) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/key-packages`, { method: "POST", headers: { "x-device-link-secret": secret }, body: JSON.stringify({ mls_key_packages: packages }) }); }

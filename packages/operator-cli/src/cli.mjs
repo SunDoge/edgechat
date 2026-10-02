@@ -15,12 +15,14 @@ Commands:
   storage [--limit N] [--cursor USER_ID] [--all]
   reports [--status open|confirmed|dismissed|all] [--limit N] [--cursor REPORT_ID] [--all]
   report REPORT_ID --resolution confirmed|dismissed [--note TEXT]
+  appeals [--status pending|approved|denied|all] [--limit N] [--cursor APPEAL_ID] [--all]
+  appeal APPEAL_ID --resolution approved|denied [--unlock-login] [--note TEXT]
   login-locks [--status active|all] [--limit N] [--cursor USER_ID] [--all]
   login-unlock USER_ID [--note TEXT]
   retention ROOM_ID
   retention ROOM_ID --days N|indefinite [--minimum-device-copies N]
 
-The rooms, storage, reports, and login-lock commands use D1 only; they never list R2.`;
+The rooms, storage, reports, appeals, and login-lock commands use D1 only; they never list R2.`;
 }
 
 function integer(value, label, minimum, maximum) {
@@ -32,20 +34,22 @@ function integer(value, label, minimum, maximum) {
 export function parseArguments(argv, env = process.env) {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { help: true };
   const command = argv[0];
-  if (!new Set(["rooms", "storage", "reports", "report", "retention", "login-locks", "login-unlock"]).has(command)) throw new Error(`Unknown command: ${command}`);
+  if (!new Set(["rooms", "storage", "reports", "report", "appeals", "appeal", "retention", "login-locks", "login-unlock"]).has(command)) throw new Error(`Unknown command: ${command}`);
   const values = { command, baseUrl: env.EDGECHAT_URL ?? "", token: env.EDGECHAT_OPERATOR_TOKEN ?? "", limit: 50, all: false };
   let index = 1;
-  if (command === "retention" || command === "report" || command === "login-unlock") {
+  if (command === "retention" || command === "report" || command === "appeal" || command === "login-unlock") {
     const id = argv[index++];
-    const idLabel = command === "retention" ? "ROOM_ID" : command === "report" ? "REPORT_ID" : "USER_ID";
+    const idLabel = command === "retention" ? "ROOM_ID" : command === "report" ? "REPORT_ID" : command === "appeal" ? "APPEAL_ID" : "USER_ID";
     if (!id || id.startsWith("--")) throw new Error(`${command} requires ${idLabel}`);
     if (command === "retention") values.roomId = id;
     else if (command === "report") values.reportId = id;
+    else if (command === "appeal") values.appealId = id;
     else values.userId = id;
   }
   while (index < argv.length) {
     const arg = argv[index++];
     if (arg === "--all") { values.all = true; continue; }
+    if (arg === "--unlock-login") { values.unlockLogin = true; continue; }
     const value = argv[index++];
     if (!value) throw new Error(`Missing value for ${arg}`);
     if (arg === "--limit") values.limit = integer(value, "--limit", 1, 100);
@@ -63,12 +67,17 @@ export function parseArguments(argv, env = process.env) {
   if (command === "rooms" && values.policy && !new Set(["all", "finite", "indefinite"]).has(values.policy)) throw new Error("--policy must be all, finite, or indefinite");
   if (command !== "rooms" && values.policy) throw new Error("--policy is valid only for rooms");
   if (command === "reports" && values.status && !new Set(["open", "confirmed", "dismissed", "all"]).has(values.status)) throw new Error("--status must be open, confirmed, dismissed, or all");
+  if (command === "appeals" && values.status && !new Set(["pending", "approved", "denied", "all"]).has(values.status)) throw new Error("--status must be pending, approved, denied, or all");
   if (command === "login-locks" && values.status && !new Set(["active", "all"]).has(values.status)) throw new Error("--status must be active or all");
-  if (command !== "reports" && command !== "login-locks" && values.status) throw new Error("--status is valid only for reports or login-locks");
+  if (command !== "reports" && command !== "appeals" && command !== "login-locks" && values.status) throw new Error("--status is valid only for reports, appeals, or login-locks");
   if (command === "report" && !new Set(["confirmed", "dismissed"]).has(values.resolution)) throw new Error("report requires --resolution confirmed|dismissed");
-  if (command !== "report" && values.resolution) throw new Error("--resolution requires the report command");
-  if (command !== "report" && command !== "login-unlock" && values.note) throw new Error("--note requires the report or login-unlock command");
+  if (command === "appeal" && !new Set(["approved", "denied"]).has(values.resolution)) throw new Error("appeal requires --resolution approved|denied");
+  if (command !== "report" && command !== "appeal" && values.resolution) throw new Error("--resolution requires the report or appeal command");
+  if (command !== "report" && command !== "appeal" && command !== "login-unlock" && values.note) throw new Error("--note requires the report, appeal, or login-unlock command");
+  if (values.unlockLogin && command !== "appeal") throw new Error("--unlock-login requires the appeal command");
+  if (values.unlockLogin && values.resolution !== "approved") throw new Error("--unlock-login requires an approved appeal");
   if (command === "report" && (values.policy || values.cursor || values.all || values.limit !== 50)) throw new Error("pagination options are not valid for report");
+  if (command === "appeal" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status)) throw new Error("pagination options are not valid for appeal");
   if (command === "retention" && (values.policy || values.cursor || values.all || values.limit !== 50)) throw new Error("pagination options are not valid for retention");
   if (command === "login-unlock" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status)) throw new Error("pagination options are not valid for login-unlock");
   if (command !== "retention" && (values.retentionDays !== undefined || values.minimumDeviceCopies !== undefined)) throw new Error("retention options require the retention command");
@@ -92,6 +101,7 @@ async function allPages(first, loadNext, collection) {
 export async function run(options, fetchImpl = globalThis.fetch) {
   const client = new OperatorClient({ baseUrl: options.baseUrl, token: options.token, fetchImpl });
   if (options.command === "report") return client.resolveReport(options.reportId, { resolution: options.resolution, note: options.note });
+  if (options.command === "appeal") return client.resolveAppeal(options.appealId, { resolution: options.resolution, unlockLogin: options.unlockLogin, note: options.note });
   if (options.command === "login-unlock") return client.unlockLogin(options.userId, { note: options.note });
   if (options.command === "retention") {
     if (options.retentionDays === undefined) return client.retention(options.roomId);
@@ -106,6 +116,11 @@ export async function run(options, fetchImpl = globalThis.fetch) {
     const request = (cursor) => client.reports({ limit: options.limit, cursor, status: options.status ?? "open" });
     const first = await request(options.cursor);
     return options.all ? allPages(first, request, "reports") : first;
+  }
+  if (options.command === "appeals") {
+    const request = (cursor) => client.appeals({ limit: options.limit, cursor, status: options.status ?? "pending" });
+    const first = await request(options.cursor);
+    return options.all ? allPages(first, request, "appeals") : first;
   }
   if (options.command === "login-locks") {
     const request = (cursor) => client.loginLocks({ limit: options.limit, cursor, status: options.status ?? "active" });

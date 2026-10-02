@@ -1,7 +1,7 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, type ClientEvent, type DraftEnvelope, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
-import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupExpiredDeviceLinks, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
+import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
 import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push";
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
 import type { Env } from "../src/env";
@@ -155,6 +155,52 @@ it("lets the operator inspect and idempotently clear login locks with a D1-only 
   const repeated = await SELF.fetch(endpoint, { method: "POST", headers: { ...operatorHeaders, "content-type": "application/json" }, body: "{}" });
   expect(await repeated.json()).toEqual({ user_id: account.user_id, unlocked: false, action: null });
   expect(await env.DB.prepare("SELECT count(*) AS count FROM operator_login_unlock_actions WHERE user_id = ?").bind(account.user_id).first()).toEqual({ count: 1 });
+  expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+});
+
+it("accepts privacy-preserving account appeals and lets an operator resolve a verified login lock without R2", async () => {
+  const typedEnv = env as unknown as Env;
+  const currentDevice = await device("appeal-device");
+  const account = await register("appeal_owner", currentDevice);
+  const now = Date.now();
+  for (let attempt = 0; attempt < LOGIN_FAILURE_LIMIT; attempt += 1) await recordLoginFailure(typedEnv, account.user_id, now + attempt);
+
+  const submit = (userId: string, password: string) => SELF.fetch("https://edgechat.test/api/v1/appeals", {
+    method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": `appeal-${crypto.randomUUID()}` },
+    body: JSON.stringify({ user_id: userId, password, category: "login_locked" }),
+  });
+  const fakeResponse = await submit("missing_appeal_user", "incorrect-password");
+  const fake = await fakeResponse.json() as { receipt: string; status: string; expires_at: number };
+  expect(fakeResponse.status).toBe(202);
+  expect(fake).toMatchObject({ status: "pending" });
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM account_appeals").first()).toEqual({ count: 0 });
+  expect(await (await SELF.fetch(`https://edgechat.test/api/v1/appeals/${fake.receipt}`, { headers: { "cf-connecting-ip": `appeal-${crypto.randomUUID()}` } })).json()).toMatchObject({ status: "pending", expires_at: fake.expires_at });
+
+  const realResponse = await submit(account.user_id, "correct-horse-battery");
+  const real = await realResponse.json() as { receipt: string; status: string; expires_at: number };
+  expect(realResponse.status).toBe(202);
+  expect(Object.keys(real).sort()).toEqual(Object.keys(fake).sort());
+  const stored = await env.DB.prepare("SELECT appeal_id, user_id, category, status, receipt_hash FROM account_appeals").first<Record<string, unknown>>();
+  expect(stored).toMatchObject({ user_id: account.user_id, category: "login_locked", status: "pending" });
+  expect(stored?.receipt_hash).not.toBe(real.receipt);
+  expect(JSON.stringify(stored)).not.toContain("correct-horse-battery");
+
+  const operatorHeaders = { authorization: "Bearer operator-test-token-with-at-least-32-bytes" };
+  expect((await SELF.fetch("https://edgechat.test/api/v1/operator/appeals", { headers: { authorization: `Bearer ${account.access_token}` } })).status).toBe(401);
+  const listed = await SELF.fetch("https://edgechat.test/api/v1/operator/appeals?status=pending&limit=10", { headers: operatorHeaders });
+  expect(await listed.json()).toMatchObject({ totals: { pending: 1 }, appeals: [{ user_id: account.user_id, category: "login_locked", status: "pending" }] });
+  const appealId = String(stored?.appeal_id);
+  const resolved = await SELF.fetch(`https://edgechat.test/api/v1/operator/appeals/${appealId}`, {
+    method: "PUT", headers: { ...operatorHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ resolution: "approved", unlock_login: true, note: "password ownership verified by intake" }),
+  });
+  expect(resolved.status, await resolved.clone().text()).toBe(200);
+  expect(await resolved.json()).toMatchObject({ appeal: { status: "approved" }, action: { resolution: "approved", login_unlocked: true } });
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM login_failure_state WHERE user_id = ?").bind(account.user_id).first()).toEqual({ count: 0 });
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM operator_appeal_actions WHERE appeal_id = ?").bind(appealId).first()).toEqual({ count: 1 });
+  expect(await (await SELF.fetch(`https://edgechat.test/api/v1/appeals/${real.receipt}`, { headers: { "cf-connecting-ip": `appeal-${crypto.randomUUID()}` } })).json()).toMatchObject({ status: "approved" });
+
+  expect(await cleanupAccountAppeals(typedEnv, Date.now() + 31 * 24 * 60 * 60_000)).toBe(1);
   expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 });
 

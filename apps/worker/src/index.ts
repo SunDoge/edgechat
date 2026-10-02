@@ -47,6 +47,8 @@ const CONSUMED_KEY_PACKAGE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_USER_R2_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_USER_R2_OBJECT_LIMIT = 100_000;
 const MAX_PROFILE_AVATAR_BYTES = 128 * 1024;
+const ACCOUNT_APPEAL_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const RESOLVED_APPEAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const UNCOMMITTED_ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const PENDING_R2_WRITE_TTL_MS = 15 * 60 * 1_000;
 const visibleMessageEventTypes = new Set(["message.text", "message.file", "message.image", "message.contact"]);
@@ -457,6 +459,63 @@ async function operatorReports(url: URL, env: Env): Promise<Response> {
     totals: { total: Number(totals.total), open: Number(totals.open ?? 0), confirmed: Number(totals.confirmed ?? 0), dismissed: Number(totals.dismissed ?? 0) },
     reports: page, next_cursor: hasMore ? page.at(-1)?.report_id ?? null : null,
   });
+}
+
+async function operatorAppeals(url: URL, env: Env): Promise<Response> {
+  const db = createDatabase(env.DB);
+  const requestedLimit = Number(url.searchParams.get("limit") ?? 50);
+  if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) throw new HttpError(400, "Invalid limit", "invalid_input");
+  const cursor = url.searchParams.get("cursor");
+  if (cursor && (cursor.length > 64 || !/^[A-Za-z0-9_-]+$/.test(cursor))) throw new HttpError(400, "Invalid cursor", "invalid_input");
+  const status = url.searchParams.get("status") ?? "pending";
+  if (status !== "all" && status !== "pending" && status !== "approved" && status !== "denied") throw new HttpError(400, "Invalid appeal status", "invalid_input");
+  let query = db.selectFrom("account_appeals").select([
+    "appeal_id", "user_id", "category", "status", "created_at", "updated_at", "expires_at", "resolved_at",
+  ]).orderBy("appeal_id").limit(requestedLimit + 1);
+  if (cursor) query = query.where("appeal_id", ">", cursor);
+  if (status !== "all") query = query.where("status", "=", status);
+  const [rows, totals] = await Promise.all([
+    query.execute(),
+    db.selectFrom("account_appeals").select([
+      sql<number>`count(*)`.as("total"),
+      sql<number>`sum(case when status = 'pending' then 1 else 0 end)`.as("pending"),
+      sql<number>`sum(case when status = 'approved' then 1 else 0 end)`.as("approved"),
+      sql<number>`sum(case when status = 'denied' then 1 else 0 end)`.as("denied"),
+    ]).executeTakeFirstOrThrow(),
+  ]);
+  const hasMore = rows.length > requestedLimit; const page = hasMore ? rows.slice(0, requestedLimit) : rows;
+  return json({
+    totals: { total: Number(totals.total), pending: Number(totals.pending ?? 0), approved: Number(totals.approved ?? 0), denied: Number(totals.denied ?? 0) },
+    appeals: page, next_cursor: hasMore ? page.at(-1)?.appeal_id ?? null : null,
+  });
+}
+
+async function operatorResolveAppeal(request: Request, env: Env, appealId: string): Promise<Response> {
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(appealId)) throw new HttpError(400, "Invalid appeal ID", "invalid_input");
+  const body = await readJson(request, 2_048); const resolution = body.resolution;
+  if (resolution !== "approved" && resolution !== "denied") throw new HttpError(400, "Invalid appeal resolution", "invalid_input");
+  const unlockLogin = body.unlock_login === true;
+  if (body.unlock_login !== undefined && typeof body.unlock_login !== "boolean") throw new HttpError(400, "unlock_login must be boolean", "invalid_input");
+  const note = body.note === undefined || body.note === null ? null : stringField(body, "note", 500).trim() || null;
+  const db = createDatabase(env.DB);
+  const appeal = await db.selectFrom("account_appeals").select(["appeal_id", "user_id", "category", "status"])
+    .where("appeal_id", "=", appealId).executeTakeFirst();
+  if (!appeal) throw new HttpError(404, "Appeal not found", "not_found");
+  if (appeal.status !== "pending") throw new HttpError(409, "Appeal has already been resolved", "appeal_resolved");
+  if (unlockLogin && (resolution !== "approved" || appeal.category !== "login_locked")) {
+    throw new HttpError(400, "Login unlock is valid only for approved login-lock appeals", "invalid_input");
+  }
+  const now = Date.now(); const actionId = randomId(18);
+  await batch(env.DB, [
+    db.updateTable("account_appeals").set({ status: resolution, updated_at: now, resolved_at: now })
+      .where("appeal_id", "=", appealId).where("status", "=", "pending"),
+    db.insertInto("operator_appeal_actions").values({ action_id: actionId, appeal_id: appealId, resolution, login_unlocked: unlockLogin ? 1 : 0, note, created_at: now }),
+    ...(unlockLogin ? [db.deleteFrom("login_failure_state").where("user_id", "=", appeal.user_id)] : []),
+  ]);
+  const updated = await db.selectFrom("account_appeals").select([
+    "appeal_id", "user_id", "category", "status", "created_at", "updated_at", "expires_at", "resolved_at",
+  ]).where("appeal_id", "=", appealId).executeTakeFirstOrThrow();
+  return json({ appeal: updated, action: { action_id: actionId, resolution, login_unlocked: unlockLogin, note, created_at: now } });
 }
 
 async function operatorLoginLocks(url: URL, env: Env): Promise<Response> {
@@ -969,6 +1028,85 @@ async function register(request: Request, env: Env): Promise<Response> {
   }
   const token = await createSession(env, userId, deviceId);
   return json({ access_token: token, user_id: userId, device_id: deviceId, display_name: displayName, avatar_url: null, server_name: env.SERVER_NAME, ...sessionCapabilities(env) }, 201);
+}
+
+type AppealCategory = "login_locked" | "device_lost" | "account_access";
+
+function appealReceipt(now = Date.now()): string {
+  return `appeal_${now.toString(36)}_${randomId(24)}`;
+}
+
+function appealReceiptIssuedAt(receipt: string): number | null {
+  const match = receipt.match(/^appeal_([0-9a-z]{8,12})_([A-Za-z0-9_-]{32})$/);
+  if (!match) return null;
+  const issuedAt = Number.parseInt(match[1], 36);
+  return Number.isSafeInteger(issuedAt) && issuedAt > 0 ? issuedAt : null;
+}
+
+async function createAccountAppeal(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request, 2_048);
+  const identifier = stringField(body, "user_id", 128).trim().toLowerCase();
+  const userId = (identifier.startsWith("@") ? identifier : `@${identifier}:${env.SERVER_NAME}`) as UserId;
+  assertLocalId(userId, "@", env);
+  const password = stringField(body, "password", 256);
+  const category = body.category;
+  if (category !== "login_locked" && category !== "device_lost" && category !== "account_access") {
+    throw new HttpError(400, "Invalid appeal category", "invalid_input");
+  }
+  await limitUnauthenticatedRequest(request, env, "appeal", userId);
+  const now = Date.now(); const receipt = appealReceipt(now); const expiresAt = now + ACCOUNT_APPEAL_TTL_MS;
+  const db = createDatabase(env.DB);
+  const user = await db.selectFrom("users").select(["user_id", "password_hash", "password_salt", "deletion_requested_at", "deleted_at"])
+    .where("user_id", "=", userId).executeTakeFirst();
+  let verified = false;
+  if (user && user.deletion_requested_at === null && user.deleted_at === null) {
+    try { verified = password.length >= 10 && await verifyPassword(password.length >= 10 ? password : password.padEnd(10, "\0"), user.password_hash, user.password_salt); }
+    catch { verified = false; }
+  } else {
+    await passwordHash(password.length >= 10 ? password : password.padEnd(10, "\0"), new Uint8Array(16));
+  }
+  if (user && user.deletion_requested_at === null && user.deleted_at === null && !verified) await recordLoginFailure(env, userId);
+  if (verified) {
+    const receiptHash = await sha256(receipt);
+    const pending = await db.selectFrom("account_appeals").select("appeal_id")
+      .where("user_id", "=", userId).where("status", "=", "pending").executeTakeFirst();
+    if (pending) {
+      await db.updateTable("account_appeals").set({ receipt_hash: receiptHash, category: category as AppealCategory, updated_at: now, expires_at: expiresAt })
+        .where("appeal_id", "=", pending.appeal_id).execute();
+    } else {
+      await db.insertInto("account_appeals").values({
+        appeal_id: randomId(18), user_id: userId, receipt_hash: receiptHash, category: category as AppealCategory,
+        status: "pending", created_at: now, updated_at: now, expires_at: expiresAt, resolved_at: null,
+      }).execute();
+    }
+  }
+  // Invalid credentials receive an indistinguishable, self-expiring receipt,
+  // but cannot allocate durable D1 state or reveal whether an account exists.
+  return json({ receipt, status: "pending", expires_at: expiresAt }, 202);
+}
+
+async function accountAppealStatus(request: Request, env: Env, receipt: string): Promise<Response> {
+  const issuedAt = appealReceiptIssuedAt(receipt);
+  if (issuedAt === null) throw new HttpError(404, "Appeal not found", "not_found");
+  await limitUnauthenticatedRequest(request, env, "appeal", receipt);
+  const expiresAt = issuedAt + ACCOUNT_APPEAL_TTL_MS;
+  if (expiresAt <= Date.now()) return json({ status: "expired", expires_at: expiresAt });
+  const appeal = await createDatabase(env.DB).selectFrom("account_appeals").select(["status", "resolved_at"])
+    .where("receipt_hash", "=", await sha256(receipt)).executeTakeFirst();
+  return json({ status: appeal?.status ?? "pending", expires_at: expiresAt, resolved_at: appeal?.resolved_at ?? null });
+}
+
+export async function cleanupAccountAppeals(env: Env, now = Date.now()): Promise<number> {
+  const db = createDatabase(env.DB);
+  const row = await db.selectFrom("account_appeals").select(({ fn }) => fn.countAll<number>().as("count")).where((eb) => eb.or([
+      eb.and([eb("status", "=", "pending"), eb("expires_at", "<=", now)]),
+      eb.and([eb("status", "!=", "pending"), eb("resolved_at", "is not", null), eb("resolved_at", "<=", now - RESOLVED_APPEAL_RETENTION_MS)]),
+    ])).executeTakeFirstOrThrow();
+  if (Number(row.count) > 0) await db.deleteFrom("account_appeals").where((eb) => eb.or([
+    eb.and([eb("status", "=", "pending"), eb("expires_at", "<=", now)]),
+    eb.and([eb("status", "!=", "pending"), eb("resolved_at", "is not", null), eb("resolved_at", "<=", now - RESOLVED_APPEAL_RETENTION_MS)]),
+  ])).execute();
+  return Number(row.count);
 }
 
 async function login(request: Request, env: Env): Promise<Response> {
@@ -3759,6 +3897,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (!path.startsWith("/api/")) return env.ASSETS.fetch(request);
   if (path === "/api/v1/register" && request.method === "POST") return register(request, env);
   if (path === "/api/v1/login" && request.method === "POST") return login(request, env);
+  if (path === "/api/v1/appeals" && request.method === "POST") return createAccountAppeal(request, env);
+  const publicAppeal = path.match(/^\/api\/v1\/appeals\/([^/]+)$/);
+  if (publicAppeal && request.method === "GET") return accountAppealStatus(request, env, decodeURIComponent(publicAppeal[1]));
   if (path === "/api/v1/push/renew" && request.method === "POST") {
     const body = await readJson(request);
     await limitUnauthenticatedRequest(request, env, "push-renew", typeof body.renewal_token === "string" ? body.renewal_token : "missing");
@@ -3794,9 +3935,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (path === "/api/v1/operator/storage" && request.method === "GET") return operatorStorage(url, env);
     if (path === "/api/v1/operator/rooms" && request.method === "GET") return operatorRooms(url, env);
     if (path === "/api/v1/operator/reports" && request.method === "GET") return operatorReports(url, env);
+    if (path === "/api/v1/operator/appeals" && request.method === "GET") return operatorAppeals(url, env);
     if (path === "/api/v1/operator/login-locks" && request.method === "GET") return operatorLoginLocks(url, env);
     const reportResolution = path.match(/^\/api\/v1\/operator\/reports\/([^/]+)$/);
     if (reportResolution && request.method === "PUT") return operatorResolveReport(request, env, decodeURIComponent(reportResolution[1]));
+    const appealResolution = path.match(/^\/api\/v1\/operator\/appeals\/([^/]+)$/);
+    if (appealResolution && request.method === "PUT") return operatorResolveAppeal(request, env, decodeURIComponent(appealResolution[1]));
     if (path === "/api/v1/operator/event-receipt-keys" && request.method === "GET") return json(eventReceiptKeyStatus(env));
     const roomRetention = path.match(/^\/api\/v1\/operator\/rooms\/([^/]+)\/retention$/);
     if (roomRetention && (request.method === "GET" || request.method === "PUT")) {
@@ -4104,6 +4248,9 @@ export default {
       }),
       cleanupLoginFailureState(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "deleted expired login failure state", count }));
+      }),
+      cleanupAccountAppeals(env).then((count) => {
+        if (count) console.log(JSON.stringify({ message: "deleted expired account appeals", count }));
       }),
       cleanupExpiredDeviceLinks(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "cleaned expired device links", count }));

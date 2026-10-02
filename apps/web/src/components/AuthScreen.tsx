@@ -1,7 +1,7 @@
 import { Show, createSignal } from "solid-js";
 import { IconQrcode, IconShieldLock, IconUpload } from "@tabler/icons-solidjs";
 import { OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
-import type { ApiClient, SessionIdentity } from "@edgechat/sync";
+import type { AccountAppealCategory, AccountAppealStatus, ApiClient, SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { loadIdentity, saveIdentity } from "../vault";
 import { authErrorMessage } from "../auth-errors";
@@ -26,6 +26,12 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
   const [restoreConfirmed, setRestoreConfirmed] = createSignal(false);
   const [restoreBusy, setRestoreBusy] = createSignal(false);
   const [restoreError, setRestoreError] = createSignal("");
+  const [appealOpen, setAppealOpen] = createSignal(false);
+  const [appealCategory, setAppealCategory] = createSignal<AccountAppealCategory>("login_locked");
+  const [appealReceipt, setAppealReceipt] = createSignal(localStorage.getItem("edgechat.account-appeal-receipt") ?? "");
+  const [appealStatus, setAppealStatus] = createSignal<AccountAppealStatus | null>(null);
+  const [appealBusy, setAppealBusy] = createSignal(false);
+  const [appealError, setAppealError] = createSignal("");
 
   async function submit(event: SubmitEvent) {
     event.preventDefault(); setBusy(true); setError("");
@@ -62,6 +68,24 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
     catch (cause) { setRestoreError(cause instanceof Error ? cause.message : "无法恢复备份"); setRestoreBusy(false); }
   }
 
+  async function refreshAppealStatus(receipt = appealReceipt()) {
+    if (!receipt) return;
+    setAppealBusy(true); setAppealError("");
+    try { setAppealStatus((await props.api.accountAppealStatus(receipt)).status); }
+    catch (cause) { setAppealError(cause instanceof Error ? cause.message : "无法查询申诉状态"); }
+    finally { setAppealBusy(false); }
+  }
+
+  async function submitAppeal(event: SubmitEvent) {
+    event.preventDefault(); setAppealBusy(true); setAppealError("");
+    try {
+      const result = await props.api.createAccountAppeal(username(), password(), appealCategory());
+      localStorage.setItem("edgechat.account-appeal-receipt", result.receipt);
+      setAppealReceipt(result.receipt); setAppealStatus(result.status);
+    } catch (cause) { setAppealError(cause instanceof Error ? cause.message : "无法提交申诉"); }
+    finally { setAppealBusy(false); }
+  }
+
   const RestoreForm = () => <form class="grid gap-4 rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5" onSubmit={restore}>
     <div><h1 class="text-lg font-semibold text-ink">恢复这台设备</h1><p class="mt-1 text-sm/5 text-muted">先完整验证文件和服务器检查点，再替换本机消息库。恢复后仍需登录。</p></div>
     <label class="grid gap-2 text-sm font-medium text-ink" for="backup-file">备份文件<input id="backup-file" name="backup_file" type="file" accept=".edgechat-backup,application/vnd.edgechat.backup" required class="block w-full text-sm text-muted file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-medium file:text-ink file:ring-1 file:ring-black/10" onChange={(event) => setRestoreFile(event.currentTarget.files?.[0] ?? null)}/></label>
@@ -72,8 +96,28 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
     <div class="flex justify-end gap-2"><button type="button" disabled={restoreBusy()} class="h-10 rounded-lg px-3 text-sm font-medium text-ink hover:bg-white" onClick={() => setRestoreOpen(false)}>取消</button><button type="submit" disabled={!restoreFile() || !restorePassword() || !restoreAccountPassword() || !restoreConfirmed() || restoreBusy()} class="h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white disabled:bg-neutral-300">{restoreBusy() ? "正在验证…" : "验证并恢复"}</button></div>
   </form>;
 
+  const AppealForm = () => <div class="grid gap-5">
+    <div><h1 class="text-2xl font-semibold tracking-tight text-ink">账户访问申诉</h1><p class="mt-2 text-sm/6 text-muted">申诉只处理服务器账户访问限制，无法恢复已丢失的设备密钥或聊天记录。我们不收集自由文本、邮箱或电话。</p></div>
+    <Show when={!appealReceipt()} fallback={<div class="grid gap-4 rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5">
+      <div><p class="text-sm font-semibold text-ink">申诉状态</p><p class="mt-1 text-sm text-muted">{appealStatus() === "approved" ? "已批准，请重新尝试登录。" : appealStatus() === "denied" ? "未批准。服务器无法绕过密码或 MLS 设备密钥。" : appealStatus() === "expired" ? "回执已过期，可重新提交。" : "等待管理员审核。"}</p></div>
+      <Show when={appealError()}><p role="alert" class="text-sm text-red-600">{appealError()}</p></Show>
+      <div class="flex gap-2"><button type="button" disabled={appealBusy()} class="h-10 rounded-lg bg-white px-3 text-sm font-medium text-ink ring-1 ring-black/10" onClick={() => void refreshAppealStatus()}>{appealBusy() ? "正在查询…" : "刷新状态"}</button><button type="button" class="h-10 px-3 text-sm font-medium text-muted" onClick={() => { localStorage.removeItem("edgechat.account-appeal-receipt"); setAppealReceipt(""); setAppealStatus(null); }}>重新提交</button></div>
+    </div>}>
+      <form class="grid gap-4" onSubmit={submitAppeal}>
+        <Input label="用户名" id="appeal-username" name="appeal_username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username" required/>
+        <Input label="当前账户密码" id="appeal-password" name="appeal_password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" required/>
+        <label class="grid gap-2 text-sm font-medium text-ink" for="appeal-category">问题类型<select id="appeal-category" class="h-11 rounded-lg bg-white px-3 text-sm ring-1 ring-inset ring-black/10 focus:outline-2 focus:outline-brand" value={appealCategory()} onChange={(event) => setAppealCategory(event.currentTarget.value as AccountAppealCategory)}><option value="login_locked">登录被临时锁定</option><option value="device_lost">原设备丢失</option><option value="account_access">其他账户访问问题</option></select></label>
+        <p class="text-xs/5 text-muted">密码只用于这次所有权验证，不会写入申诉记录。无论账号或密码是否有效，接口都会返回相同形式的回执。</p>
+        <Show when={appealError()}><p role="alert" class="text-sm text-red-600">{appealError()}</p></Show>
+        <button type="submit" disabled={appealBusy()} class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white disabled:bg-neutral-300">{appealBusy() ? "正在提交…" : "提交申诉"}</button>
+      </form>
+    </Show>
+    <button type="button" class="justify-self-start text-sm font-medium text-brand" onClick={() => setAppealOpen(false)}>返回登录</button>
+  </div>;
+
   return <main class="isolate grid min-h-dvh place-items-center bg-white px-6 py-10 antialiased"><section class="w-full max-w-xs">
     <header class="mb-10 flex justify-center"><Brand/></header>
+    <Show when={!appealOpen()} fallback={<AppealForm/>}>
     <Show when={!restoreOpen()} fallback={<RestoreForm/>}>
     <Show when={mode() === "link"} fallback={<>
     <Show when={!finishingRestore}><div class="mb-8 grid grid-cols-2 rounded-lg bg-neutral-100 p-1" role="tablist" aria-label="账户操作">
@@ -87,10 +131,12 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
       <Input label="密码" id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete={mode() === "register" ? "new-password" : "current-password"} required/>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm/5 text-red-700">{error()}</div></Show>
       <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy()}>{busy() ? "正在准备设备…" : mode() === "register" ? "创建并继续" : "登录"}</button>
+      <Show when={mode() === "login" && !finishingRestore}><button type="button" class="text-sm font-medium text-brand" onClick={() => { setAppealOpen(true); if (appealReceipt()) void refreshAppealStatus(); }}>无法登录？查看或提交申诉</button></Show>
     </form>
     <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>或<span class="h-px flex-1 bg-black/10"/></div>
     <div class="grid gap-2"><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-semibold text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => setMode("link")}><IconQrcode class="size-4 stroke-brand"/>链接已有账户</button><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-50" onClick={() => setRestoreOpen(true)}><IconUpload class="size-4 stroke-muted"/>从加密备份恢复</button></div></Show>
     </>}><DeviceLinkSetup api={props.api} core={props.core} db={props.db} onReady={props.onReady} onCancel={() => setMode("login")}/></Show>
+    </Show>
     </Show>
     <div class="mt-7 flex items-start gap-2 text-sm/5 text-muted"><IconShieldLock class="mt-0.5 size-4 shrink-0 stroke-muted"/><p>消息会在本机解密并存入 PGlite。使用共享设备后请退出账户。</p></div>
   </section></main>;

@@ -9,6 +9,18 @@ export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
 
+export interface AccountAppeals {
+  appeal_id: string;
+  category: string;
+  created_at: number;
+  expires_at: number;
+  receipt_hash: string;
+  resolved_at: number | null;
+  status: Generated<string>;
+  updated_at: number;
+  user_id: string;
+}
+
 export interface AccountDeletionObjects {
   attempts: Generated<number>;
   byte_size: number;
@@ -341,6 +353,15 @@ export interface MessageRequestReservations {
   room_id: string;
 }
 
+export interface OperatorAppealActions {
+  action_id: string;
+  appeal_id: string;
+  created_at: number;
+  login_unlocked: Generated<number>;
+  note: string | null;
+  resolution: string;
+}
+
 export interface OperatorLoginUnlockActions {
   action_id: string;
   created_at: number;
@@ -563,6 +584,7 @@ export interface WsTickets {
 }
 
 export interface DB {
+  account_appeals: AccountAppeals;
   account_deletion_objects: AccountDeletionObjects;
   account_deletion_rooms: AccountDeletionRooms;
   account_deletions: AccountDeletions;
@@ -596,6 +618,7 @@ export interface DB {
   login_failure_state: LoginFailureState;
   message_request_rate_windows: MessageRequestRateWindows;
   message_request_reservations: MessageRequestReservations;
+  operator_appeal_actions: OperatorAppealActions;
   operator_login_unlock_actions: OperatorLoginUnlockActions;
   operator_report_actions: OperatorReportActions;
   pending_r2_writes: PendingR2Writes;

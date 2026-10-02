@@ -50,6 +50,20 @@ export class OperatorClient {
     return this.request(`/api/v1/operator/reports?${query}`);
   }
 
+  appeals({ limit = 50, cursor, status = "pending" } = {}) {
+    const query = new URLSearchParams({ limit: String(limit), status });
+    if (cursor) query.set("cursor", cursor);
+    return this.request(`/api/v1/operator/appeals?${query}`);
+  }
+
+  resolveAppeal(appealId, { resolution, unlockLogin = false, note }) {
+    const body = { resolution, unlock_login: unlockLogin };
+    if (note !== undefined) body.note = note;
+    return this.request(`/api/v1/operator/appeals/${encodeURIComponent(appealId)}`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+  }
+
   loginLocks({ limit = 50, cursor, status = "active" } = {}) {
     const query = new URLSearchParams({ limit: String(limit), status });
     if (cursor) query.set("cursor", cursor);

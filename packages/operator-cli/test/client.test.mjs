@@ -96,3 +96,29 @@ test("lists and clears login locks through explicit D1-only commands", async () 
   assert.equal(requests.at(-1).url, "https://chat.example.com/api/v1/operator/users/%40alice%3Aexample.com/login-unlock");
   assert.deepEqual(JSON.parse(requests.at(-1).init.body), { note: "verified owner" });
 });
+
+test("paginates appeals and resolves an approved login-lock appeal", async () => {
+  const env = { EDGECHAT_URL: "https://chat.example.com", EDGECHAT_OPERATOR_TOKEN: "secret" };
+  assert.deepEqual(parseArguments(["appeals", "--status", "pending", "--all"], env), {
+    command: "appeals", baseUrl: env.EDGECHAT_URL, token: "secret", limit: 50, all: true, status: "pending",
+  });
+  assert.deepEqual(parseArguments(["appeal", "appeal_0123456789abcdef", "--resolution", "approved", "--unlock-login", "--note", "verified"], env), {
+    command: "appeal", baseUrl: env.EDGECHAT_URL, token: "secret", limit: 50, all: false,
+    appealId: "appeal_0123456789abcdef", resolution: "approved", unlockLogin: true, note: "verified",
+  });
+  assert.throws(() => parseArguments(["appeal", "appeal_0123456789abcdef", "--resolution", "denied", "--unlock-login"], env), /approved appeal/);
+
+  const requests = [];
+  const fetchImpl = async (url, init = {}) => {
+    requests.push({ url, init });
+    if (init.method === "PUT") return new Response(JSON.stringify({ appeal: { appeal_id: "appeal_b", status: "approved" } }));
+    const second = url.includes("cursor=");
+    return new Response(JSON.stringify({ appeals: [{ appeal_id: second ? "appeal_b" : "appeal_a" }], next_cursor: second ? null : "appeal_a" }));
+  };
+  const listed = await run({ command: "appeals", baseUrl: env.EDGECHAT_URL, token: "secret", limit: 1, all: true, status: "pending" }, fetchImpl);
+  assert.deepEqual(listed.appeals.map((appeal) => appeal.appeal_id), ["appeal_a", "appeal_b"]);
+  const resolved = await run({ command: "appeal", appealId: "appeal_b", resolution: "approved", unlockLogin: true, note: "verified", baseUrl: env.EDGECHAT_URL, token: "secret", limit: 50, all: false }, fetchImpl);
+  assert.equal(resolved.appeal.status, "approved");
+  assert.equal(requests.at(-1).url, "https://chat.example.com/api/v1/operator/appeals/appeal_b");
+  assert.deepEqual(JSON.parse(requests.at(-1).init.body), { resolution: "approved", unlock_login: true, note: "verified" });
+});
