@@ -164,6 +164,10 @@
     {
       "file": "0041_room_profile_attachments.sql",
       "sha256": "9d52f7ff0406eb36b26bfa822192c34c3725d6dc8d0e474dc93b24726670f9ac"
+    },
+    {
+      "file": "0042_room_leave_requests.sql",
+      "sha256": "76ab3100fa015bc3c0ca123c096eaac0c368316a455efbda568b8d822d00170c"
     }
   ]
 }

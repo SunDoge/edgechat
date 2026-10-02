@@ -17,6 +17,10 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     decryptRoomAvatar: vi.fn(async () => new ArrayBuffer(1)),
     identityMemberCount: 1,
     currentUserId: "@alice:example.com",
+    isGroupChat: true,
+    isRoomOwner: true,
+    leaveStatus: null,
+    leaveSupported: true,
     canManageMembers: true,
     membershipBusyUserId: null,
     members: [{ userId: "@bob:example.com", displayName: "Bob", hidden: false, role: "member" }],
@@ -27,6 +31,8 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     onSaveRoomProfile: vi.fn(async () => undefined),
     onSaveRetention: vi.fn(async () => 0),
     onSaveMessageExpiry: vi.fn(async () => undefined),
+    onRequestLeave: vi.fn(async () => undefined),
+    onCancelLeave: vi.fn(async () => undefined),
     onVerifyIdentity: vi.fn(), onClose: vi.fn(),
     ...overrides,
   };
@@ -46,9 +52,25 @@ describe("RoomSettingsDialog group membership", () => {
   });
 
   it("does not expose membership controls to a non-owner", () => {
-    mount({ canManageMembers: false });
+    mount({ canManageMembers: false, isRoomOwner: false });
     expect(document.querySelector("#member-search")).toBeNull();
     expect([...document.querySelectorAll("button")].some((button) => button.textContent === "移出")).toBe(false);
+  });
+
+  it("lets a non-owner request and cancel a secure group leave", async () => {
+    const request = mount({ canManageMembers: false, isRoomOwner: false });
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "退出群聊")?.click();
+    await vi.waitFor(() => expect(request.onRequestLeave).toHaveBeenCalledOnce());
+    dispose?.(); document.body.replaceChildren();
+    const cancel = mount({ canManageMembers: false, isRoomOwner: false, leaveStatus: "pending" });
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "取消退出申请")?.click();
+    await vi.waitFor(() => expect(cancel.onCancelLeave).toHaveBeenCalledOnce());
+  });
+
+  it("requires the owner to transfer ownership before leaving", () => {
+    mount({ isRoomOwner: true });
+    expect(document.body.textContent).toContain("先转让群主身份");
+    expect([...document.querySelectorAll("button")].some((button) => button.textContent === "退出群聊")).toBe(false);
   });
 
   it("queues an encrypted room name update for the owner", async () => {

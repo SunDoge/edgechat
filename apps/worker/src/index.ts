@@ -817,6 +817,12 @@ async function memberRole(env: Env, roomId: string, userId: string): Promise<"ow
   return row?.role ?? null;
 }
 
+async function roomLeavePending(env: Env, roomId: string, userId: string): Promise<boolean> {
+  const row = await createDatabase(env.DB).selectFrom("room_leave_requests").select("request_id")
+    .where("room_id", "=", roomId).where("user_id", "=", userId).where("status", "in", ["pending", "processing"]).executeTakeFirst();
+  return Boolean(row);
+}
+
 async function interactionBlocked(env: Env, left: string, right: string): Promise<boolean> {
   if (left === right) return false;
   const row = await createDatabase(env.DB).selectFrom("user_blocks").select("blocker_user_id")
@@ -2130,15 +2136,16 @@ async function listRooms(env: Env, auth: AuthContext): Promise<Response> {
   if (auth.actor === "bot") query = query.where("r.room_id", "=", auth.botRoomId ?? "");
   const rooms = await query.orderBy("r.created_at", "desc").execute();
   const result = await Promise.all(rooms.map(async (room) => {
-    const [members, state, request] = await Promise.all([
+    const [members, state, request, leaveRequest] = await Promise.all([
       db.selectFrom("room_members as member").innerJoin("users as user", "user.user_id", "member.user_id")
         .select(["member.user_id", "user.display_name", "user.avatar_id", "member.role"]).where("member.room_id", "=", room.room_id).where("member.removed_at", "is", null).orderBy("member.joined_at").execute(),
       db.selectFrom("room_device_keys").select(["encrypted_state", "epoch"]).where("room_id", "=", room.room_id).where("device_id", "=", auth.deviceId).orderBy("epoch", "desc").executeTakeFirst(),
       db.selectFrom("direct_message_requests").select(["requester_user_id", "recipient_user_id", "status"]).where("room_id", "=", room.room_id).executeTakeFirst(),
+      db.selectFrom("room_leave_requests").select("status").where("room_id", "=", room.room_id).where("user_id", "=", auth.userId).where("status", "in", ["pending", "processing"]).executeTakeFirst(),
     ]);
     const requestMessage = request ? await db.selectFrom("room_events").select("event_id").where("room_id", "=", room.room_id)
       .where("event_type", "in", [...visibleMessageEventTypes]).executeTakeFirst() : null;
-    return { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenByRoom.get(room.room_id) ?? [], encrypted_state: state?.encrypted_state ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) };
+    return { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenByRoom.get(room.room_id) ?? [], encrypted_state: state?.encrypted_state ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), leave_status: leaveRequest ? "pending" as const : null, ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) };
   }));
   return json({ rooms: result });
 }
@@ -2578,6 +2585,12 @@ async function changeMember(body: Record<string, unknown>, env: Env, auth: AuthC
   if (event.metadata.membership_action !== action || event.metadata.target_user_id !== targetUserId) {
     throw new HttpError(400, "Signed membership target does not match the request", "invalid_mls_commit");
   }
+  const leaveRequestId = event.metadata.leave_request_id;
+  if (leaveRequestId !== undefined) {
+    if (!remove || typeof leaveRequestId !== "string" || !/^leave_[A-Za-z0-9_-]{16,64}$/.test(leaveRequestId)) {
+      throw new HttpError(400, "Signed leave request reference is invalid", "invalid_mls_commit");
+    }
+  }
   const epoch = Number(event.metadata.mls_epoch);
   if (!Number.isInteger(epoch) || epoch < 2) throw new HttpError(409, "MLS commit epoch is invalid", "stale_epoch");
   const duplicateRow = await db.selectFrom("room_events").select("event_json").where("room_id", "=", roomId).where("event_id", "=", event.event_id).executeTakeFirst();
@@ -2589,6 +2602,14 @@ async function changeMember(body: Record<string, unknown>, env: Env, auth: AuthC
   const active = await db.selectFrom("room_members").select(["user_id", "removed_at"]).where("room_id", "=", roomId).where("user_id", "=", targetUserId).executeTakeFirst();
   const applied = remove ? Boolean(active && active.removed_at !== null) : active?.removed_at === null;
   if (duplicate && room.mls_epoch === epoch && applied) return json({ room_id: roomId, user_id: targetUserId, epoch, event: duplicate });
+  if (typeof leaveRequestId === "string") {
+    const leaveRequest = await db.selectFrom("room_leave_requests").select(["request_id", "status", "commit_event_id"])
+      .where("request_id", "=", leaveRequestId).where("room_id", "=", roomId).where("user_id", "=", targetUserId)
+      .executeTakeFirst();
+    if (!leaveRequest || (leaveRequest.status !== "pending" && !(leaveRequest.status === "processing" && leaveRequest.commit_event_id === event.event_id))) {
+      throw new HttpError(409, "Room leave request was cancelled", "room_leave_cancelled");
+    }
+  }
   if (room.mls_epoch !== epoch - 1 || applied) {
     throw new HttpError(409, duplicate ? "Membership commit reconciliation state conflicts" : remove ? "User is not an active member" : "User is already a member", duplicate ? "membership_reconciliation_conflict" : "membership_conflict");
   }
@@ -2631,9 +2652,26 @@ async function changeMember(body: Record<string, unknown>, env: Env, auth: AuthC
       throw new HttpError(409, "MLS KeyPackage claim was consumed concurrently", "mls_claim_race");
     }
   }
-  const accepted = await appendRoomEvent(env, roomId, event, epoch - 1);
-  if (remove) await env.ROOMS.getByName(roomId).removeMember(targetUserId, auth.userId, now);
-  else await env.ROOMS.getByName(roomId).addMember(targetUserId, "member", auth.userId, now);
+  if (typeof leaveRequestId === "string") {
+    const claimed = await db.updateTable("room_leave_requests").set({ status: "processing", commit_event_id: event.event_id, updated_at: now })
+      .where("request_id", "=", leaveRequestId).where("status", "=", "pending").executeTakeFirst();
+    if (claimed.numUpdatedRows !== 1n) {
+      const current = await db.selectFrom("room_leave_requests").select(["status", "commit_event_id"]).where("request_id", "=", leaveRequestId).executeTakeFirst();
+      if (current?.status !== "processing" || current.commit_event_id !== event.event_id) {
+        throw new HttpError(409, "Room leave request was cancelled", "room_leave_cancelled");
+      }
+    }
+  }
+  let accepted: RoomEvent;
+  try {
+    accepted = await appendRoomEvent(env, roomId, event, epoch - 1);
+    if (remove) await env.ROOMS.getByName(roomId).removeMember(targetUserId, auth.userId, now);
+    else await env.ROOMS.getByName(roomId).addMember(targetUserId, "member", auth.userId, now);
+  } catch (cause) {
+    if (typeof leaveRequestId === "string") await db.updateTable("room_leave_requests").set({ status: "pending", commit_event_id: null, updated_at: Date.now() })
+      .where("request_id", "=", leaveRequestId).where("status", "=", "processing").where("commit_event_id", "=", event.event_id).execute();
+    throw cause;
+  }
   const membership = remove
     ? db.updateTable("room_members").set({ removed_at: now }).where("room_id", "=", roomId).where("user_id", "=", targetUserId)
     : db.insertInto("room_members").values({ room_id: roomId, user_id: targetUserId, role: "member", joined_at: now, removed_at: null })
@@ -2645,9 +2683,73 @@ async function changeMember(body: Record<string, unknown>, env: Env, auth: AuthC
     ...(!remove ? targetDevices.map((deviceId) => db.insertInto("room_devices").values({ room_id: roomId, device_id: deviceId, user_id: targetUserId, joined_epoch: epoch, joined_seq: accepted.seq, removed_epoch: null, created_at: now, removed_at: null })
       .onConflict((conflict) => conflict.columns(["room_id", "device_id"]).doUpdateSet({ user_id: targetUserId, joined_epoch: epoch, joined_seq: accepted.seq, removed_epoch: null, created_at: now, removed_at: null }))) : []),
     ...(remove ? [db.updateTable("room_devices").set({ removed_epoch: epoch, removed_at: now }).where("room_id", "=", roomId).where("user_id", "=", targetUserId).where("removed_at", "is", null)] : []),
+    ...(remove && targetDevices.length ? [db.deleteFrom("room_device_keys").where("room_id", "=", roomId).where("device_id", "in", targetDevices)] : []),
+    ...(remove ? [db.updateTable("room_leave_requests").set({ status: "complete", completed_at: now, updated_at: now })
+      .where("room_id", "=", roomId).where("user_id", "=", targetUserId).where("status", "in", ["pending", "processing"])] : []),
     ...(!remove ? [db.insertInto("sync_log").values({ recipient_user_id: targetUserId, kind: "room.event.available", room_id: roomId, seq: accepted.seq, event_id: `membership:${roomId}:${epoch}`, payload: JSON.stringify({ type: "control.member.add", room_id: roomId, user_id: targetUserId, epoch }), created_at: now })] : []),
   ]);
   return json({ room_id: roomId, user_id: targetUserId, epoch, event: accepted });
+}
+
+async function setRoomLeaveRequest(env: Env, auth: AuthContext, roomId: RoomId, pending: boolean, ctx: ExecutionContext): Promise<Response> {
+  requireUser(auth);
+  const db = createDatabase(env.DB);
+  const membership = await db.selectFrom("room_members as member").innerJoin("rooms as room", "room.room_id", "member.room_id")
+    .select(["member.role", "member.removed_at", "room.kind", "room.purpose"])
+    .where("member.room_id", "=", roomId).where("member.user_id", "=", auth.userId).executeTakeFirst();
+  if (!membership || membership.removed_at !== null) throw new HttpError(404, "Room not found", "not_found");
+  if (membership.kind !== "group" || membership.purpose !== "chat") throw new HttpError(409, "Only group chats can be left", "fixed_membership");
+  if (membership.role === "owner") throw new HttpError(409, "Transfer room ownership before leaving", "owner_transfer_required");
+  const existing = await db.selectFrom("room_leave_requests").select(["request_id", "status"])
+    .where("room_id", "=", roomId).where("user_id", "=", auth.userId).executeTakeFirst();
+  const owner = await db.selectFrom("room_members").select("user_id").where("room_id", "=", roomId)
+    .where("role", "=", "owner").where("removed_at", "is", null).executeTakeFirst();
+  if (!owner) throw new HttpError(409, "Room has no active owner", "owner_required");
+  if (!pending) {
+    if (existing?.status === "pending") {
+      const now = Date.now();
+      const cancelled = await db.updateTable("room_leave_requests").set({ status: "cancelled", commit_event_id: null, updated_at: now, completed_at: null })
+        .where("request_id", "=", existing.request_id).where("status", "=", "pending").executeTakeFirst();
+      if (cancelled.numUpdatedRows !== 1n) throw new HttpError(409, "Room leave is already being processed", "room_leave_processing");
+      await batch(env.DB, [
+        db.insertInto("sync_log").values({ recipient_user_id: auth.userId, kind: "device.event", room_id: roomId, seq: null,
+          event_id: `room-leave-cancelled:self:${existing.request_id}:${now}`, payload: JSON.stringify({ type: "room.leave.updated", room_id: roomId }), created_at: now }),
+        db.insertInto("sync_log").values({ recipient_user_id: owner.user_id, kind: "device.event", room_id: roomId, seq: null,
+          event_id: `room-leave-cancelled:owner:${existing.request_id}:${now}`, payload: JSON.stringify({ type: "room.leave.cancelled", room_id: roomId }), created_at: now }),
+      ]);
+      ctx.waitUntil(Promise.all([notifyAccountDevices(env, auth.userId, auth.deviceId), notifyAccountDevices(env, owner.user_id)]).then(() => undefined));
+    }
+    if (existing?.status === "processing") throw new HttpError(409, "Room leave is already being processed", "room_leave_processing");
+    return new Response(null, { status: 204 });
+  }
+  if (existing?.status === "pending" || existing?.status === "processing") return json({ request_id: existing.request_id, room_id: roomId, status: "pending" as const });
+  const requestId = existing?.request_id ?? `leave_${randomId(18)}`;
+  const now = Date.now();
+  await batch(env.DB, [
+    db.insertInto("room_leave_requests").values({ request_id: requestId, room_id: roomId, user_id: auth.userId, status: "pending", commit_event_id: null, requested_at: now, updated_at: now, completed_at: null })
+      .onConflict((conflict) => conflict.columns(["room_id", "user_id"]).doUpdateSet({ status: "pending", commit_event_id: null, requested_at: now, updated_at: now, completed_at: null })),
+    db.insertInto("sync_log").values({ recipient_user_id: owner.user_id, kind: "device.event", room_id: roomId, seq: null,
+      event_id: `room-leave:${requestId}:${now}`, payload: JSON.stringify({ type: "room.leave.requested", room_id: roomId }), created_at: now }),
+    db.insertInto("sync_log").values({ recipient_user_id: auth.userId, kind: "device.event", room_id: roomId, seq: null,
+      event_id: `room-leave:self:${requestId}:${now}`, payload: JSON.stringify({ type: "room.leave.updated", room_id: roomId }), created_at: now }),
+  ]);
+  ctx.waitUntil(Promise.all([notifyAccountDevices(env, owner.user_id), notifyAccountDevices(env, auth.userId, auth.deviceId)]).then(() => undefined));
+  return json({ request_id: requestId, room_id: roomId, status: "pending" as const }, 202);
+}
+
+async function roomLeaveTasks(env: Env, auth: AuthContext): Promise<Response> {
+  requireUser(auth);
+  const db = createDatabase(env.DB);
+  const rows = await db.selectFrom("room_leave_requests as request")
+    .innerJoin("room_members as owner", (join) => join.onRef("owner.room_id", "=", "request.room_id").on("owner.role", "=", "owner").on("owner.removed_at", "is", null))
+    .innerJoin("room_members as target", (join) => join.onRef("target.room_id", "=", "request.room_id").onRef("target.user_id", "=", "request.user_id").on("target.removed_at", "is", null))
+    .select(["request.request_id", "request.room_id", "request.user_id as target_user_id"])
+    .where("request.status", "=", "pending").where("owner.user_id", "=", auth.userId).orderBy("request.updated_at").limit(100).execute();
+  return json({ tasks: await Promise.all(rows.map(async (row) => ({
+    ...row,
+    target_device_ids: (await db.selectFrom("room_devices").select("device_id").where("room_id", "=", row.room_id)
+      .where("user_id", "=", row.target_user_id).where("removed_at", "is", null).orderBy("device_id").execute()).map((device) => device.device_id),
+  }))) });
 }
 
 async function getRoom(env: Env, auth: AuthContext, roomId: RoomId): Promise<Response> {
@@ -2659,7 +2761,7 @@ async function getRoom(env: Env, auth: AuthContext, roomId: RoomId): Promise<Res
     .select(["r.room_id", "r.home_server", "r.kind", "r.purpose", "r.name", "r.current_seq", "r.created_at", "r.mls_epoch as epoch", "current_device.joined_seq", "pref.muted_until"])
     .where("r.room_id", "=", roomId).where("current_device.removed_at", "is", null).executeTakeFirst();
   if (!room) throw new HttpError(404, "Room not found", "not_found");
-  const [members, state, blockedRows, hiddenRows, request, requestMessage] = await Promise.all([
+  const [members, state, blockedRows, hiddenRows, request, requestMessage, leaveRequest] = await Promise.all([
     db.selectFrom("room_members as member").innerJoin("users as user", "user.user_id", "member.user_id")
       .select(["member.user_id", "user.display_name", "user.avatar_id", "member.role"]).where("member.room_id", "=", roomId).where("member.removed_at", "is", null).orderBy("member.joined_at").execute(),
     db.selectFrom("room_device_keys").select(["encrypted_state", "epoch"]).where("room_id", "=", roomId).where("device_id", "=", auth.deviceId).orderBy("epoch", "desc").executeTakeFirst(),
@@ -2667,9 +2769,10 @@ async function getRoom(env: Env, auth: AuthContext, roomId: RoomId): Promise<Res
     db.selectFrom("group_hidden_members").select("hidden_user_id").where("room_id", "=", roomId).where("user_id", "=", auth.userId).execute(),
     db.selectFrom("direct_message_requests").select(["requester_user_id", "recipient_user_id", "status"]).where("room_id", "=", roomId).executeTakeFirst(),
     db.selectFrom("room_events").select("event_id").where("room_id", "=", roomId).where("event_type", "in", [...visibleMessageEventTypes]).executeTakeFirst(),
+    db.selectFrom("room_leave_requests").select("status").where("room_id", "=", roomId).where("user_id", "=", auth.userId).where("status", "in", ["pending", "processing"]).executeTakeFirst(),
   ]);
   const blockedByMe = new Set(blockedRows.map((row) => row.blocked_user_id));
-  return json({ room: { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenRows.map((row) => row.hidden_user_id), encrypted_state: state?.encrypted_state ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) } });
+  return json({ room: { ...room, members: members.map(({ avatar_id, ...member }) => ({ ...member, avatar_url: avatarUrl(avatar_id) })), hidden_member_ids: hiddenRows.map((row) => row.hidden_user_id), encrypted_state: state?.encrypted_state ?? null, blocked_by_me: members.some((member) => blockedByMe.has(member.user_id)), leave_status: leaveRequest ? "pending" as const : null, ...requestView(request ?? null, auth.userId, Boolean(requestMessage)) } });
 }
 
 async function setGroupMemberHidden(env: Env, auth: AuthContext, roomId: RoomId, targetUserId: UserId, hidden: boolean): Promise<Response> {
@@ -2939,6 +3042,9 @@ async function sendEvent(request: Request, env: Env, ctx: ExecutionContext, auth
     throw new HttpError(409, "Encrypted event was created for a stale MLS epoch", "stale_epoch");
   }
   if (!roomEpoch) throw new HttpError(404, "Room not found", "not_found");
+  if (!duplicate && await roomLeavePending(env, roomId, auth.userId)) {
+    throw new HttpError(409, "Room leave is waiting for the owner to update encryption", "room_leave_pending");
+  }
   if (!duplicate && event.type === "control.room.profile"
     && (roomEpoch.kind !== "group" || roomEpoch.purpose !== "chat" || roomEpoch.role !== "owner" || roomEpoch.removed_at !== null)) {
     throw new HttpError(403, "Only the group owner may update the room profile", "room_profile_forbidden");
@@ -3712,6 +3818,7 @@ function attachmentRetentionRequirement(
 async function uploadAttachment(request: Request, env: Env, auth: AuthContext): Promise<Response> {
   const roomId = request.headers.get("x-room-id");
   if (!roomId || !isNamespacedRoomId(roomId) || !(await memberRole(env, roomId, auth.userId))) throw new HttpError(403, "Room membership required", "forbidden");
+  if (await roomLeavePending(env, roomId, auth.userId)) throw new HttpError(409, "Room leave is pending", "room_leave_pending");
   if (await directRoomBlocked(env, roomId)) throw new HttpError(403, "Conversation is unavailable", "direct_unavailable");
   const requestState = await directRequestState(env, roomId);
   if (requestState && requestState.status !== "accepted") throw new HttpError(409, "Attachments require an accepted message request", "message_request_attachment_blocked");
@@ -4445,12 +4552,18 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   }
   if (path === "/api/v1/rooms" && request.method === "GET") return listRooms(env, auth);
   if (path === "/api/v1/rooms" && request.method === "POST") return createRoom(request, env, auth);
+  if (path === "/api/v1/room-leave-tasks" && request.method === "GET") return roomLeaveTasks(env, auth);
   if (path === "/api/v1/drafts" && request.method === "GET") return encryptedDrafts(url, env, auth);
   if (path === "/api/v1/mls/key-packages" && request.method === "GET") return keyPackageStatus(env, auth);
   if (path === "/api/v1/mls/key-packages" && request.method === "POST") return uploadKeyPackages(request, env, auth);
   if (path === "/api/v1/mls/key-packages/claim" && request.method === "POST") return claimMlsKeyPackages(request, env, auth);
   const roomMatch = path.match(/^\/api\/v1\/rooms\/([^/]+)$/);
   if (roomMatch && request.method === "GET") { const id = decodeURIComponent(roomMatch[1]); if (!isNamespacedRoomId(id)) throw new HttpError(400, "Invalid room ID", "invalid_room"); requireBotRoom(auth, id); return getRoom(env, auth, id); }
+  const roomLeave = path.match(/^\/api\/v1\/rooms\/([^/]+)\/leave$/);
+  if (roomLeave && (request.method === "POST" || request.method === "DELETE")) {
+    const id = decodeURIComponent(roomLeave[1]); if (!isNamespacedRoomId(id)) throw new HttpError(400, "Invalid room ID", "invalid_room");
+    return setRoomLeaveRequest(env, auth, id, request.method === "POST", ctx);
+  }
   const roomDevices = path.match(/^\/api\/v1\/rooms\/([^/]+)\/devices$/);
   if (roomDevices && request.method === "GET") { requireUser(auth); const id = decodeURIComponent(roomDevices[1]); if (!isNamespacedRoomId(id)) throw new HttpError(400, "Invalid room ID", "invalid_room"); return listRoomDevices(env, auth, id); }
   const roomPreference = path.match(/^\/api\/v1\/rooms\/([^/]+)\/preferences$/);

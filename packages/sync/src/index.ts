@@ -9,7 +9,7 @@ export class ApiError extends Error {
 export type SessionIdentity = { user_id: string; device_id: string; display_name: string; avatar_url?: string | null; server_name?: string; vapid_public_key?: string; device_credential?: string; archive_compaction_enabled: boolean; protocol?: ServerProtocolCapabilities };
 export type ServerDevice = { device_id: string; user_id: string; display_name: string; kind: "user" | "bot"; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
 export type RoomArchiveDevice = ServerDevice;
-export type ServerRoom = RoomSummary & { home_server: string; joined_seq: number; encrypted_state: string | null; epoch: number | null; muted_until: number | null; blocked_by_me: boolean };
+export type ServerRoom = RoomSummary & { home_server: string; joined_seq: number; encrypted_state: string | null; epoch: number | null; muted_until: number | null; blocked_by_me: boolean; leave_status?: "pending" | null };
 export type ClaimedMlsKeyPackage = { claim_id: string; device_id: string; user_id: string; key_package: string };
 export type CompactionLease = { room_id: RoomId; token: string; device_id: string; segment_id: string; start_seq: number; end_seq: number; expires_at: number };
 export type RepairLease = {
@@ -86,6 +86,12 @@ export type AccountRemovalTask = {
   expected_epoch: number;
   name: string | null;
   kind: "direct" | "group";
+};
+export type RoomLeaveTask = {
+  request_id: string;
+  room_id: RoomId;
+  target_user_id: string;
+  target_device_ids: string[];
 };
 export type AccountDeletionProgress = {
   deletion_id: string;
@@ -180,6 +186,9 @@ export class ApiClient {
   claimMlsKeyPackages(userIds: string[], roomId: RoomId) { return this.request<{ key_packages: ClaimedMlsKeyPackage[] }>("/api/v1/mls/key-packages/claim", { method: "POST", body: JSON.stringify({ user_ids: userIds, room_id: roomId }) }); }
   addMember(roomId: RoomId, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members`, { method: "POST", body: JSON.stringify(payload) }); }
   removeMember(roomId: RoomId, userId: string, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE", body: JSON.stringify(payload) }); }
+  requestRoomLeave(roomId: RoomId) { return this.request<{ request_id: string; room_id: RoomId; status: "pending" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/leave`, { method: "POST" }); }
+  cancelRoomLeave(roomId: RoomId) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/leave`, { method: "DELETE" }); }
+  roomLeaveTasks() { return this.request<{ tasks: RoomLeaveTask[] }>("/api/v1/room-leave-tasks"); }
   users(query: string) { return this.request<{ users: Array<{ user_id: string; display_name: string; avatar_url: string | null }> }>(`/api/v1/users?q=${encodeURIComponent(query)}`); }
   blockUser(userId: string) { return this.request<void>(`/api/v1/users/${encodeURIComponent(userId)}/block`, { method: "PUT" }); }
   unblockUser(userId: string) { return this.request<void>(`/api/v1/users/${encodeURIComponent(userId)}/block`, { method: "DELETE" }); }

@@ -19,6 +19,10 @@ export function RoomSettingsDialog(props: {
   decryptRoomAvatar: (avatar: RoomProfileAvatar) => Promise<ArrayBuffer>;
   identityMemberCount: number;
   currentUserId: string;
+  isGroupChat: boolean;
+  isRoomOwner: boolean;
+  leaveStatus: "pending" | null;
+  leaveSupported: boolean;
   canManageMembers: boolean;
   membershipBusyUserId: string | null;
   members: Array<{ userId: string; displayName: string; hidden: boolean; role: "owner" | "member" }>;
@@ -29,6 +33,8 @@ export function RoomSettingsDialog(props: {
   onSaveRoomProfile: (name: string, avatar: RoomProfileAvatarChange) => Promise<void>;
   onSaveRetention: (days: LocalRetentionDays | null) => Promise<number>;
   onSaveMessageExpiry: (seconds: MessageExpirySeconds | null) => Promise<void>;
+  onRequestLeave: () => Promise<void>;
+  onCancelLeave: () => Promise<void>;
   onVerifyIdentity: () => void;
   onClose: () => void;
 }) {
@@ -46,12 +52,13 @@ export function RoomSettingsDialog(props: {
   const [memberQuery, setMemberQuery] = createSignal("");
   const [memberResults, setMemberResults] = createSignal<Array<{ user_id: string; display_name: string }>>([]);
   const [memberSearchBusy, setMemberSearchBusy] = createSignal(false);
+  const [leaveBusy, setLeaveBusy] = createSignal(false);
   let memberSearchVersion = 0;
   const selectedDays = (): LocalRetentionDays | null => value() === "forever" ? null : Number(value()) as LocalRetentionDays;
   const changed = () => selectedDays() !== props.preference.local_retention_days;
   const selectedExpiry = (): MessageExpirySeconds | null => expiryValue() === "off" ? null : Number(expiryValue()) as MessageExpirySeconds;
   const expiryChanged = () => selectedExpiry() !== props.messageExpirySeconds;
-  const anyBusy = () => busy() || expiryBusy() || roomNameBusy() || avatarEncoding() || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId);
+  const anyBusy = () => busy() || expiryBusy() || roomNameBusy() || avatarEncoding() || leaveBusy() || Boolean(memberBusy()) || Boolean(props.membershipBusyUserId);
   const hasDisplayedAvatar = () => Boolean(avatarPreview() || (props.roomAvatar && avatarChange().kind !== "remove"));
 
   onCleanup(() => { const url = avatarPreview(); if (url) URL.revokeObjectURL(url); });
@@ -107,6 +114,14 @@ export function RoomSettingsDialog(props: {
     setError("");
     try { await props.onRemoveMember(userId); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "无法移除群成员"); }
+  }
+
+  async function changeLeaveStatus() {
+    if (anyBusy() || !props.leaveSupported || props.isRoomOwner) return;
+    setLeaveBusy(true); setError("");
+    try { if (props.leaveStatus === "pending") await props.onCancelLeave(); else await props.onRequestLeave(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "无法更新退出状态"); }
+    finally { setLeaveBusy(false); }
   }
 
   async function chooseRoomAvatar(file: File | undefined) {
@@ -205,6 +220,16 @@ export function RoomSettingsDialog(props: {
         <button type="button" aria-pressed={member.hidden} disabled={anyBusy()} class={`min-h-10 shrink-0 rounded-lg px-3 text-sm font-semibold disabled:opacity-50 ${member.hidden ? "bg-brand-soft text-brand hover:bg-brand-soft/70" : "text-muted hover:bg-neutral-100"}`} onClick={() => void toggleMember(member.userId, !member.hidden)}>{memberBusy() === member.userId ? "更新中…" : member.hidden ? "重新显示" : "隐藏消息"}</button>
       </div>}</For></div>
       <p class="mt-3 text-xs/5 text-muted">为保持群聊加密状态完整，这些事件仍会在后台接收和验证；此设置不会减少云端消息传输。</p>
+    </section></Show>
+    <Show when={props.isGroupChat}><section class="order-7 p-5" aria-labelledby="leave-room-title">
+      <h3 id="leave-room-title" class="text-sm font-semibold text-ink">退出群聊</h3>
+      <Show when={props.isRoomOwner} fallback={<>
+        <p class="mt-1 text-xs/5 text-muted">{props.leaveStatus === "pending" ? "群主设备上线并安全更新群聊后，你会退出并停止收到新消息。在完成前不能发送新内容。" : "退出需要群主设备安全更新成员和加密状态；已有的本机记录不会自动删除。"}</p>
+        <button type="button" disabled={anyBusy() || !props.leaveSupported} class={`mt-3 min-h-10 rounded-lg px-3 text-sm font-semibold disabled:opacity-50 ${props.leaveStatus === "pending" ? "bg-neutral-100 text-ink hover:bg-neutral-200" : "text-red-700 hover:bg-red-50"}`} onClick={() => void changeLeaveStatus()}>{leaveBusy() ? "正在更新…" : props.leaveStatus === "pending" ? "取消退出申请" : "退出群聊"}</button>
+        <Show when={!props.leaveSupported}><p class="mt-2 text-xs/5 text-muted">当前服务器版本不支持安全退出群聊。</p></Show>
+      </>}>
+        <p class="mt-1 text-xs/5 text-muted">群主需要先转让群主身份，才能退出群聊。</p>
+      </Show>
     </section></Show>
     </div>
   </Dialog>;

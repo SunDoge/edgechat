@@ -450,6 +450,17 @@ export interface RoomEvents {
   seq: number;
 }
 
+export interface RoomLeaveRequests {
+  commit_event_id: string | null;
+  completed_at: number | null;
+  request_id: string;
+  requested_at: number;
+  room_id: string;
+  status: string;
+  updated_at: number;
+  user_id: string;
+}
+
 export interface RoomMembers {
   joined_at: number;
   removed_at: number | null;
@@ -636,6 +647,7 @@ export interface DB {
   room_device_keys: RoomDeviceKeys;
   room_devices: RoomDevices;
   room_events: RoomEvents;
+  room_leave_requests: RoomLeaveRequests;
   room_members: RoomMembers;
   room_peer_recoveries: RoomPeerRecoveries;
   room_profile_attachments: RoomProfileAttachments;

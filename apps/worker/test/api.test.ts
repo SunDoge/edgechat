@@ -40,7 +40,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
   expect(tooNew.status).toBe(426);
@@ -679,6 +679,72 @@ describe("single-server durable delivery", () => {
     });
     expect(forbiddenProfile.status).toBe(403);
     expect(await forbiddenProfile.json()).toMatchObject({ code: "room_profile_forbidden" });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+
+    const leaveEndpoint = `https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/leave`;
+    const ownerCannotLeave = await SELF.fetch(leaveEndpoint, { method: "POST", headers });
+    expect(ownerCannotLeave.status).toBe(409);
+    expect(await ownerCannotLeave.json()).toMatchObject({ code: "owner_transfer_required" });
+    const carolHeaders = { authorization: `Bearer ${carol.access_token}`, "content-type": "application/json" };
+    const leave = await SELF.fetch(leaveEndpoint, { method: "POST", headers: carolHeaders });
+    expect(leave.status, await leave.clone().text()).toBe(202);
+    const leaveRequest = await leave.json() as { request_id: string };
+    const duplicateLeave = await SELF.fetch(leaveEndpoint, { method: "POST", headers: carolHeaders });
+    expect(await duplicateLeave.json()).toMatchObject({ request_id: leaveRequest.request_id, status: "pending" });
+    expect(await (await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}`, { headers: carolHeaders })).json())
+      .toMatchObject({ room: { leave_status: "pending" } });
+    expect(await (await SELF.fetch("https://edgechat.test/api/v1/room-leave-tasks", { headers })).json())
+      .toEqual({ tasks: [{ request_id: leaveRequest.request_id, room_id: groupRoom, target_user_id: carol.user_id, target_device_ids: [carol.device_id] }] });
+    expect(await (await SELF.fetch("https://edgechat.test/api/v1/room-leave-tasks", { headers: { authorization: `Bearer ${bob.access_token}` } })).json())
+      .toEqual({ tasks: [] });
+
+    const blockedMessageUnsigned: Omit<ClientEvent, "signature"> = { ...memberProfileUnsigned, event_id: crypto.randomUUID(), type: "message.text", ciphertext: "opaque-message", created_at: Date.now() };
+    const blockedMessage = { ...blockedMessageUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, carolDevice.signing.privateKey, canonicalEventBytes(blockedMessageUnsigned))) };
+    const blockedMessageResponse = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, {
+      method: "POST", headers: carolHeaders, body: JSON.stringify(blockedMessage),
+    });
+    expect(blockedMessageResponse.status).toBe(409);
+    expect(await blockedMessageResponse.json()).toMatchObject({ code: "room_leave_pending" });
+    const blockedAttachment = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
+      method: "POST", headers: { authorization: `Bearer ${carol.access_token}`, "x-room-id": groupRoom,
+        "content-length": "4", "x-content-sha256": await ciphertextDigest(new Uint8Array([1, 2, 3, 4])) }, body: new Uint8Array([1, 2, 3, 4]),
+    });
+    expect(blockedAttachment.status).toBe(409);
+    expect(await blockedAttachment.json()).toMatchObject({ code: "room_leave_pending" });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+
+    const removeUnsigned: Omit<ClientEvent, "signature"> = {
+      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      type: "control.group.commit", created_at: Date.now(), ciphertext: "opaque-remove-member-commit",
+      metadata: { mls_epoch: 3, membership_action: "remove", target_user_id: carol.user_id,
+        target_device_ids: [carol.device_id], leave_request_id: leaveRequest.request_id },
+    };
+    const removeEvent = { ...removeUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(removeUnsigned))) };
+    const removeEndpoint = `https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/members/${encodeURIComponent(carol.user_id)}`;
+    expect((await SELF.fetch(leaveEndpoint, { method: "DELETE", headers: carolHeaders })).status).toBe(204);
+    const cancelledCommit = await SELF.fetch(removeEndpoint, { method: "DELETE", headers, body: JSON.stringify({ event: removeEvent }) });
+    expect(cancelledCommit.status).toBe(409);
+    expect(await cancelledCommit.json()).toMatchObject({ code: "room_leave_cancelled" });
+    expect(await (await SELF.fetch("https://edgechat.test/api/v1/room-leave-tasks", { headers })).json()).toEqual({ tasks: [] });
+
+    const reopened = await SELF.fetch(leaveEndpoint, { method: "POST", headers: carolHeaders });
+    expect(await reopened.json()).toMatchObject({ request_id: leaveRequest.request_id, status: "pending" });
+    await env.DB.prepare("UPDATE room_leave_requests SET status = 'processing', commit_event_id = ? WHERE request_id = ?")
+      .bind(removeEvent.event_id, leaveRequest.request_id).run();
+    const lateCancellation = await SELF.fetch(leaveEndpoint, { method: "DELETE", headers: carolHeaders });
+    expect(lateCancellation.status).toBe(409);
+    expect(await lateCancellation.json()).toMatchObject({ code: "room_leave_processing" });
+    const removed = await SELF.fetch(removeEndpoint, { method: "DELETE", headers, body: JSON.stringify({ event: removeEvent }) });
+    expect(removed.status, await removed.clone().text()).toBe(200);
+    expect(await removed.json()).toMatchObject({ user_id: carol.user_id, epoch: 3 });
+    const removalRetry = await SELF.fetch(removeEndpoint, { method: "DELETE", headers, body: JSON.stringify({ event: removeEvent }) });
+    expect(removalRetry.status, await removalRetry.clone().text()).toBe(200);
+    expect(await removalRetry.json()).toMatchObject({ event: { event_id: removeEvent.event_id } });
+    expect(await env.DB.prepare("SELECT removed_at FROM room_members WHERE room_id = ? AND user_id = ?").bind(groupRoom, carol.user_id).first<{ removed_at: number }>())
+      .toMatchObject({ removed_at: expect.any(Number) });
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM room_device_keys WHERE room_id = ? AND device_id = ?").bind(groupRoom, carol.device_id).first()).toEqual({ count: 0 });
+    expect(await env.DB.prepare("SELECT status FROM room_leave_requests WHERE request_id = ?").bind(leaveRequest.request_id).first()).toEqual({ status: "complete" });
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}`, { headers: carolHeaders })).status).toBe(404);
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
   });
 

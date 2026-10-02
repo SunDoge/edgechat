@@ -974,7 +974,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const unavailableRoom = () => { void loadRooms(currentMls).catch(() => setConnectionState("offline")); };
     const deviceEvent = (received: Event) => {
       const detail = (received as CustomEvent<Record<string, unknown>>).detail;
-      if (detail?.type === "profile.updated") void loadRooms(currentMls).catch(() => setConnectionState("offline"));
+      if (["profile.updated", "room.leave.requested", "room.leave.updated", "room.leave.cancelled"].includes(String(detail?.type))) {
+        void loadRooms(currentMls).catch(() => setConnectionState("offline"));
+      }
     };
     const realtime = (received: Event) => { const connected = Boolean((received as CustomEvent<{ connected: boolean }>).detail.connected); setConnectionState(connected ? "online" : navigator.onLine ? "syncing" : "offline"); };
     const syncError = (received: Event) => { if (canUseOfflineSession((received as CustomEvent<unknown>).detail, navigator.onLine)) setConnectionState("offline"); };
@@ -1201,6 +1203,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
     if (!text && !selectedFiles.length) throw new Error("没有可发送的内容");
     if (room.blocked_by_me) throw new Error("你已屏蔽此用户，请先取消屏蔽再发送消息");
+    if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能发送消息");
     if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先从另一台设备或备份恢复此对话");
     if (text.length > 16_000) throw new Error("消息不能超过 16,000 个字符");
     const limits = attachmentLimits();
@@ -1264,6 +1267,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!serverSupports(currentSession.protocol, "messages.contact.v1")) throw new Error("当前服务器不支持联系人名片");
     if (sendBusy()) throw new Error("另一条消息正在发送，请稍后重试");
     if (room.blocked_by_me) throw new Error("请先取消屏蔽再发送联系人");
+    if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能发送联系人");
     if (room.request_status === "pending") throw new Error("接受消息请求后才能发送联系人");
     if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先恢复此对话");
     const domain = contact.user_id.slice(contact.user_id.lastIndexOf(":") + 1);
@@ -1330,6 +1334,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!targetRoom || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
     if (targetRoom.blocked_by_me) throw new Error("请先取消屏蔽再转发");
+    if (targetRoom.leave_status === "pending") throw new Error("正在等待群主安全完成退出，不能再转发到这段群聊");
     if (historyRecoveryRooms().has(targetRoomId)) throw new Error("请先从另一台设备或备份恢复目标对话");
     if (!currentMls.hasGroup(targetRoomId)) throw new Error("这台设备还没有目标对话的加密状态");
     const sourcePayload = normalizeMessagePayload((source.payload ?? {}) as MessagePayload, source.event_id);
@@ -1671,6 +1676,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const room = selected(); const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || target.room_id !== room.room_id) throw new Error("对话状态尚未就绪");
     if (room.blocked_by_me) throw new Error("请先取消屏蔽再操作消息");
+    if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能操作消息");
     if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先从另一台设备或备份恢复此对话");
     await mutateMls(async () => {
       const ciphertext = encodeBase64Url(currentMls.encryptMessage(room.room_id, encoder.encode(JSON.stringify(payload))));
@@ -1744,7 +1750,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function sendReadReceipt(roomId: RoomId): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
-    if (document.visibilityState !== "visible" || selectedRef !== roomId || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) return;
+    if (document.visibilityState !== "visible" || selectedRef !== roomId || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)
+      || rooms().find((room) => room.room_id === roomId)?.leave_status === "pending") return;
     const latestSeq = await db.latestVisibleMessageSeq(roomId);
     const [state, queuedSeq] = await Promise.all([db.readState(roomId), db.latestQueuedReadReceiptSeq(roomId)]);
     if (latestSeq < 1 || latestSeq <= Math.max(state.last_receipt_sent_seq, queuedSeq)) return;
@@ -1783,7 +1790,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function sendDeliveryReceipt(roomId: RoomId): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || rooms().find((room) => room.room_id === roomId)?.blocked_by_me) return;
+    const room = rooms().find((candidate) => candidate.room_id === roomId);
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || room?.blocked_by_me || room?.leave_status === "pending") return;
     const latestSeq = await db.latestIncomingMessageSeq(roomId, currentSession.user_id);
     const [state, queuedSeq] = await Promise.all([db.deliveryState(roomId), db.latestQueuedDeliveryReceiptSeq(roomId)]);
     if (latestSeq < 1 || latestSeq <= Math.max(state.last_receipt_sent_seq, queuedSeq)) return;
@@ -2514,7 +2522,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     });
   }
 
-  async function executeRoomMembershipChange(roomId: RoomId, operation?: "add" | "remove", targetUserId?: UserId): Promise<void> {
+  async function executeRoomMembershipChange(roomId: RoomId, operation?: "add" | "remove", targetUserId?: UserId, leaveRequestId?: string): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session();
     if (!currentIdentity || !currentSession || !mlsRef) throw new Error("本机加密状态尚未就绪");
     let queued = await db.roomMembershipOutbox(roomId);
@@ -2556,7 +2564,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           type: "control.group.commit",
           created_at: Date.now(),
           ciphertext: commit.commit,
-          metadata: { mls_epoch: commit.epoch, membership_action: operation, target_user_id: targetUserId, target_device_ids: targetDeviceIds },
+          metadata: { mls_epoch: commit.epoch, membership_action: operation, target_user_id: targetUserId, target_device_ids: targetDeviceIds,
+            ...(leaveRequestId ? { leave_request_id: leaveRequestId } : {}) },
         };
         const event = { ...unsigned, signature: await core.sign(currentIdentity, canonicalEventBytes(unsigned)) };
         await db.saveRoomMembershipOutbox({ room_id: roomId, operation, target_user_id: targetUserId, target_device_ids: targetDeviceIds,
@@ -2594,6 +2603,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await db.removeRoomMembershipOutbox(roomId); await syncRef?.catchUp();
         throw new Error("群聊密钥刚刚发生变化，已同步；请重新操作");
       }
+      if (cause instanceof ApiError && cause.code === "room_leave_cancelled") {
+        if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "退出群聊");
+        await db.removeRoomMembershipOutbox(roomId); await loadRooms(mlsRef);
+        return;
+      }
       await db.failRoomMembershipOutbox(roomId, cause instanceof Error ? cause.message : String(cause)); throw cause;
     }
     await loadRooms(mlsRef);
@@ -2614,16 +2628,35 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function resumeRoomMembershipChanges(): Promise<void> {
     if (roomMembershipRun) return roomMembershipRun;
-    const pending = await db.pendingRoomMembershipChanges();
-    if (!pending.length) return;
-    setRoomMembershipBusy(pending[0]!.target_user_id);
+    const [pending, remote] = await Promise.all([db.pendingRoomMembershipChanges(), api.roomLeaveTasks()]);
+    const queuedRooms = new Set(pending.map((item) => item.room_id));
+    const delegated = remote.tasks.filter((task) => !queuedRooms.has(task.room_id));
+    if (!pending.length && !delegated.length) return;
+    setRoomMembershipBusy(pending[0]?.target_user_id ?? delegated[0]!.target_user_id);
     const run = (async () => {
       for (const item of pending) await executeRoomMembershipChange(item.room_id);
-      setNotice(pending.length === 1 ? "群成员变更已完成" : `已完成 ${pending.length} 项群成员变更`);
+      for (const task of delegated) await executeRoomMembershipChange(task.room_id, "remove", task.target_user_id as UserId, task.request_id);
+      const count = pending.length + delegated.length;
+      setNotice(count === 1 ? "群成员变更已完成" : `已完成 ${count} 项群成员变更`);
     })().catch((cause) => { setNotice(cause instanceof Error ? `群成员变更尚未完成：${cause.message}` : "群成员变更尚未完成，可稍后重试"); })
       .finally(() => { roomMembershipRun = null; setRoomMembershipBusy(null); });
     roomMembershipRun = run;
     await run;
+  }
+
+  async function requestRoomLeave(room: ServerRoom): Promise<void> {
+    if (!serverSupports(session()?.protocol, "rooms.leave.v1")) throw new Error("当前服务器不支持安全退出群聊");
+    if (!confirm(`退出“${roomTitle(room, session()!.user_id)}”？群主设备上线并更新群聊密钥后，你将停止接收新消息。`)) return;
+    stopTyping(room.room_id); flushComposerDraft(room.room_id); cancelComposerMode(); setFiles([]); setVoiceDurationMs(null);
+    await api.requestRoomLeave(room.room_id);
+    await loadRooms(mlsRef);
+    setRoomSettingsOpen(false); setNotice("退出申请已发送；等待群主设备安全更新群聊密钥");
+  }
+
+  async function cancelRoomLeave(room: ServerRoom): Promise<void> {
+    await api.cancelRoomLeave(room.room_id);
+    await loadRooms(mlsRef);
+    setNotice("已取消退出群聊");
   }
 
   async function resumeAccountRemovals(): Promise<void> {
@@ -2842,6 +2875,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         composer={<div>
           <Show when={room().request_status === "pending" && room().request_role === "recipient"}><div class="mx-auto max-w-[760px] border-t border-amber-200 bg-amber-50 px-4 py-3" role="region" aria-label="消息请求"><strong class="block text-sm font-semibold text-amber-950">接受后才能回复</strong><p class="mt-0.5 text-xs/5 text-amber-800">对方只能发送这一条加密文本；接受前不能发送附件，也不会占用云端对象存储。</p><div class="mt-3 flex flex-wrap gap-2"><button type="button" class="min-h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95" onClick={() => void acceptMessageRequest(room())}>接受</button><button type="button" class="min-h-10 rounded-lg bg-white px-4 text-sm font-semibold text-ink ring-1 ring-black/10 hover:bg-neutral-50" onClick={() => void rejectMessageRequest(room())}>拒绝</button><button type="button" class="min-h-10 rounded-lg px-3 text-sm font-semibold text-red-700 hover:bg-red-50" onClick={() => void reportMessageRequest(room())}>举报并屏蔽</button></div></div></Show>
           <Show when={room().request_status === "pending" && room().request_role === "requester"}><div class="mx-auto max-w-[760px] border-t border-sky-200 bg-sky-50 px-4 py-2 text-xs/5 text-sky-900" role="status">{room().request_message_sent ? "消息请求已发送。对方接受前不能继续发送。" : "你可以发送一条纯文本消息；对方接受后才能继续聊天或发送附件。"}</div></Show>
+          <Show when={room().leave_status === "pending"}><div class="mx-auto flex max-w-[760px] items-start gap-3 border-t border-amber-200 bg-amber-50 px-4 py-3 text-amber-950" role="status"><div class="min-w-0 flex-1"><strong class="block text-sm font-semibold">正在退出群聊</strong><p class="mt-0.5 text-xs/5 text-amber-800">等待群主设备上线并安全更新群聊。在完成前你仍可查看已有消息，但不能发送新内容。</p></div><button type="button" class="min-h-9 shrink-0 rounded-lg bg-amber-100 px-3 text-xs font-semibold text-amber-900 hover:bg-amber-200" onClick={() => void cancelRoomLeave(room())}>取消退出</button></div></Show>
           <Show when={selectedNeedsHistoryRecovery() && selectedHistoryRecoveryState() ? selectedHistoryRecoveryState() : null}>{(recovery) => {
             const copy = () => historyRecoveryCopy(recovery()); const active = () => ["requesting", "transferring", "importing"].includes(recovery().phase);
             return <div role={recovery().phase === "failed" ? "alert" : "status"} aria-live="polite" class={`mx-auto flex max-w-[760px] items-start gap-3 border-t px-4 py-3 ${recovery().phase === "failed" ? "border-red-200 bg-red-50 text-red-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}>
@@ -2863,7 +2897,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
               <button type="button" aria-label={`移除 ${selectedFile.name}`} class="grid size-8 shrink-0 place-items-center rounded-md hover:bg-black/5 disabled:opacity-40" disabled={sendBusy()} onClick={() => { setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index())); setVoiceDurationMs(null); }}><IconX class="size-4 stroke-muted"/></button>
             </div>}</For>
           </div></Show>
-          <ChatComposer value={compose()} hasContent={files().length > 0 || Boolean(editingMessage())} disabled={sendBusy() || voiceRecording() || room().blocked_by_me || selectedNeedsHistoryRecovery() || selectedRequestCannotSend()} disabledReason={selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受消息请求后才能回复" : "等待对方接受消息请求" : selectedNeedsHistoryRecovery() ? "需要先从另一台设备或备份恢复这段对话" : voiceRecording() ? "录音期间不能输入文字" : room().blocked_by_me ? "取消屏蔽后才能发送消息" : sendBusy() ? "正在准备上一条消息" : undefined} placeholder={selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受请求后才能回复" : "等待对方接受请求" : selectedNeedsHistoryRecovery() ? "恢复此对话后才能发送" : voiceRecording() ? "正在录音…" : room().blocked_by_me ? "你已屏蔽此用户" : quoting() ? "补充你的内容" : "写一条消息"} onChange={onComposerChange} onSend={() => void submitComposer()} accessory={<div class="flex shrink-0 items-center gap-1"><Show when={room().purpose !== "saved" && serverSupports(currentSession().protocol, "messages.contact.v1")}><button type="button" aria-label="分享联系人" disabled={sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || selectedNeedsHistoryRecovery() || room().request_status === "pending"} class="grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 disabled:opacity-40" onClick={() => setContactShareOpen(true)}><IconAddressBook class="size-4 stroke-muted"/></button></Show><Show when={!files().length}><VoiceRecorder contextId={room().room_id} disabled={sendBusy() || Boolean(editingMessage()) || room().blocked_by_me || selectedNeedsHistoryRecovery() || room().request_status === "pending"} onRecordingChange={setVoiceRecording} onRecorded={(recorded, duration) => { setFiles([recorded]); setVoiceDurationMs(duration); }} onError={setNotice}/></Show><label class={`relative grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 ${sendBusy() || voiceRecording() || editingMessage() || room().blocked_by_me || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message ? "pointer-events-none opacity-50" : "cursor-pointer"}`} aria-label={room().request_status === "pending" ? "接受消息请求后才能添加附件" : selectedNeedsHistoryRecovery() ? "请先恢复此对话" : room().blocked_by_me ? "请先取消屏蔽" : editingMessage() ? "编辑消息时不能添加附件" : files().length >= attachmentLimits().max_attachments_per_message ? `最多添加 ${attachmentLimits().max_attachments_per_message} 个附件` : "添加附件"}><IconPaperclip class="size-4 stroke-muted"/><input name="attachment" type="file" multiple={attachmentLimits().max_attachments_per_message > 1} class="sr-only" disabled={sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message} onChange={(event) => {
+          <ChatComposer value={compose()} hasContent={files().length > 0 || Boolean(editingMessage())} disabled={sendBusy() || voiceRecording() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || selectedRequestCannotSend()} disabledReason={room().leave_status === "pending" ? "正在等待安全退出群聊" : selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受消息请求后才能回复" : "等待对方接受消息请求" : selectedNeedsHistoryRecovery() ? "需要先从另一台设备或备份恢复这段对话" : voiceRecording() ? "录音期间不能输入文字" : room().blocked_by_me ? "取消屏蔽后才能发送消息" : sendBusy() ? "正在准备上一条消息" : undefined} placeholder={room().leave_status === "pending" ? "正在等待安全退出群聊" : selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受请求后才能回复" : "等待对方接受请求" : selectedNeedsHistoryRecovery() ? "恢复此对话后才能发送" : voiceRecording() ? "正在录音…" : room().blocked_by_me ? "你已屏蔽此用户" : quoting() ? "补充你的内容" : "写一条消息"} onChange={onComposerChange} onSend={() => void submitComposer()} accessory={<div class="flex shrink-0 items-center gap-1"><Show when={room().purpose !== "saved" && serverSupports(currentSession().protocol, "messages.contact.v1")}><button type="button" aria-label="分享联系人" disabled={sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} class="grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 disabled:opacity-40" onClick={() => setContactShareOpen(true)}><IconAddressBook class="size-4 stroke-muted"/></button></Show><Show when={!files().length}><VoiceRecorder contextId={room().room_id} disabled={sendBusy() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} onRecordingChange={setVoiceRecording} onRecorded={(recorded, duration) => { setFiles([recorded]); setVoiceDurationMs(duration); }} onError={setNotice}/></Show><label class={`relative grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 ${sendBusy() || voiceRecording() || editingMessage() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message ? "pointer-events-none opacity-50" : "cursor-pointer"}`} aria-label={room().leave_status === "pending" ? "正在等待安全退出群聊" : room().request_status === "pending" ? "接受消息请求后才能添加附件" : selectedNeedsHistoryRecovery() ? "请先恢复此对话" : room().blocked_by_me ? "请先取消屏蔽" : editingMessage() ? "编辑消息时不能添加附件" : files().length >= attachmentLimits().max_attachments_per_message ? `最多添加 ${attachmentLimits().max_attachments_per_message} 个附件` : "添加附件"}><IconPaperclip class="size-4 stroke-muted"/><input name="attachment" type="file" multiple={attachmentLimits().max_attachments_per_message > 1} class="sr-only" disabled={sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message} onChange={(event) => {
             const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
             const limits = attachmentLimits();
             if (selected.some((item) => item.size > limits.max_attachment_plaintext_bytes)) return setNotice(`每个附件不能超过 ${Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024)} MB`);
@@ -2876,10 +2910,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={selectedMessageIds().size > 0}><div class="fixed inset-x-0 bottom-0 z-20 flex min-h-16 items-center gap-3 border-t border-black/8 bg-white px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] md:left-[360px] sm:px-5"><button type="button" class="min-h-11 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={cancelMessageSelection}>取消</button><span class="min-w-0 flex-1 truncate text-center text-sm font-medium text-ink">已选择 {selectedMessages().length} 条</span><button type="button" disabled={!selectedMessages().length} class="flex min-h-11 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => setForwardingMessages(selectedMessages())}><IconArrowForwardUp class="size-4 stroke-white"/>转发 {selectedMessages().length} 条</button></div></Show>
       <Show when={newRoom()}><NewRoomDialog api={api} createGroup={(roomId, packages) => mutateMls(async () => { const created = mls()!.createGroup(roomId, packages); await persistMls(mls()!); return created; })} queueInitialProfile={(roomId, name) => updateRoomProfile(roomId, name, false, true, null)} serverName={currentSession().server_name ?? location.hostname} initialContact={newRoomContact()} onClose={() => { setNewRoom(false); setNewRoomContact(null); }} onCreated={(id, encryptedName, profileQueued) => { setNewRoom(false); setNewRoomContact(null); void finishCreatedRoom(id, encryptedName, profileQueued); }}/></Show>
       <Show when={contactShareOpen() && selected()}>{(room) => <ContactShareDialog contacts={shareableContacts(room())} onSend={sendContactCard} onClose={() => setContactShareOpen(false)}/>}</Show>
-      <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms()} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
-      <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms()} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>
+      <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
+      <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>
       <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticStatus={semanticStatus()} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
-      <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
+      <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>
       <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
       <Show when={profileOpen() && profile()}>{(currentProfile) => <ProfileDialog profile={currentProfile()} onSave={updateProfile} onClose={() => setProfileOpen(false)}/>}</Show>

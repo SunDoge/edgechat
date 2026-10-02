@@ -45,6 +45,7 @@ describe("federation-ready identifiers", () => {
     expect(serverSupports(currentServerProtocol, "archive.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "messages.contact.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.profile.v1")).toBe(true);
+    expect(serverSupports(currentServerProtocol, "rooms.leave.v1")).toBe(true);
   });
 
   it("rejects malformed or incompatible server capability envelopes", () => {
