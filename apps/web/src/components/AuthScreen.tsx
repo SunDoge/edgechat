@@ -1,5 +1,5 @@
 import { Show, createSignal } from "solid-js";
-import { IconQrcode, IconShieldLock, IconUpload } from "@tabler/icons-solidjs";
+import { IconQrcode, IconShieldLock, IconSwitchHorizontal, IconUpload } from "@tabler/icons-solidjs";
 import { OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import type { AccountAppealCategory, AccountAppealStatus, ApiClient, SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
@@ -7,12 +7,16 @@ import { loadIdentity, saveIdentity } from "../vault";
 import { authErrorMessage } from "../auth-errors";
 import { Brand, Input } from "./primitives";
 import { DeviceLinkSetup } from "./DeviceLinkSetup";
+import { profileSessionKey } from "../local-profiles";
 
-export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void> }) {
-  const restoredUserHint = sessionStorage.getItem("edgechat.restore-user-id") ?? "";
-  const restoreCheckpoint = sessionStorage.getItem("edgechat.restore-checkpoint") ?? "";
+export function AuthScreen(props: { profileId: string; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void>; onManageProfiles: () => void }) {
+  const restoreUserKey = profileSessionKey(props.profileId, "restore-user-id");
+  const restoreCheckpointKey = profileSessionKey(props.profileId, "restore-checkpoint");
+  const appealReceiptKey = profileSessionKey(props.profileId, "account-appeal-receipt");
+  const restoredUserHint = sessionStorage.getItem(restoreUserKey) ?? "";
+  const restoreCheckpoint = sessionStorage.getItem(restoreCheckpointKey) ?? "";
   const finishingRestore = Boolean(restoreCheckpoint);
-  if (restoredUserHint) sessionStorage.removeItem("edgechat.restore-user-id");
+  if (restoredUserHint) sessionStorage.removeItem(restoreUserKey);
   const [mode, setMode] = createSignal<"register" | "login" | "link">(restoredUserHint ? "login" : "register");
   const [username, setUsername] = createSignal(restoredUserHint);
   const [displayName, setDisplayName] = createSignal("");
@@ -28,7 +32,7 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
   const [restoreError, setRestoreError] = createSignal("");
   const [appealOpen, setAppealOpen] = createSignal(false);
   const [appealCategory, setAppealCategory] = createSignal<AccountAppealCategory>("login_locked");
-  const [appealReceipt, setAppealReceipt] = createSignal(localStorage.getItem("edgechat.account-appeal-receipt") ?? "");
+  const [appealReceipt, setAppealReceipt] = createSignal(localStorage.getItem(appealReceiptKey) ?? "");
   const [appealStatus, setAppealStatus] = createSignal<AccountAppealStatus | null>(null);
   const [appealBusy, setAppealBusy] = createSignal(false);
   const [appealError, setAppealError] = createSignal("");
@@ -36,7 +40,7 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
   async function submit(event: SubmitEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      const existing = await loadIdentity();
+      const existing = await loadIdentity(props.profileId);
       const identity = existing ?? await props.core.createIdentity();
       const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
       const mlsKeyPackages = mls.generateKeyPackages(12);
@@ -47,13 +51,13 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
         ...(restoreCheckpoint ? { backup_checkpoint: restoreCheckpoint } : {}),
         ...(identity.recoveryCredential ? { restore_credential: identity.recoveryCredential } : {}),
       };
-      const stored = { ...identity, mlsState: mls.exportState() }; await saveIdentity(stored);
+      const stored = { ...identity, mlsState: mls.exportState() }; await saveIdentity(props.profileId, stored);
       const result = mode() === "register"
         ? await props.api.register({ localpart: username(), display_name: displayName(), password: password(), device })
         : await props.api.login({ user_id: username(), password: password(), device });
       const authenticatedIdentity = result.device_credential ? { ...stored, recoveryCredential: result.device_credential } : stored;
-      if (authenticatedIdentity !== stored) await saveIdentity(authenticatedIdentity);
-      sessionStorage.removeItem("edgechat.restore-checkpoint");
+      if (authenticatedIdentity !== stored) await saveIdentity(props.profileId, authenticatedIdentity);
+      sessionStorage.removeItem(restoreCheckpointKey);
       props.onReady(result, authenticatedIdentity, result.access_token, mls);
     } catch (cause) { setError(authErrorMessage(cause)); }
     finally { setBusy(false); }
@@ -80,7 +84,7 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
     event.preventDefault(); setAppealBusy(true); setAppealError("");
     try {
       const result = await props.api.createAccountAppeal(username(), password(), appealCategory());
-      localStorage.setItem("edgechat.account-appeal-receipt", result.receipt);
+      localStorage.setItem(appealReceiptKey, result.receipt);
       setAppealReceipt(result.receipt); setAppealStatus(result.status);
     } catch (cause) { setAppealError(cause instanceof Error ? cause.message : "无法提交申诉"); }
     finally { setAppealBusy(false); }
@@ -101,7 +105,7 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
     <Show when={!appealReceipt()} fallback={<div class="grid gap-4 rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5">
       <div><p class="text-sm font-semibold text-ink">申诉状态</p><p class="mt-1 text-sm text-muted">{appealStatus() === "approved" ? "已批准，请重新尝试登录。" : appealStatus() === "denied" ? "未批准。服务器无法绕过密码或 MLS 设备密钥。" : appealStatus() === "expired" ? "回执已过期，可重新提交。" : "等待管理员审核。"}</p></div>
       <Show when={appealError()}><p role="alert" class="text-sm text-red-600">{appealError()}</p></Show>
-      <div class="flex gap-2"><button type="button" disabled={appealBusy()} class="h-10 rounded-lg bg-white px-3 text-sm font-medium text-ink ring-1 ring-black/10" onClick={() => void refreshAppealStatus()}>{appealBusy() ? "正在查询…" : "刷新状态"}</button><button type="button" class="h-10 px-3 text-sm font-medium text-muted" onClick={() => { localStorage.removeItem("edgechat.account-appeal-receipt"); setAppealReceipt(""); setAppealStatus(null); }}>重新提交</button></div>
+      <div class="flex gap-2"><button type="button" disabled={appealBusy()} class="h-10 rounded-lg bg-white px-3 text-sm font-medium text-ink ring-1 ring-black/10" onClick={() => void refreshAppealStatus()}>{appealBusy() ? "正在查询…" : "刷新状态"}</button><button type="button" class="h-10 px-3 text-sm font-medium text-muted" onClick={() => { localStorage.removeItem(appealReceiptKey); setAppealReceipt(""); setAppealStatus(null); }}>重新提交</button></div>
     </div>}>
       <form class="grid gap-4" onSubmit={submitAppeal}>
         <Input label="用户名" id="appeal-username" name="appeal_username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username" required/>
@@ -135,9 +139,10 @@ export function AuthScreen(props: { api: ApiClient; core: WebCryptoMessagingCore
     </form>
     <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>或<span class="h-px flex-1 bg-black/10"/></div>
     <div class="grid gap-2"><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-semibold text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => setMode("link")}><IconQrcode class="size-4 stroke-brand"/>链接已有账户</button><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-50" onClick={() => setRestoreOpen(true)}><IconUpload class="size-4 stroke-muted"/>从加密备份恢复</button></div></Show>
-    </>}><DeviceLinkSetup api={props.api} core={props.core} db={props.db} onReady={props.onReady} onCancel={() => setMode("login")}/></Show>
+    </>}><DeviceLinkSetup profileId={props.profileId} api={props.api} core={props.core} db={props.db} onReady={props.onReady} onCancel={() => setMode("login")}/></Show>
     </Show>
     </Show>
-    <div class="mt-7 flex items-start gap-2 text-sm/5 text-muted"><IconShieldLock class="mt-0.5 size-4 shrink-0 stroke-muted"/><p>消息会在本机解密并存入 PGlite。使用共享设备后请退出账户。</p></div>
+    <button type="button" class="mt-7 flex min-h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-100" onClick={props.onManageProfiles}><IconSwitchHorizontal class="size-4 stroke-muted"/>切换本机身份</button>
+    <div class="mt-4 flex items-start gap-2 text-sm/5 text-muted"><IconShieldLock class="mt-0.5 size-4 shrink-0 stroke-muted"/><p>消息会在本机解密并存入 PGlite。使用共享设备后请退出账户。</p></div>
   </section></main>;
 }

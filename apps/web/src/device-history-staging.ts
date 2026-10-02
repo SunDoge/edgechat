@@ -1,11 +1,12 @@
 import Dexie, { type Table } from "dexie";
+import { assertLocalProfileId } from "./local-profiles";
 
 const DATABASE = "edgechat-device-history-staging";
 const STORE = "blobs";
 
 type Role = "source" | "target";
 
-function key(role: Role, linkId: string, suffix: string): string { return `${role}:${linkId}:${suffix}`; }
+function key(profileId: string, role: Role, linkId: string, suffix: string): string { return `${profileId}:${role}:${linkId}:${suffix}`; }
 
 class DeviceHistoryStagingDatabase extends Dexie {
   blobs!: Table<unknown, string>;
@@ -28,21 +29,29 @@ async function put(entryKey: string, value: unknown): Promise<void> {
   await staging.blobs.put(value, entryKey);
 }
 
-export const deviceHistoryStaging = {
-  sourceSnapshot: (linkId: string) => get<Blob>(key("source", linkId, "snapshot")),
-  saveSourceSnapshot: (linkId: string, snapshot: Blob) => put(key("source", linkId, "snapshot"), snapshot),
-  sourceManifest: <T>(linkId: string) => get<T>(key("source", linkId, "manifest")),
-  saveSourceManifest: (linkId: string, manifest: unknown) => put(key("source", linkId, "manifest"), manifest),
-  targetPlaintextShard: (linkId: string, index: number) => get<Blob>(key("target", linkId, `plaintext:${index}`)),
-  saveTargetPlaintextShard: (linkId: string, index: number, shard: Blob) => put(key("target", linkId, `plaintext:${index}`), shard),
-  async clearLink(linkId: string): Promise<void> {
-    await staging.transaction("rw", staging.blobs, async () => {
-      const keys = await staging.blobs.toCollection().primaryKeys();
-      const matching = keys.filter((entry) => {
-        const value = String(entry);
-        return value.startsWith(`source:${linkId}:`) || value.startsWith(`target:${linkId}:`);
+export function deviceHistoryStagingFor(profileId: string) {
+  const id = assertLocalProfileId(profileId);
+  return {
+    sourceSnapshot: (linkId: string) => get<Blob>(key(id, "source", linkId, "snapshot")),
+    saveSourceSnapshot: (linkId: string, snapshot: Blob) => put(key(id, "source", linkId, "snapshot"), snapshot),
+    sourceManifest: <T>(linkId: string) => get<T>(key(id, "source", linkId, "manifest")),
+    saveSourceManifest: (linkId: string, manifest: unknown) => put(key(id, "source", linkId, "manifest"), manifest),
+    targetPlaintextShard: (linkId: string, index: number) => get<Blob>(key(id, "target", linkId, `plaintext:${index}`)),
+    saveTargetPlaintextShard: (linkId: string, index: number, shard: Blob) => put(key(id, "target", linkId, `plaintext:${index}`), shard),
+    async clearLink(linkId: string): Promise<void> {
+      await staging.transaction("rw", staging.blobs, async () => {
+        const keys = await staging.blobs.toCollection().primaryKeys();
+        const prefix = `${id}:`; const source = `${prefix}source:${linkId}:`; const target = `${prefix}target:${linkId}:`;
+        const matching = keys.filter((entry) => String(entry).startsWith(source) || String(entry).startsWith(target));
+        if (matching.length) await staging.blobs.bulkDelete(matching);
       });
-      if (matching.length) await staging.blobs.bulkDelete(matching);
-    });
-  },
-};
+    },
+    async clearProfile(): Promise<void> {
+      await staging.transaction("rw", staging.blobs, async () => {
+        const keys = await staging.blobs.toCollection().primaryKeys();
+        const matching = keys.filter((entry) => String(entry).startsWith(`${id}:`));
+        if (matching.length) await staging.blobs.bulkDelete(matching);
+      });
+    },
+  };
+}

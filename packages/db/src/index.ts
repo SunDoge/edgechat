@@ -162,7 +162,8 @@ export class LocalDatabase {
   private requestId = 0;
   storage: "opfs" | "indexeddb" | "initializing" = "initializing";
 
-  constructor() {
+  constructor(private readonly profileId: string) {
+    if (!/^[0-9a-f-]{36}$/i.test(profileId)) throw new Error("Invalid local profile identifier");
     this.worker.onmessage = (event: MessageEvent<DbResponse>) => {
       const response = event.data;
       const pending = this.pending.get(response.id);
@@ -1179,7 +1180,7 @@ export class LocalDatabase {
     const id = ++this.requestId;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, ...message });
+      this.worker.postMessage({ id, profileId: this.profileId, ...message });
     });
   }
 }

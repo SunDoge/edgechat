@@ -1,9 +1,10 @@
 import Dexie, { type Table } from "dexie";
+import { assertLocalProfileId } from "./local-profiles";
 
 export type PushStatus = "unsupported" | "off" | "permission-needed" | "blocked" | "repairing" | "on" | "error";
 
 export type PushRenewalConfig = {
-  id: "active";
+  id: string;
   enabled: boolean;
   renewal_token: string | null;
   vapid_public_key: string | null;
@@ -11,20 +12,35 @@ export type PushRenewalConfig = {
   updated_at: number;
 };
 
+type PushSetting = { id: "active-profile"; value: string };
+
 class PushConfigDatabase extends Dexie {
   configs!: Table<PushRenewalConfig, string>;
+  settings!: Table<PushSetting, string>;
   constructor() {
     super("edgechat-push");
     this.version(1).stores({ configs: "id" });
+    this.version(2).stores({ configs: "id", settings: "id" });
   }
 }
 
 const database = new PushConfigDatabase();
+let activeProfileId: string | null = null;
+
+export async function setActivePushProfile(profileId: string): Promise<void> {
+  activeProfileId = assertLocalProfileId(profileId);
+  await database.settings.put({ id: "active-profile", value: activeProfileId });
+}
+
+function selectedProfileId(): string {
+  if (!activeProfileId) throw new Error("Push profile is not initialized");
+  return activeProfileId;
+}
 
 export const pushConfig = {
-  get: () => database.configs.get("active"),
-  put: (config: PushRenewalConfig) => database.configs.put(config),
-  clear: () => database.configs.delete("active"),
+  get: () => database.configs.get(selectedProfileId()),
+  put: (config: PushRenewalConfig) => database.configs.put({ ...config, id: selectedProfileId() }),
+  clear: () => database.configs.delete(selectedProfileId()),
 };
 
 type PushApi = {
@@ -86,7 +102,7 @@ export async function reconcilePush(api: PushApi, vapidPublicKey: string | undef
   if (!server.subscribed || server.endpoint !== subscription.endpoint || !renewalToken || stored?.vapid_public_key !== vapidPublicKey) {
     renewalToken = (await api.subscribePush(subscription)).renewal_token;
   }
-  await dependencies.config.put({ id: "active", enabled: true, renewal_token: renewalToken, vapid_public_key: vapidPublicKey, endpoint: subscription.endpoint, updated_at: Date.now() });
+  await dependencies.config.put({ id: activeProfileId ?? stored?.id ?? "active", enabled: true, renewal_token: renewalToken, vapid_public_key: vapidPublicKey, endpoint: subscription.endpoint, updated_at: Date.now() });
   return "on";
 }
 
@@ -101,3 +117,17 @@ export async function disablePush(api: Pick<PushApi, "unsubscribePush">, depende
 }
 
 export async function clearPushConfig(): Promise<void> { await pushConfig.clear(); }
+
+/** Detaches the origin-wide browser subscription while preserving this profile's opt-in for the next activation. */
+export async function suspendPush(api: Pick<PushApi, "unsubscribePush">, dependencies: Pick<PushDependencies, "supported" | "registration" | "config"> = browserDependencies): Promise<void> {
+  const stored = await dependencies.config.get();
+  const failures: unknown[] = [];
+  if (dependencies.supported()) {
+    const registration = await dependencies.registration().catch((error) => { failures.push(error); return null; });
+    const subscription = await registration?.pushManager.getSubscription().catch((error) => { failures.push(error); return null; });
+    await subscription?.unsubscribe().catch((error) => { failures.push(error); return false; });
+  }
+  await api.unsubscribePush().catch((error) => { failures.push(error); });
+  if (stored) await dependencies.config.put({ ...stored, renewal_token: null, endpoint: null, updated_at: Date.now() });
+  if (failures.length) throw failures[0];
+}

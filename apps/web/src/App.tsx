@@ -43,10 +43,12 @@ import { RoomSettingsDialog } from "./components/RoomSettingsDialog";
 import { ContactShareDialog } from "./components/ContactShareDialog";
 import { IdentityVerificationDialog } from "./components/IdentityVerificationDialog";
 import { ProfileDialog, type ProfileAvatarChange } from "./components/ProfileDialog";
+import { LocalProfilesDialog } from "./components/LocalProfilesDialog";
 import { activeIdentityDevices, deviceTrustState, verificationKey, type DeviceTrustState } from "./device-verification";
 import { ShareTargetDialog } from "./components/ShareTargetDialog";
 import { createDeviceHistoryManifest, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
-import { deviceHistoryStaging } from "./device-history-staging";
+import { deviceHistoryStagingFor } from "./device-history-staging";
+import { clearPendingDeviceLink } from "./device-linking";
 import { enqueueForwardBatch, ForwardBatchError, MAX_FORWARD_SELECTION, selectedTimelineMessages, toggleSelectedMessage } from "./message-selection";
 import { deleteStagedShare, loadStagedShare, shareTargetErrorMessage, shareTargetId, type StagedShare } from "./share-target";
 import { syncUnreadAppBadge } from "./app-badge";
@@ -62,9 +64,9 @@ import { createDeviceHistoryBundle } from "./device-history-bundle";
 import { openRoomPeerRecovery, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
 import { historyRecoveryCopy, type HistoryRecoveryViewState } from "./history-recovery-ui";
 import { openComposerDraft, sealComposerDraft } from "./draft-sync";
-import { clearPushConfig, disablePush, reconcilePush, type PushStatus } from "./push-subscription";
+import { clearPushConfig, disablePush, reconcilePush, setActivePushProfile, suspendPush, type PushStatus } from "./push-subscription";
+import { activateLocalProfile, bindLocalProfile, clearLocalProfileToken, createLocalProfile, profileSessionKey, removeLocalProfile, updateLocalProfileName, type LocalProfile } from "./local-profiles";
 
-const TOKEN_KEY = "edgechat.access-token";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const core = new WebCryptoMessagingCore();
@@ -77,12 +79,17 @@ type RoomIdentityTrust = { status: DeviceTrustState; verified: number; total: nu
 type ExportWritable = { write(data: string | ArrayBuffer | Blob): Promise<void>; close(): Promise<void>; abort(reason?: unknown): Promise<void> };
 type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<{ createWritable(): Promise<ExportWritable> }> };
 
-export function App() {
-  const api = new ApiClient("", localStorage.getItem(TOKEN_KEY));
-  const db = new LocalDatabase();
-  const attachmentCache = new AttachmentCiphertextCache();
-  const archiveSegmentCache = new ArchiveSegmentCiphertextCache();
+export function App(props: { localProfile: LocalProfile; localProfiles: LocalProfile[]; accessToken: string | null }) {
+  const profileId = props.localProfile.profile_id;
+  const api = new ApiClient("", props.accessToken);
+  const db = new LocalDatabase(profileId);
+  const attachmentCache = new AttachmentCiphertextCache(profileId);
+  const archiveSegmentCache = new ArchiveSegmentCiphertextCache(profileId);
+  const deviceHistoryStaging = deviceHistoryStagingFor(profileId);
+  const initialNotice = sessionStorage.getItem("edgechat.local-profile-notice") ?? "";
+  sessionStorage.removeItem("edgechat.local-profile-notice");
   const [session, setSession] = createSignal<SessionIdentity | null>(null);
+  const [localProfiles, setLocalProfiles] = createSignal(props.localProfiles);
   const [identity, setIdentity] = createSignal<DeviceIdentity | null>(null);
   const [mls, setMls] = createSignal<OpenMlsMessagingCore | null>(null);
   const [loading, setLoading] = createSignal(true);
@@ -115,7 +122,7 @@ export function App() {
   const [newRoom, setNewRoom] = createSignal(false);
   const [newRoomContact, setNewRoomContact] = createSignal<ContactIdentity | null>(null);
   const [contactShareOpen, setContactShareOpen] = createSignal(false);
-  const [notice, setNotice] = createSignal("");
+  const [notice, setNotice] = createSignal(initialNotice);
   const [pwaUpdateState, setPwaUpdateState] = createSignal<PwaUpdateState>("idle");
   const [pwaInstallState, setPwaInstallState] = createSignal<PwaInstallState>({ status: "unavailable", platform: "browser" });
   const [pushStatus, setPushStatus] = createSignal<PushStatus>("off");
@@ -123,6 +130,7 @@ export function App() {
   const [presenceSharing, setPresenceSharing] = createSignal(false);
   const [connectionState, setConnectionState] = createSignal<"online" | "syncing" | "offline">(navigator.onLine ? "syncing" : "offline");
   const [devicesOpen, setDevicesOpen] = createSignal(false);
+  const [localProfilesOpen, setLocalProfilesOpen] = createSignal(false);
   const [profileOpen, setProfileOpen] = createSignal(false);
   const [profile, setProfile] = createSignal<UserProfile | null>(null);
   const [deviceLinkOpen, setDeviceLinkOpen] = createSignal(false);
@@ -176,6 +184,12 @@ export function App() {
   let archiveRepairRun: Promise<void> | null = null;
   let peerRecoveryRun: Promise<void> | null = null;
   let draftSyncRun: Promise<void> | null = null;
+
+  function reflectLocalProfile(value: { user_id: string; display_name: string; device_id: string }): void {
+    setLocalProfiles((current) => current.map((item) => item.profile_id === profileId
+      ? { ...item, user_id: value.user_id, display_name: value.display_name, device_id: value.device_id, last_used_at: Date.now() }
+      : item));
+  }
   let peerRecoveryTimer: number | undefined;
   const peerRecoveryByRoom = new Map<RoomId, { recoveryId: string; afterSeq: number; throughSeq: number; resetRequired?: boolean }>();
   const peerRecoveryNeeds = new Map<RoomId, { processedThrough: number; requiredThrough: number }>();
@@ -271,7 +285,9 @@ export function App() {
       void draftWriteTail.finally(() => window.dispatchEvent(new Event(TAB_HANDOFF_READY_EVENT)));
     };
     window.addEventListener(PREPARE_TAB_HANDOFF_EVENT, prepareHandoff);
-    onCleanup(() => { unsubscribeUpdates(); unsubscribeInstall(); window.removeEventListener(PREPARE_TAB_HANDOFF_EVENT, prepareHandoff); });
+    const manageProfiles = () => { setDevicesOpen(false); setLocalProfilesOpen(true); };
+    window.addEventListener("edgechat:manage-local-profiles", manageProfiles);
+    onCleanup(() => { unsubscribeUpdates(); unsubscribeInstall(); window.removeEventListener(PREPARE_TAB_HANDOFF_EVENT, prepareHandoff); window.removeEventListener("edgechat:manage-local-profiles", manageProfiles); });
   });
 
   createEffect(() => {
@@ -364,8 +380,8 @@ export function App() {
     const userId = session()?.user_id;
     syncRef?.stop(); outboxRef?.stop(); archiveRef?.close();
     mlsRef?.destroy(); mlsRef = null; identityRef = null;
-    localStorage.removeItem(TOKEN_KEY); api.setToken(null);
-    if (userId) sessionStorage.setItem("edgechat.restore-user-id", userId);
+    void clearLocalProfileToken(profileId); api.setToken(null);
+    if (userId) sessionStorage.setItem(profileSessionKey(profileId, "restore-user-id"), userId);
     setSession(null); setIdentity(null); setMls(null);
   }
 
@@ -434,7 +450,7 @@ export function App() {
   async function persistMls(currentMls = mlsRef) {
     if (!currentMls || !identityRef) return;
     const stored = { ...identityRef, mlsState: currentMls.exportState() };
-    identityRef = stored; await saveIdentity(stored);
+    identityRef = stored; await saveIdentity(profileId, stored);
   }
 
   async function loadRooms(currentMls = mlsRef) {
@@ -779,9 +795,9 @@ export function App() {
   onMount(() => {
     void (async () => {
       try {
-        const storedIdentity = await loadIdentity();
+        const storedIdentity = await loadIdentity(profileId);
         if (!storedIdentity || !api.getToken()) return;
-        if (!storedIdentity.mlsState) { localStorage.removeItem(TOKEN_KEY); api.setToken(null); return; }
+        if (!storedIdentity.mlsState) { await clearLocalProfileToken(profileId); api.setToken(null); return; }
         const currentMls = await OpenMlsMessagingCore.create(storedIdentity.deviceId, storedIdentity.mlsState);
         identityRef = storedIdentity; mlsRef = currentMls; setMls(currentMls);
         let me: SessionIdentity; let offlineBootstrap = false;
@@ -795,7 +811,7 @@ export function App() {
           if (!cached) throw cause;
           me = cached; offlineBootstrap = true; needsRemoteRoomRefresh = true; setConnectionState("offline");
         }
-        await db.bindAccount(me.user_id, me.display_name); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); setIdentity(storedIdentity); setSession(me);
+        await Promise.all([db.bindAccount(me.user_id, me.display_name), bindLocalProfile(profileId, { user_id: me.user_id, display_name: me.display_name, device_id: me.device_id, access_token: props.accessToken! })]); reflectLocalProfile(me); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); setIdentity(storedIdentity); setSession(me);
         if (!offlineBootstrap) void reconcilePush(api, me.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
         if (offlineBootstrap) await Promise.all([loadCachedRooms(currentMls), refreshComposerDrafts()]);
         else await Promise.all([loadRooms(currentMls), refreshComposerDrafts()]);
@@ -804,10 +820,10 @@ export function App() {
       } catch (cause) {
         if (cause instanceof ApiError && cause.code === "account_deletion_pending") await clearLocalAccount("账户已在其他设备上停用；本机消息和密钥已清除");
         else if (cause instanceof ApiError && cause.status === 401) {
-          const stored = await loadIdentity();
+          const stored = await loadIdentity(profileId);
           const cached = stored ? cachedSessionForDevice(await db.cachedSession<SessionIdentity>(), stored.deviceId) : null;
-          if (cached) sessionStorage.setItem("edgechat.restore-user-id", cached.user_id);
-          localStorage.removeItem(TOKEN_KEY); api.setToken(null);
+          if (cached) sessionStorage.setItem(profileSessionKey(profileId, "restore-user-id"), cached.user_id);
+          await clearLocalProfileToken(profileId); api.setToken(null);
         }
         else setNotice(cause instanceof Error ? cause.message : "启动失败");
         if (!session()) { mlsRef?.destroy(); mlsRef = null; identityRef = null; setMls(null); setIdentity(null); }
@@ -1080,7 +1096,8 @@ export function App() {
   });
 
   async function ready(next: SessionIdentity, nextIdentity: DeviceIdentity, token: string, nextMls: OpenMlsMessagingCore, restoredHistory = false) {
-    localStorage.setItem(TOKEN_KEY, token); api.setToken(token);
+    await bindLocalProfile(profileId, { user_id: next.user_id, display_name: next.display_name, device_id: next.device_id, access_token: token }); api.setToken(token);
+    reflectLocalProfile(next);
     if (restoredHistory) { nextMls.destroy(); location.reload(); return; }
     identityRef = nextIdentity; mlsRef = nextMls;
     setIdentity(nextIdentity); setMls(nextMls); setSession(next); setLoading(true);
@@ -1836,7 +1853,7 @@ export function App() {
     const current = session();
     if (current) {
       const next = { ...current, display_name: result.profile.display_name, avatar_url: result.profile.avatar_url };
-      setSession(next); await db.bindAccount(next.user_id, next.display_name); await db.cacheSession(offlineSessionSnapshot(next));
+      setSession(next); reflectLocalProfile(next); await Promise.all([db.bindAccount(next.user_id, next.display_name), db.cacheSession(offlineSessionSnapshot(next)), updateLocalProfileName(profileId, next.display_name)]);
     }
     const currentMls = mls();
     if (currentMls) await loadRooms(currentMls);
@@ -1905,7 +1922,7 @@ export function App() {
     await outboxRef?.kick();
     const { checkpoint: backupCheckpoint, device_credential: deviceCredential } = await api.createBackupCheckpoint();
     identityRef = { ...identityRef, recoveryCredential: deviceCredential };
-    await saveIdentity(identityRef);
+    await saveIdentity(profileId, identityRef);
     await persistMls(currentMls);
     await db.bindAccount(currentSession.user_id, currentSession.display_name);
     if (!identityRef) throw new Error("设备加密状态尚未就绪");
@@ -1949,16 +1966,16 @@ export function App() {
       user_id: contents.userId, password: accountPassword, device_id: restoredIdentity.deviceId,
       backup_checkpoint: contents.backupCheckpoint, ...publicKeys,
     });
-    const previousIdentity = await loadIdentity();
-    await saveIdentity(restoredIdentity);
+    const previousIdentity = await loadIdentity(profileId);
+    await saveIdentity(profileId, restoredIdentity);
     try { await db.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId); }
     catch (cause) {
-      if (previousIdentity) await saveIdentity(previousIdentity); else await clearIdentity();
+      if (previousIdentity) await saveIdentity(profileId, previousIdentity); else await clearIdentity(profileId);
       throw cause;
     }
-    localStorage.removeItem(TOKEN_KEY); api.setToken(null);
-    sessionStorage.setItem("edgechat.restore-user-id", contents.userId);
-    sessionStorage.setItem("edgechat.restore-checkpoint", contents.backupCheckpoint);
+    await clearLocalProfileToken(profileId); api.setToken(null);
+    sessionStorage.setItem(profileSessionKey(profileId, "restore-user-id"), contents.userId);
+    sessionStorage.setItem(profileSessionKey(profileId, "restore-checkpoint"), contents.backupCheckpoint);
     location.reload();
   }
 
@@ -1969,18 +1986,19 @@ export function App() {
       const registration = await navigator.serviceWorker.ready.catch(() => null);
       await registration?.pushManager.getSubscription().then((subscription) => subscription?.unsubscribe()).catch(() => undefined);
       await clearPushConfig().catch(() => undefined);
-      await db.clearAccountData();
+      await Promise.all([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile()]);
     } catch { localCleanupFailed = true; }
     semanticRef?.close(); semanticRef = null;
     mlsRef?.destroy(); mlsRef = null; identityRef = null;
-    await clearIdentity();
-    localStorage.removeItem(TOKEN_KEY); api.setToken(null);
+    await clearIdentity(profileId); clearPendingDeviceLink(profileId);
+    const nextProfile = await removeLocalProfile(profileId); if (nextProfile) await setActivePushProfile(nextProfile.profile_id); api.setToken(null);
     window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; window.clearTimeout(draftRemoteSyncTimer); draftRemoteSyncTimer = undefined; selectedRef = null; composerRevision += 1;
     const shared = incomingShare(); if (shared) void deleteStagedShare(shared.id).catch(() => undefined);
     setCompose(""); setReplyingTo(null); setQuoting(null); setEditingMessage(null); setForwardingMessages(null); setIncomingShare(null); setContactShareOpen(false); setNewRoomContact(null); setIdentityVerificationOpen(false); setProfileOpen(false); setProfile(null); cancelMessageSelection(); setComposerDrafts({}); setMessageExpiryPolicies({}); setHistoryRecoveryRooms(new Set<RoomId>()); setPresenceSharing(false); setPresenceByRoom({});
     setRooms([]); setSelectedId(null); setMessages([]); setRoomIdentityTrust({}); setSession(null); setIdentity(null); setMls(null);
     setAccountDeletionOpen(false); setDevicesOpen(false);
-    setNotice(localCleanupFailed ? "账户已停用，但本机缓存未能完全清除；请清除该站点的浏览数据" : successMessage);
+    sessionStorage.setItem("edgechat.local-profile-notice", localCleanupFailed ? "账户已停用，但本机缓存未能完全清除；请清除该站点的浏览数据" : successMessage);
+    location.reload();
   }
 
   async function deleteAccount(password: string): Promise<void> {
@@ -2381,11 +2399,55 @@ export function App() {
     const ciphertext = await loadAttachmentCiphertext(attachment.id);
     return core.decryptAttachment(ciphertext, attachment.key, attachment.nonce);
   }
-  async function logout() { if (!confirm("退出并移除这台设备上的私钥？本地消息缓存仍需清除浏览器数据才能删除。")) return; await disablePush(api).catch(() => clearPushConfig()); await clearIdentity(); localStorage.removeItem(TOKEN_KEY); location.reload(); }
+  function profileChangeBlocked(): boolean {
+    return files().length > 0 || voiceRecording() || sendBusy() || accountExportBusy() || deviceLinkOpen() || backupOpen() || accountDeletionOpen()
+      || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
+      || Boolean(accountRemovalRun || keyPackageRefill || retentionRun || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun);
+  }
+
+  async function prepareProfileChange(): Promise<void> {
+    if (profileChangeBlocked()) throw new Error("请先完成发送、录音或账户安全操作，再切换身份");
+    stopTyping(); flushComposerDraft(); await draftWriteTail;
+    await suspendPush(api).catch(() => undefined);
+  }
+
+  async function switchLocalProfile(nextProfileId: string): Promise<void> {
+    if (nextProfileId === profileId) { setLocalProfilesOpen(false); return; }
+    await prepareProfileChange();
+    await activateLocalProfile(nextProfileId); await setActivePushProfile(nextProfileId);
+    location.reload();
+  }
+
+  async function addLocalProfile(): Promise<void> {
+    await prepareProfileChange();
+    const created = await createLocalProfile();
+    await activateLocalProfile(created.profile_id); await setActivePushProfile(created.profile_id);
+    location.reload();
+  }
+
+  async function removeCurrentLocalProfile(): Promise<void> {
+    syncRef?.stop(); outboxRef?.stop(); archiveRef?.close();
+    await disablePush(api).catch(() => clearPushConfig());
+    const cleanup = await Promise.allSettled([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearIdentity(profileId)]);
+    if (cleanup.some((result) => result.status === "rejected")) throw new Error("未能完全删除该身份的本机数据；身份仍保留，请重试或清除本站数据");
+    clearPendingDeviceLink(profileId);
+    localStorage.removeItem(profileSessionKey(profileId, "account-appeal-receipt"));
+    sessionStorage.removeItem(profileSessionKey(profileId, "restore-user-id"));
+    sessionStorage.removeItem(profileSessionKey(profileId, "restore-checkpoint"));
+    const next = await removeLocalProfile(profileId);
+    if (next) await setActivePushProfile(next.profile_id);
+    location.reload();
+  }
+
+  async function logout() {
+    if (!confirm("从这台浏览器移除此身份？该身份的本机消息、搜索索引、附件缓存和密钥都会删除；服务器账户和其他设备不受影响。")) return;
+    try { await removeCurrentLocalProfile(); }
+    catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法删除本机身份"); }
+  }
 
   const Workspace = () => {
     const currentSession = () => session()!;
-    return <main inert={newRoom() || contactShareOpen() || Boolean(forwardingMessages()) || Boolean(incomingShare()) || searchOpen() || devicesOpen() || profileOpen() || deviceLinkOpen() || backupOpen() || accountDeletionOpen() || roomSettingsOpen() || identityVerificationOpen() ? true : undefined} class="isolate h-dvh bg-white antialiased md:grid md:grid-cols-[360px_minmax(0,1fr)]">
+    return <main inert={newRoom() || contactShareOpen() || Boolean(forwardingMessages()) || Boolean(incomingShare()) || searchOpen() || devicesOpen() || localProfilesOpen() || profileOpen() || deviceLinkOpen() || backupOpen() || accountDeletionOpen() || roomSettingsOpen() || identityVerificationOpen() ? true : undefined} class="isolate h-dvh bg-white antialiased md:grid md:grid-cols-[360px_minmax(0,1fr)]">
       <aside class={`h-full min-w-0 border-r border-black/8 bg-white ${selected() ? "max-md:hidden" : ""}`}>
         <div class="grid h-full grid-rows-[64px_auto_1fr_36px]">
           <header class="flex items-center justify-between border-b border-black/5 px-4"><Brand/><button type="button" aria-label="设备与账户" class="rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => void openDevices()}><Avatar src={currentSession().avatar_url} label={initials(currentSession().display_name)} color={avatarColor(currentSession().user_id)}/></button></header>
@@ -2472,5 +2534,5 @@ export function App() {
     </main>;
   };
 
-  return <Show when={!loading()} fallback={<div class="grid min-h-dvh place-content-center justify-items-center gap-3 bg-white"><IconMessageCircle class="size-7 stroke-brand"/><p class="text-sm text-muted">正在打开本地消息库…</p></div>}><Show when={session() && identity() && mls()} fallback={<AuthScreen api={api} core={core} db={db} onReady={ready} onRestoreBackup={restorePortableBackup}/>}><Workspace/></Show></Show>;
+  return <><Show when={!loading()} fallback={<div class="grid min-h-dvh place-content-center justify-items-center gap-3 bg-white"><IconMessageCircle class="size-7 stroke-brand"/><p class="text-sm text-muted">正在打开本地消息库…</p></div>}><Show when={session() && identity() && mls()} fallback={<AuthScreen profileId={profileId} api={api} core={core} db={db} onReady={ready} onRestoreBackup={restorePortableBackup} onManageProfiles={() => setLocalProfilesOpen(true)}/>}><Workspace/></Show></Show><Show when={localProfilesOpen()}><LocalProfilesDialog profiles={localProfiles()} activeProfileId={profileId} onSelect={switchLocalProfile} onAdd={addLocalProfile} onClose={() => setLocalProfilesOpen(false)}/></Show></>;
 }

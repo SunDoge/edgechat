@@ -20,8 +20,11 @@ function shareDatabase() {
 
 function pushDatabase() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(PUSH_DATABASE, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(PUSH_STORE, { keyPath: "id" });
+    const request = indexedDB.open(PUSH_DATABASE, 2);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(PUSH_STORE)) request.result.createObjectStore(PUSH_STORE, { keyPath: "id" });
+      if (!request.result.objectStoreNames.contains("settings")) request.result.createObjectStore("settings", { keyPath: "id" });
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -31,10 +34,16 @@ async function pushConfig(operation, value) {
   const db = await pushDatabase();
   try {
     return await new Promise((resolve, reject) => {
-      const transaction = db.transaction(PUSH_STORE, operation === "get" ? "readonly" : "readwrite");
-      const request = operation === "get" ? transaction.objectStore(PUSH_STORE).get("active") : transaction.objectStore(PUSH_STORE).put(value);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      const transaction = db.transaction([PUSH_STORE, "settings"], operation === "get" ? "readonly" : "readwrite");
+      const activeRequest = transaction.objectStore("settings").get("active-profile");
+      activeRequest.onerror = () => reject(activeRequest.error);
+      activeRequest.onsuccess = () => {
+        const profileId = activeRequest.result?.value;
+        if (!profileId) { resolve(undefined); return; }
+        const request = operation === "get" ? transaction.objectStore(PUSH_STORE).get(profileId) : transaction.objectStore(PUSH_STORE).put({ ...value, id: profileId });
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      };
     });
   } finally { db.close(); }
 }

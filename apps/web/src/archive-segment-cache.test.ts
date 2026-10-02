@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
 
+const PROFILE = "11111111-1111-4111-8111-111111111111";
+
 function fakeOpfs(): FileSystemDirectoryHandle {
   const files = new Map<string, Uint8Array>();
   const directory = {
@@ -32,7 +34,7 @@ function fakeOpfs(): FileSystemDirectoryHandle {
 describe("ArchiveSegmentCiphertextCache", () => {
   it("preserves exact encrypted segment bytes in stable identifier order", async () => {
     const root = fakeOpfs();
-    const cache = new ArchiveSegmentCiphertextCache(async () => root);
+    const cache = new ArchiveSegmentCiphertextCache(PROFILE, async () => root);
     await cache.put("segment_000000000002", new Uint8Array([2, 3]).buffer);
     await cache.put("segment_000000000001", new Uint8Array([1]).buffer);
     const entries = await cache.entries();
@@ -43,7 +45,7 @@ describe("ArchiveSegmentCiphertextCache", () => {
   });
 
   it("rejects path-like and empty segment objects", async () => {
-    const cache = new ArchiveSegmentCiphertextCache(async () => fakeOpfs());
+    const cache = new ArchiveSegmentCiphertextCache(PROFILE, async () => fakeOpfs());
     expect(await cache.put("../../segment", new ArrayBuffer(1))).toBe(false);
     expect(await cache.put("segment_000000000001", new ArrayBuffer(0))).toBe(false);
   });

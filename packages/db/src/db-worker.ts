@@ -4,17 +4,22 @@ import { LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
 import { purgeRoomBefore, setRoomRetention, type LocalRetentionDays } from "./retention";
 import { purgeExpiredMessages } from "./expiry";
 
-type DbRequest =
-  | { id: number; kind?: "query"; sql: string; params?: unknown[]; exec?: boolean }
-  | { id: number; kind: "dump" }
-  | { id: number; kind: "purge-room"; roomId: string; cutoff: number }
-  | { id: number; kind: "set-room-retention"; roomId: string; days: LocalRetentionDays | null; now: number }
-  | { id: number; kind: "purge-expired-messages"; now: number }
-  | { id: number; kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string };
+type ProfileRequest = { id: number; profileId: string };
+type DbRequest = ProfileRequest & (
+  | { kind?: "query"; sql: string; params?: unknown[]; exec?: boolean }
+  | { kind: "dump" }
+  | { kind: "purge-room"; roomId: string; cutoff: number }
+  | { kind: "set-room-retention"; roomId: string; days: LocalRetentionDays | null; now: number }
+  | { kind: "purge-expired-messages"; now: number }
+  | { kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string }
+);
 type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
 
 let storage: "opfs" | "indexeddb" = "opfs";
 const CONFIG_DB = "edgechat-local-config";
+const PROFILE_ID = /^[0-9a-f-]{36}$/i;
+let openedProfileId: string | null = null;
+let database: Promise<PGlite> | null = null;
 
 function configDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -25,10 +30,10 @@ function configDatabase(): Promise<IDBDatabase> {
   });
 }
 
-async function activeDataDir(): Promise<string | null> {
+async function activeDataDir(profileId: string): Promise<string | null> {
   const config = await configDatabase();
   const value = await new Promise<string | null>((resolve, reject) => {
-    const request = config.transaction("settings").objectStore("settings").get("active-data-dir");
+    const request = config.transaction("settings").objectStore("settings").get(`active-data-dir:${profileId}`);
     request.onsuccess = () => resolve(typeof request.result === "string" ? request.result : null);
     request.onerror = () => reject(request.error);
   });
@@ -36,43 +41,51 @@ async function activeDataDir(): Promise<string | null> {
   return value;
 }
 
-async function setActiveDataDir(value: string): Promise<void> {
+async function setActiveDataDir(profileId: string, value: string): Promise<void> {
   const config = await configDatabase();
   await new Promise<void>((resolve, reject) => {
     const transaction = config.transaction("settings", "readwrite");
-    transaction.objectStore("settings").put(value, "active-data-dir");
+    transaction.objectStore("settings").put(value, `active-data-dir:${profileId}`);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   });
   config.close();
 }
 
-const database = (async () => {
-  const configured = await activeDataDir();
-  if (configured) {
-    storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
-    const db = new PGlite(configured);
-    await db.waitReady;
+function databaseFor(profileId: string): Promise<PGlite> {
+  if (!PROFILE_ID.test(profileId)) throw new Error("Invalid local profile identifier");
+  const normalized = profileId.toLowerCase();
+  if (openedProfileId && openedProfileId !== normalized) throw new Error("Database worker cannot cross local profile boundaries");
+  openedProfileId = normalized;
+  database ??= (async () => {
+    const configured = await activeDataDir(normalized);
+    if (configured) {
+      storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
+      const db = new PGlite(configured);
+      await db.waitReady;
+      await db.exec(LOCAL_SCHEMA);
+      return db;
+    }
+    let db: PGlite;
+    const slot = `edgechat-local-${normalized}`;
+    try {
+      db = new PGlite(`opfs-ahp://${slot}`);
+      await db.waitReady;
+    } catch {
+      storage = "indexeddb";
+      db = new PGlite(`idb://${slot}`);
+      await db.waitReady;
+    }
     await db.exec(LOCAL_SCHEMA);
     return db;
-  }
-  let db: PGlite;
-  try {
-    db = new PGlite("opfs-ahp://edgechat-local");
-    await db.waitReady;
-  } catch {
-    storage = "indexeddb";
-    db = new PGlite("idb://edgechat-local");
-    await db.waitReady;
-  }
-  await db.exec(LOCAL_SCHEMA);
-  return db;
-})();
+  })();
+  return database;
+}
 
 self.onmessage = async (event: MessageEvent<DbRequest>) => {
   const request = event.data;
   try {
-    const db = await database;
+    const db = await databaseFor(request.profileId);
     if (request.kind === "dump") {
       const blob = await db.runExclusive(() => db.dumpDataDir("gzip"));
       self.postMessage({ id: request.id, blob, storage } satisfies DbResponse);
@@ -95,7 +108,7 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
     }
     if (request.kind === "restore" || request.kind === "restore-device-history") {
       if (request.snapshot.size === 0 || request.snapshot.size > 2_147_483_648) throw new Error("Backup database is empty or too large");
-      const slot = `edgechat-local-restore-${crypto.randomUUID()}`;
+      const slot = `edgechat-local-${request.profileId.toLowerCase()}-restore-${crypto.randomUUID()}`;
       const dataDir = storage === "opfs" ? `opfs-ahp://${slot}` : `idb://${slot}`;
       const restored = new PGlite(dataDir, { loadDataDir: request.snapshot });
       try {
@@ -105,7 +118,7 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
         if (result.rows.length !== 1 || result.rows[0].user_id !== request.expectedUserId) throw new Error("备份中的本机消息库不属于这个账户");
         if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
         await restored.close();
-        await setActiveDataDir(dataDir);
+        await setActiveDataDir(request.profileId.toLowerCase(), dataDir);
       } catch (error) {
         await restored.close().catch(() => undefined);
         throw error;

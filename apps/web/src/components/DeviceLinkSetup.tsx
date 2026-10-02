@@ -7,7 +7,7 @@ import { renderSVG } from "uqr";
 import { clearIdentity, loadIdentity, saveIdentity } from "../vault";
 import { clearPendingDeviceLink, deviceLinkUrl, loadPendingDeviceLink, randomDeviceLinkToken, savePendingDeviceLink, sha256Base64Url, type PendingDeviceLink } from "../device-linking";
 import { openDeviceHistory, openDeviceHistoryShard, type DeviceHistoryManifest } from "../device-history-transfer";
-import { deviceHistoryStaging } from "../device-history-staging";
+import { deviceHistoryStagingFor } from "../device-history-staging";
 import { AttachmentCiphertextCache } from "../attachment-cache";
 import { ArchiveSegmentCiphertextCache } from "../archive-segment-cache";
 import { openDeviceHistoryBundle } from "../device-history-bundle";
@@ -15,6 +15,7 @@ import { openDeviceHistoryBundle } from "../device-history-bundle";
 type Stage = "preparing" | "waiting" | "approved" | "joining" | "error";
 
 export function DeviceLinkSetup(props: {
+  profileId: string;
   api: ApiClient;
   core: WebCryptoMessagingCore;
   db: LocalDatabase;
@@ -32,8 +33,9 @@ export function DeviceLinkSetup(props: {
   let timer: number | undefined;
   let stopped = false;
   let handedOff = false;
-  const attachmentCache = new AttachmentCiphertextCache();
-  const archiveSegmentCache = new ArchiveSegmentCiphertextCache();
+  const attachmentCache = new AttachmentCiphertextCache(props.profileId);
+  const archiveSegmentCache = new ArchiveSegmentCiphertextCache(props.profileId);
+  const deviceHistoryStaging = deviceHistoryStagingFor(props.profileId);
 
   const url = createMemo(() => pending() ? deviceLinkUrl(location.origin, pending()!.link_id, pending()!.secret) : "");
   const qr = createMemo(() => url() ? renderSVG(url(), { ecc: "M", border: 3, pixelSize: 5, blackColor: "#171717", whiteColor: "#ffffff" }) : "");
@@ -41,15 +43,15 @@ export function DeviceLinkSetup(props: {
   async function persistMlsState() {
     if (!identity || !mls) return;
     identity = { ...identity, mlsState: mls.exportState() };
-    await saveIdentity(identity);
+    await saveIdentity(props.profileId, identity);
   }
 
   async function begin(): Promise<void> {
     setStage("preparing"); setError("");
-    let record = loadPendingDeviceLink();
-    const stored = await loadIdentity();
-    if (record && (!stored || stored.deviceId !== record.device_id)) { clearPendingDeviceLink(); record = null; }
-    if (record && record.expires_at <= Date.now()) { clearPendingDeviceLink(); await clearIdentity(); record = null; }
+    let record = loadPendingDeviceLink(props.profileId);
+    const stored = await loadIdentity(props.profileId);
+    if (record && (!stored || stored.deviceId !== record.device_id)) { clearPendingDeviceLink(props.profileId); record = null; }
+    if (record && record.expires_at <= Date.now()) { clearPendingDeviceLink(props.profileId); await clearIdentity(props.profileId); record = null; }
     identity = record && stored ? stored : await props.core.createIdentity();
     mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
     const publicKeys = await props.core.exportPublicIdentity(identity);
@@ -64,7 +66,7 @@ export function DeviceLinkSetup(props: {
         mls_key_packages: packages,
       });
       record = { version: 1, link_id: result.link_id, secret: result.secret, device_id: identity.deviceId, package_count: packages.length, expires_at: result.expires_at };
-      savePendingDeviceLink(record);
+      savePendingDeviceLink(props.profileId, record);
     }
     setPending(record); setStage("waiting");
     await poll();
@@ -75,7 +77,7 @@ export function DeviceLinkSetup(props: {
     const packages = mls.generateKeyPackages(required - current.package_count + 8);
     await persistMlsState();
     const next = { ...current, package_count: current.package_count + packages.length };
-    savePendingDeviceLink(next); setPending(next);
+    savePendingDeviceLink(props.profileId, next); setPending(next);
     await props.api.uploadDeviceLinkPackages(current.link_id, current.secret, packages);
     return next;
   }
@@ -121,7 +123,7 @@ export function DeviceLinkSetup(props: {
       }, identity);
     }
     const accessToken = current.access_token ?? randomDeviceLinkToken();
-    const withToken = { ...current, access_token: accessToken }; savePendingDeviceLink(withToken); setPending(withToken);
+    const withToken = { ...current, access_token: accessToken }; savePendingDeviceLink(props.profileId, withToken); setPending(withToken);
     const tokenHash = await sha256Base64Url(accessToken);
     const signature = await props.core.sign(identity, deviceLinkClaimBytes(current.link_id, current.device_id, tokenHash));
     const session = await props.api.claimDeviceLink(current.link_id, current.secret, accessToken, signature);
@@ -151,7 +153,7 @@ export function DeviceLinkSetup(props: {
       if (!nextStatus.history_transfer) await props.api.acknowledgeDeviceLinkHistory(current.link_id, current.secret);
       await deviceHistoryStaging.clearLink(current.link_id);
     }
-    clearPendingDeviceLink(); handedOff = true;
+    clearPendingDeviceLink(props.profileId); handedOff = true;
     props.onReady(session, identity, accessToken, mls, Boolean(historySnapshot));
   }
 
@@ -162,7 +164,7 @@ export function DeviceLinkSetup(props: {
       if (next.status === "awaiting_packages") {
         await replenishPackages(current, next.required_packages); setStage("approved");
       } else if (next.status === "approved") setStage("approved");
-      else if (next.status === "complete" || next.status === "claimed") return await finishLink(loadPendingDeviceLink() ?? current, next);
+      else if (next.status === "complete" || next.status === "claimed") return await finishLink(loadPendingDeviceLink(props.profileId) ?? current, next);
       else if (next.status === "cancelled") throw new Error("这个链接申请已取消");
       else setStage("waiting");
       timer = window.setTimeout(() => void poll(), 1_500);
@@ -178,7 +180,7 @@ export function DeviceLinkSetup(props: {
 
   async function cancel() {
     if (status()?.status && status()?.status !== "pending") return;
-    window.clearTimeout(timer); clearPendingDeviceLink(); await clearIdentity(); props.onCancel();
+    window.clearTimeout(timer); clearPendingDeviceLink(props.profileId); await clearIdentity(props.profileId); props.onCancel();
   }
 
   onMount(() => void begin().catch((cause) => { setError(cause instanceof Error ? cause.message : "无法创建链接"); setStage("error"); }));

@@ -1,5 +1,6 @@
 const DIRECTORY = "archive-segment-ciphertext-v1";
 const SAFE_ID = /^[A-Za-z0-9_-]{16,64}$/;
+const SAFE_PROFILE_ID = /^[0-9a-f-]{36}$/i;
 
 type RootProvider = () => Promise<FileSystemDirectoryHandle>;
 
@@ -10,10 +11,15 @@ function browserRoot(): Promise<FileSystemDirectoryHandle> {
 
 /** Exact encrypted segment objects; keys remain in the local E2EE database. */
 export class ArchiveSegmentCiphertextCache {
-  constructor(private root: RootProvider = browserRoot) {}
+  private readonly directoryName: string;
+
+  constructor(profileId: string, private root: RootProvider = browserRoot) {
+    if (!SAFE_PROFILE_ID.test(profileId)) throw new Error("Invalid local profile identifier");
+    this.directoryName = `${DIRECTORY}-${profileId.toLowerCase()}`;
+  }
 
   private async directory(): Promise<FileSystemDirectoryHandle> {
-    return (await this.root()).getDirectoryHandle(DIRECTORY, { create: true });
+    return (await this.root()).getDirectoryHandle(this.directoryName, { create: true });
   }
 
   async get(id: string): Promise<ArrayBuffer | null> {
@@ -36,6 +42,11 @@ export class ArchiveSegmentCiphertextCache {
   async remove(id: string): Promise<void> {
     if (!SAFE_ID.test(id)) return;
     try { await (await this.directory()).removeEntry(id); }
+    catch (error) { if (!(error instanceof DOMException && error.name === "NotFoundError")) throw error; }
+  }
+
+  async clear(): Promise<void> {
+    try { await (await this.root()).removeEntry(this.directoryName, { recursive: true }); }
     catch (error) { if (!(error instanceof DOMException && error.name === "NotFoundError")) throw error; }
   }
 

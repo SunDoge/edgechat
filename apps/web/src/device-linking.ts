@@ -1,6 +1,7 @@
 import { decodeBase64Url, encodeBase64Url } from "@edgechat/messaging-core";
+import { assertLocalProfileId } from "./local-profiles";
 
-export const PENDING_DEVICE_LINK_KEY = "edgechat.pending-device-link.v1";
+const PENDING_DEVICE_LINK_KEY = "edgechat.pending-device-link.v1";
 
 export type PendingDeviceLink = {
   version: 1;
@@ -30,18 +31,22 @@ export function parseDeviceLinkInput(value: string): string {
   throw new Error("这不是有效的设备链接码");
 }
 
-export function savePendingDeviceLink(link: PendingDeviceLink): void {
-  localStorage.setItem(PENDING_DEVICE_LINK_KEY, JSON.stringify(link));
+function pendingDeviceLinkKey(profileId: string): string {
+  return `${PENDING_DEVICE_LINK_KEY}.${assertLocalProfileId(profileId)}`;
 }
 
-export function loadPendingDeviceLink(): PendingDeviceLink | null {
+export function savePendingDeviceLink(profileId: string, link: PendingDeviceLink): void {
+  localStorage.setItem(pendingDeviceLinkKey(profileId), JSON.stringify(link));
+}
+
+export function loadPendingDeviceLink(profileId: string): PendingDeviceLink | null {
   try {
-    const value = JSON.parse(localStorage.getItem(PENDING_DEVICE_LINK_KEY) ?? "null") as Partial<PendingDeviceLink> | null;
+    const value = JSON.parse(localStorage.getItem(pendingDeviceLinkKey(profileId)) ?? "null") as Partial<PendingDeviceLink> | null;
     return value?.version === 1 && typeof value.link_id === "string" && typeof value.secret === "string" && typeof value.device_id === "string" && typeof value.package_count === "number" && typeof value.expires_at === "number" ? value as PendingDeviceLink : null;
   } catch { return null; }
 }
 
-export function clearPendingDeviceLink(): void { localStorage.removeItem(PENDING_DEVICE_LINK_KEY); }
+export function clearPendingDeviceLink(profileId: string): void { localStorage.removeItem(pendingDeviceLinkKey(profileId)); }
 
 export function randomDeviceLinkToken(): string {
   return encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));

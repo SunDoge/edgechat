@@ -1,5 +1,6 @@
 import type { DeviceIdentity } from "@edgechat/messaging-core";
 import Dexie, { type Table } from "dexie";
+import { assertLocalProfileId } from "./local-profiles";
 
 const DB_NAME = "edgechat-device-vault";
 const STORE_NAME = "identity";
@@ -17,14 +18,14 @@ class DeviceVaultDatabase extends Dexie {
 
 const vault = new DeviceVaultDatabase();
 
-export async function saveIdentity(identity: DeviceIdentity): Promise<void> {
-  await vault.identity.put(identity, "current");
+export async function saveIdentity(profileId: string, identity: DeviceIdentity): Promise<void> {
+  await vault.identity.put(identity, assertLocalProfileId(profileId));
 }
 
-export async function loadIdentity(): Promise<DeviceIdentity | null> {
-  return (await vault.identity.get("current")) ?? null;
+export async function loadIdentity(profileId: string): Promise<DeviceIdentity | null> {
+  return (await vault.identity.get(assertLocalProfileId(profileId))) ?? null;
 }
 
-export async function clearIdentity(): Promise<void> {
-  await vault.identity.clear();
+export async function clearIdentity(profileId: string): Promise<void> {
+  await vault.identity.delete(assertLocalProfileId(profileId));
 }

@@ -6,6 +6,8 @@ import { registerPwaServiceWorker } from "./pwa-lifecycle";
 import { initializePwaInstall } from "./pwa-install";
 import { registerPwaFileHandler } from "./pwa-file-handler";
 import { acquireTabLease, awaitTabHandoff, TAB_CHANNEL, type LockProvider, type TabLease, type TabMessage } from "./tab-coordination";
+import { ensureActiveLocalProfile, listLocalProfiles, localProfileToken } from "./local-profiles";
+import { setActivePushProfile } from "./push-subscription";
 import "./styles.css";
 
 initializePwaInstall();
@@ -59,9 +61,12 @@ function showStandby(status: StandbyStatus = "waiting"): void {
   replaceView(() => <SecondaryTab/>);
 }
 
-function activate(lease: TabLease): void {
+async function activate(lease: TabLease): Promise<void> {
+  const profile = await ensureActiveLocalProfile();
+  const [token, profiles] = await Promise.all([localProfileToken(profile.profile_id), listLocalProfiles()]);
+  await setActivePushProfile(profile.profile_id);
   activeLease = lease; handingOff = false;
-  replaceView(() => <App/>);
+  replaceView(() => <App localProfile={profile} localProfiles={profiles} accessToken={token}/>);
 }
 
 async function waitForPrimary(): Promise<void> {
@@ -69,7 +74,7 @@ async function waitForPrimary(): Promise<void> {
   waitingForLease = true;
   try {
     const lease = await acquireTabLease(navigator.locks as unknown as LockProvider, true);
-    if (lease) activate(lease);
+    if (lease) await activate(lease);
   } catch {
     if (!activeLease) {
       showStandby("error");
@@ -103,7 +108,7 @@ channel?.addEventListener("message", (event: MessageEvent<TabMessage>) => {
 void (async () => {
   if (!navigator.locks) { showStandby("incompatible"); return; }
   const lease = await acquireTabLease(navigator.locks as unknown as LockProvider, false);
-  if (lease) activate(lease);
+  if (lease) await activate(lease);
   else { showStandby(); void waitForPrimary(); }
 })().catch(() => {
   showStandby("error");
