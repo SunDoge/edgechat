@@ -7,6 +7,7 @@ import { Avatar } from "./primitives";
 import { EncryptedRoomAvatar } from "./EncryptedRoomAvatar";
 import { handleMenuNavigation, openMenuFromTrigger } from "../menu-navigation";
 import { MuteDurationDialog } from "./MuteDurationDialog";
+import { millisecondsUntilNextLocalDay, roomActivityTimeLabel } from "../message-date";
 
 export function RoomListItem(props: {
   room: ServerRoom;
@@ -17,6 +18,7 @@ export function RoomListItem(props: {
   groupAvatar?: RoomProfileAvatar | null;
   decryptGroupAvatar?: (avatar: RoomProfileAvatar) => Promise<ArrayBuffer>;
   preview: string;
+  activityAt?: number | null;
   selected: boolean;
   unread: number;
   preference: LocalRoomPreference;
@@ -43,9 +45,12 @@ export function RoomListItem(props: {
   const archived = () => props.preference.archived_at !== null;
 
   createEffect(() => {
-    const until = Number(props.preference.muted_until ?? 0); const now = Date.now(); setClock(now);
-    if (!Number.isSafeInteger(until) || until <= now || until === Number.MAX_SAFE_INTEGER) return;
-    const timer = window.setTimeout(() => setClock(Date.now()), Math.min(until - now + 50, 2_147_483_647));
+    const until = Number(props.preference.muted_until ?? 0); const activityAt = Number(props.activityAt ?? 0); const now = Date.now(); setClock(now);
+    const delays: number[] = [];
+    if (Number.isSafeInteger(until) && until > now && until !== Number.MAX_SAFE_INTEGER) delays.push(until - now + 50);
+    if (Number.isSafeInteger(activityAt) && activityAt > 0) delays.push(millisecondsUntilNextLocalDay(now));
+    if (!delays.length) return;
+    const timer = window.setTimeout(() => setClock(Date.now()), Math.min(...delays, 2_147_483_647));
     onCleanup(() => window.clearTimeout(timer));
   });
 
@@ -76,7 +81,7 @@ export function RoomListItem(props: {
         <EncryptedRoomAvatar class="size-11" avatar={props.groupAvatar} label={props.avatarLabel} color={props.avatarColor} load={load()}/>
       }</Show>
       <span class="min-w-0">
-        <span class="flex items-center gap-1.5"><strong class="min-w-0 truncate text-sm font-semibold text-ink">{props.title}</strong><Show when={props.recoveryRequired}><IconAlertTriangle aria-label="需要恢复" class="size-3.5 shrink-0 stroke-amber-600"/></Show><Show when={pinned()}><IconPin aria-label="已置顶" class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={muted()}><IconBellOff aria-label={props.preference.muted_until === Number.MAX_SAFE_INTEGER ? "已一直静音" : `已静音至 ${new Date(Number(props.preference.muted_until)).toLocaleString("zh-CN")}`} class="size-3.5 shrink-0 stroke-muted"/></Show></span>
+        <span class="flex items-center gap-1.5"><strong class="min-w-0 truncate text-sm font-semibold text-ink">{props.title}</strong><Show when={props.recoveryRequired}><IconAlertTriangle aria-label="需要恢复" class="size-3.5 shrink-0 stroke-amber-600"/></Show><Show when={pinned()}><IconPin aria-label="已置顶" class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={muted()}><IconBellOff aria-label={props.preference.muted_until === Number.MAX_SAFE_INTEGER ? "已一直静音" : `已静音至 ${new Date(Number(props.preference.muted_until)).toLocaleString("zh-CN")}`} class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={props.activityAt}>{(timestamp) => <time datetime={new Date(timestamp()).toISOString()} class="ml-auto shrink-0 text-xs font-normal tabular-nums text-neutral-400">{roomActivityTimeLabel(timestamp(), clock())}</time>}</Show></span>
         <small class={`mt-1 block truncate text-sm ${props.recoveryRequired ? "font-medium text-amber-700" : "text-muted"}`}>{props.recoveryRequired ? "需要从另一台设备恢复" : props.preview}</small>
       </span>
       <Show when={props.unread > 0} fallback={<span/>}><span aria-label={`${props.unread} 条未读消息`} class="grid min-w-5 place-items-center self-center rounded-full bg-brand px-1.5 py-0.5 text-[0.6875rem] font-semibold tabular-nums text-white">{Math.min(props.unread, 99)}{props.unread > 99 ? "+" : ""}</span></Show>

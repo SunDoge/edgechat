@@ -1,5 +1,6 @@
 const dayFormatter = new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" });
 const yearFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
+const weekdayFormatter = new Intl.DateTimeFormat("zh-CN", { weekday: "short" });
 
 function localDayNumber(timestamp: number): number {
   const value = new Date(timestamp);
@@ -21,6 +22,16 @@ export function messageDateLabel(timestamp: number, now = Date.now()): string {
 export function messageDateValue(timestamp: number): string {
   const value = new Date(timestamp);
   return [value.getFullYear(), String(value.getMonth() + 1).padStart(2, "0"), String(value.getDate()).padStart(2, "0")].join("-");
+}
+
+export function roomActivityTimeLabel(timestamp: number, now = Date.now()): string {
+  const value = new Date(timestamp);
+  const dayDistance = localDayNumber(now) - localDayNumber(timestamp);
+  if (dayDistance === 0) return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
+  if (dayDistance === 1) return "昨天";
+  if (dayDistance > 1 && dayDistance < 7) return weekdayFormatter.format(value);
+  if (value.getFullYear() === new Date(now).getFullYear()) return `${value.getMonth() + 1}月${value.getDate()}日`;
+  return `${value.getFullYear()}/${value.getMonth() + 1}/${value.getDate()}`;
 }
 
 export function millisecondsUntilNextLocalDay(now = Date.now()): number {

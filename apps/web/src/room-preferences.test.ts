@@ -29,4 +29,10 @@ describe("room organization", () => {
     expect(organizedRooms(rooms, preferences, false).map((room) => room.room_id)).toEqual([b, a]);
     expect(organizedRooms(rooms, preferences, true).map((room) => room.room_id)).toEqual([c]);
   });
+
+  it("sorts unpinned chats by device-local activity", () => {
+    const rooms = [a, b, c].map((room_id) => ({ room_id }));
+    const preferences = { [b]: { ...defaultRoomPreference(b), pinned_at: 20 } };
+    expect(organizedRooms(rooms, preferences, false, { [a]: 10, [b]: 5, [c]: 30 }).map((room) => room.room_id)).toEqual([b, c, a]);
+  });
 });

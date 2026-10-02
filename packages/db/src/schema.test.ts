@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
-import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
+import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_LIST_ACTIVITIES_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
 import { LOCAL_CLEAR_ACCOUNT_DATA, LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
 import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4, LOCAL_SCHEMA_V5 } from "./migrations";
 import { purgeRoomBefore, setRoomRetention } from "./retention";
@@ -517,6 +517,32 @@ describe("PGlite local full-text index", () => {
     );
     const delivered = await db.query<{ last_delivered_seq: number }>("SELECT last_delivered_seq FROM delivery_receipts WHERE room_id = $1", [room]);
     expect(Number(delivered.rows[0].last_delivered_seq)).toBe(3);
+    await db.close();
+  });
+
+  it("selects one visible local activity per room and lets a visible outbox message lead", async () => {
+    const db = new PGlite(); await db.exec(LOCAL_SCHEMA);
+    const roomA = "!aaaaaaaaaaaaaaaa:example.com"; const roomB = "!bbbbbbbbbbbbbbbb:example.com";
+    await db.query(
+      `INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload)
+       VALUES ('a-visible','$a-visible:example.com',$1,1,'@bob:example.com','bob','message.text',10,'ciphertext','visible',$3::jsonb),
+              ('a-hidden','$a-hidden:example.com',$1,2,'@mallory:example.com','mallory','message.text',20,'ciphertext','hidden',$4::jsonb),
+              ('b-visible','$b-visible:example.com',$2,1,'@bob:example.com','bob','message.image',15,'ciphertext',NULL,$5::jsonb)`,
+      [roomA, roomB, JSON.stringify({ version: 2, message_id: "$a-visible:example.com", parts: [] }), JSON.stringify({ version: 2, message_id: "$a-hidden:example.com", parts: [] }), JSON.stringify({ version: 2, message_id: "$b-visible:example.com", parts: [] })],
+    );
+    await db.query("INSERT INTO room_hidden_senders VALUES ($1,'@mallory:example.com',20)", [roomA]);
+    await db.query(
+      `INSERT INTO outbox (event_id,message_id,room_id,event_json,plaintext,payload,status,attempts,next_attempt_at,created_at,updated_at)
+       VALUES ('a-pending','$a-pending:example.com',$1,$2::jsonb,'pending preview',$3::jsonb,'failed',1,30,30,30),
+              ('a-reaction','$a-reaction:example.com',$1,$4::jsonb,'',$5::jsonb,'pending',0,40,40,40)`,
+      [roomA,
+        JSON.stringify({ event_id: "a-pending", sender: "@alice:example.com", type: "message.text" }), JSON.stringify({ version: 2, message_id: "$a-pending:example.com", parts: [] }),
+        JSON.stringify({ event_id: "a-reaction", sender: "@alice:example.com", type: "message.reaction" }), JSON.stringify({})],
+    );
+    const activities = (await db.query<{ room_id: string; message_id: string; plaintext: string | null; outbox_status: string | null }>(ROOM_LIST_ACTIVITIES_SQL)).rows;
+    expect(activities).toHaveLength(2);
+    expect(activities[0]).toMatchObject({ room_id: roomA, message_id: "$a-pending:example.com", plaintext: "pending preview", outbox_status: "failed" });
+    expect(activities[1]).toMatchObject({ room_id: roomB, message_id: "$b-visible:example.com", plaintext: null, outbox_status: null });
     await db.close();
   });
 

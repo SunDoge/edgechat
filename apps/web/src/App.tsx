@@ -16,7 +16,7 @@ import {
   IconSettings,
   IconX,
 } from "@tabler/icons-solidjs";
-import { LocalDatabase, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomAttachmentCursor, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
+import { LocalDatabase, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomAttachmentCursor, type LocalRoomListActivity, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
 import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
 import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
@@ -78,6 +78,7 @@ import { StartupRecoveryScreen } from "./components/StartupRecoveryScreen";
 import { inspectLocalStorageHealth, requestPersistentLocalStorage, type LocalStorageHealth, type PersistenceRequestResult } from "./local-storage-health";
 import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, isAccountExportStorageError, type AccountExportStaging } from "./account-export-staging";
 import { startsNewMessageDay } from "./message-date";
+import { formatRoomActivityPreview } from "./room-list-preview";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -124,6 +125,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [deliveryReceipts, setDeliveryReceipts] = createSignal<LocalDeliveryReceipt[]>([]);
   const [unreadCounts, setUnreadCounts] = createSignal<Record<string, number>>({});
   const [roomPreferences, setRoomPreferences] = createSignal<Record<string, LocalRoomPreference>>({});
+  const [roomListActivities, setRoomListActivities] = createSignal<Record<string, LocalRoomListActivity>>({});
   const [messageExpiryPolicies, setMessageExpiryPolicies] = createSignal<Record<string, LocalMessageExpiryPolicy>>({});
   const [roomProfileAvatars, setRoomProfileAvatars] = createSignal<Record<string, RoomProfileAvatar | null>>({});
   const [showArchived, setShowArchived] = createSignal(false);
@@ -250,7 +252,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const archivedRoomCount = createMemo(() => rooms().filter((room) => preferenceFor(room.room_id).archived_at !== null).length);
   const incomingRequests = createMemo(() => rooms().filter((room) => room.request_status === "pending" && room.request_role === "recipient"));
   const visibleRooms = createMemo(() => rooms().filter((room) => room.request_status !== "rejected" && !(room.request_status === "pending" && room.request_role === "recipient")));
-  const listedRooms = createMemo(() => organizedRooms(visibleRooms(), roomPreferences(), showArchived()));
+  const roomActivityTimes = createMemo<Record<string, number>>(() => Object.fromEntries(rooms().map((room) => [room.room_id, Math.max(
+    Number(room.created_at), Number(roomListActivities()[room.room_id]?.created_at ?? 0), Number(composerDrafts()[room.room_id]?.updated_at ?? 0),
+  )])));
+  const listedRooms = createMemo(() => organizedRooms(visibleRooms(), roomPreferences(), showArchived(), roomActivityTimes()));
   const pendingDeleteTargets = createMemo(() => new Set(pendingMessages().filter((item) => item.event.type === "message.delete").map((item) => item.event.metadata.target_event_id).filter((value): value is string => typeof value === "string")));
   const timelineEntries = createMemo<TimelineEntry[]>(() => [
     ...messages().map((message) => ({ kind: "message" as const, key: `message:${message.message_id}`, message })),
@@ -449,7 +454,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   function roomPreview(room: ServerRoom): string {
+    const activity = roomListActivities()[room.room_id]; const currentUserId = session()?.user_id ?? "";
     return composerDraftPreview(composerDrafts()[room.room_id])
+      ?? (activity ? formatRoomActivityPreview(activity, currentUserId, room.kind === "group", (userId) => memberName(room, userId)) : null)
       ?? (room.purpose === "saved" ? room.current_seq ? "仅你和你的设备可读" : "保存消息、图片和文件" : room.blocked_by_me ? "已屏蔽" : room.kind === "group" ? `${room.members.length} 人群聊` : room.current_seq ? "端到端加密消息" : "还没有消息");
   }
 
@@ -581,7 +588,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setRooms(response.rooms.map((room) => ({ ...room, name: profiles.get(room.room_id)?.name ?? room.name })));
     setRoomProfileAvatars(Object.fromEntries([...profiles].map(([roomId, profile]) => [roomId, profile.avatar])));
     needsRemoteRoomRefresh = false;
-    await Promise.all([refreshUnreadCounts(), refreshRoomPreferences(), refreshMessageExpiryPolicies()]);
+    await Promise.all([refreshUnreadCounts(), refreshRoomPreferences(), refreshMessageExpiryPolicies(), refreshRoomListActivities()]);
   }
 
   async function loadCachedRooms(currentMls: OpenMlsMessagingCore): Promise<void> {
@@ -589,7 +596,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const profiles = new Map((await db.roomProfiles()).map((profile) => [profile.room_id, profile]));
     setRooms(cached.map((room) => ({ ...room, name: profiles.get(room.room_id)?.name ?? room.name })));
     setRoomProfileAvatars(Object.fromEntries([...profiles].map(([roomId, profile]) => [roomId, profile.avatar])));
-    await Promise.all([refreshUnreadCounts(), refreshRoomPreferences(), refreshMessageExpiryPolicies()]);
+    await Promise.all([refreshUnreadCounts(), refreshRoomPreferences(), refreshMessageExpiryPolicies(), refreshRoomListActivities()]);
   }
 
   async function refreshRoomProjection(roomId: RoomId, forceLatest = false): Promise<void> {
@@ -666,6 +673,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function refreshRoomPreferences(): Promise<void> {
     const rows = await db.roomPreferences();
     setRoomPreferences(Object.fromEntries(rows.map((row) => [row.room_id, row])));
+  }
+
+  async function refreshRoomListActivities(): Promise<void> {
+    const rows = await db.roomListActivities();
+    setRoomListActivities(Object.fromEntries(rows.map((row) => [row.room_id, row])));
   }
 
   async function refreshMessageExpiryPolicies(): Promise<void> {
@@ -753,7 +765,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     retentionRun = db.enforceLocalRetention().then(async (deleted) => {
       if (deleted > 0) {
         if (selectedRef) await refreshRoomProjection(selectedRef);
-        await refreshUnreadCounts();
+        await Promise.all([refreshUnreadCounts(), refreshRoomListActivities()]);
         if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
         if (showNotice) setNotice(`已从这台设备清理 ${deleted} 条到期消息`);
       }
@@ -767,7 +779,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     messageExpiryRun = db.purgeExpiredMessages().then(async (deleted) => {
       if (deleted > 0) {
         if (selectedRef) await refreshRoomProjection(selectedRef);
-        await refreshUnreadCounts();
+        await Promise.all([refreshUnreadCounts(), refreshRoomListActivities()]);
         if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
         if (showNotice) setNotice(`已从这台设备移除 ${deleted} 条到期消息`);
       }
@@ -986,6 +998,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (event.sender !== currentSession.user_id) setNotice("群主已变更");
       }
       if (["control.device.add", "control.device.revoke", "control.member.add", "control.member.remove", "control.group.commit"].includes(event.type)) void refreshRoomIdentityTrust(event.room_id);
+      if (event.type.startsWith("message.")) void refreshRoomListActivities();
       if (visibleMessageTypes.has(event.type) && event.sender !== currentSession.user_id) void db.unarchiveForIncoming(event.room_id, Date.now()).then((changed) => changed ? refreshRoomPreferences() : undefined);
       if (visibleMessageTypes.has(event.type) && event.sender !== currentSession.user_id) scheduleDeliveryReceipt(event.room_id);
       if (event.room_id === selectedRef) void refreshRoomProjection(event.room_id).then(() => shouldMarkIncomingRead(historyFocus(), event.room_id, timelineNearBottom()) ? markRoomRead(event.room_id) : refreshUnreadCounts());
@@ -1107,7 +1120,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   createEffect(() => {
     if (!session() || !identity()) return;
     const engine = new OutboxEngine(api, db); outboxRef = engine;
-    const refresh = () => { if (selectedRef) void db.outbox(selectedRef).then(setPendingMessages); };
+    const refresh = () => { if (selectedRef) void db.outbox(selectedRef).then(setPendingMessages); void refreshRoomListActivities(); };
     const sent = (received: Event) => {
       setConnectionState("online");
       const event = (received as CustomEvent<RoomEvent>).detail;
@@ -1115,6 +1128,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (event.type === "control.message-expiry") void refreshMessageExpiryPolicies();
       if (event.type === "control.room.profile") void refreshRoomProfile(event.room_id);
       if (event.type === "control.owner.transfer") void loadRooms(mlsRef);
+      if (event.type.startsWith("message.")) void refreshRoomListActivities();
       if (event.room_id === selectedRef) void refreshRoomProjection(event.room_id).then(() => shouldMarkIncomingRead(historyFocus(), event.room_id, timelineNearBottom()) ? markRoomRead(event.room_id) : refreshUnreadCounts());
       else void refreshUnreadCounts();
       if (event.seq % 25 === 0) void archiveRef?.compact(event.room_id).catch(() => undefined);
@@ -2358,7 +2372,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const nextProfile = await removeLocalProfile(profileId); if (nextProfile) await setActivePushProfile(nextProfile.profile_id); api.setToken(null);
     window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; window.clearTimeout(draftRemoteSyncTimer); draftRemoteSyncTimer = undefined; selectedRef = null; composerRevision += 1;
     const shared = incomingShare(); if (shared) void deleteStagedShare(shared.id).catch(() => undefined);
-    setCompose(""); setReplyingTo(null); setQuoting(null); setEditingMessage(null); setForwardingMessages(null); setIncomingShare(null); setContactShareOpen(false); setNewRoomContact(null); setIdentityVerificationOpen(false); setProfileOpen(false); setProfile(null); cancelMessageSelection(); setComposerDrafts({}); setMessageExpiryPolicies({}); setHistoryRecoveryRooms(new Set<RoomId>()); setPresenceSharing(false); setPresenceByRoom({});
+    setCompose(""); setReplyingTo(null); setQuoting(null); setEditingMessage(null); setForwardingMessages(null); setIncomingShare(null); setContactShareOpen(false); setNewRoomContact(null); setIdentityVerificationOpen(false); setProfileOpen(false); setProfile(null); cancelMessageSelection(); setComposerDrafts({}); setRoomListActivities({}); setMessageExpiryPolicies({}); setHistoryRecoveryRooms(new Set<RoomId>()); setPresenceSharing(false); setPresenceByRoom({});
     setRooms([]); setSelectedId(null); setMessages([]); setRoomIdentityTrust({}); setSession(null); setIdentity(null); setMls(null);
     setAccountDeletionOpen(false); setDevicesOpen(false);
     sessionStorage.setItem("edgechat.local-profile-notice", localCleanupFailed ? "账户已停用，但本机缓存未能完全清除；请清除该站点的浏览数据" : successMessage);
@@ -2998,7 +3012,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             <div class="flex items-center justify-between px-1"><h1 class="text-xl font-semibold tracking-tight text-ink">消息</h1><IconButton label="新建对话" class="text-brand hover:bg-brand-soft" onClick={() => setNewRoom(true)}><IconPlus class="size-4 stroke-brand" stroke-width={2.2}/></IconButton></div>
             <button type="button" class="flex h-10 items-center gap-2 rounded-lg bg-neutral-100 px-3 text-left text-sm text-muted hover:bg-neutral-200" onClick={() => setSearchOpen(true)}><IconSearch class="size-4 shrink-0 stroke-muted"/><span class="min-w-0 flex-1">搜索本机消息</span><kbd class="text-xs text-neutral-400">⌘K</kbd></button>
           </div>
-          <div class="overflow-y-auto p-2"><Show when={rooms().some((room) => room.request_status !== "rejected")} fallback={<div class="grid h-full place-content-center justify-items-center px-8 text-center"><IconMessageCircle class="size-8 stroke-neutral-300"/><h2 class="mt-4 text-base font-semibold text-ink">还没有对话</h2><p class="mt-1 text-sm/5 text-muted">添加同一服务器上的用户开始聊天。</p><button type="button" class="mt-4 text-sm font-semibold text-brand" onClick={() => setNewRoom(true)}>新建对话</button></div>}><Show when={showArchived()}><button type="button" class="mb-1 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-brand hover:bg-brand-soft" onClick={() => setShowArchived(false)}><IconChevronLeft class="size-4 stroke-brand"/>返回消息</button></Show><Show when={!showArchived() && incomingRequests().length}><section class="mb-3" aria-labelledby="message-requests-heading"><div class="flex items-center justify-between px-3 py-2"><h2 id="message-requests-heading" class="text-xs font-semibold uppercase tracking-wide text-muted">消息请求</h2><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">{incomingRequests().length}</span></div><div role="list"><For each={incomingRequests()}>{(room) => <div role="listitem"><button type="button" aria-current={selectedId() === room.room_id ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)] items-center gap-3 rounded-xl px-2.5 text-left ${selectedId() === room.room_id ? "bg-amber-50" : "hover:bg-neutral-100"}`} onClick={() => setSelectedId(room.room_id)}><Avatar class="size-11" label={initials(roomTitle(room, currentSession().user_id))} color={avatarColor(room.room_id)}/><span class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{roomTitle(room, currentSession().user_id)}</strong><small class="mt-1 block truncate text-sm text-amber-700">想给你发送消息</small></span></button></div>}</For></div></section></Show><div role="list"><For each={listedRooms()}>{(room) => { const peer = () => room.kind === "direct" ? room.members.find((member) => member.user_id !== currentSession().user_id) : undefined; return <RoomListItem room={room} title={roomTitle(room, currentSession().user_id)} avatarLabel={initials(roomTitle(room, currentSession().user_id))} avatarColor={avatarColor(room.room_id)} groupAvatar={roomProfileAvatars()[room.room_id]} decryptGroupAvatar={decryptRoomProfileAvatar} preview={roomPreview(room)} selected={selectedId() === room.room_id} unread={unreadCounts()[room.room_id] ?? 0} preference={preferenceFor(room.room_id)} recoveryRequired={historyRecoveryRooms().has(room.room_id)} onOpen={() => setSelectedId(room.room_id)} onTogglePinned={() => void updateRoomPreference(room.room_id, "pin")} onSetMutedUntil={(mutedUntil) => void setRoomMute(room.room_id, mutedUntil)} onSetReadState={(markedUnread) => void setRoomReadState(room.room_id, markedUnread)} onToggleArchived={() => void updateRoomPreference(room.room_id, "archive")} blockable={Boolean(peer())} blockedByMe={room.blocked_by_me} onToggleBlocked={() => void toggleRoomBlock(room)}/>; }}</For></div><Show when={!listedRooms().length && !incomingRequests().length}><div class="grid place-content-center justify-items-center px-8 py-12 text-center"><IconArchive class="size-7 stroke-neutral-300"/><p class="mt-3 text-sm text-muted">{showArchived() ? "没有已归档的对话" : "所有对话都已归档"}</p></div></Show><Show when={!showArchived() && archivedRoomCount() > 0}><button type="button" class="mt-2 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted hover:bg-neutral-100" onClick={() => setShowArchived(true)}><IconArchive class="size-4 stroke-muted"/><span class="flex-1 text-left">已归档</span><span class="text-xs tabular-nums text-neutral-400">{archivedRoomCount()}</span></button></Show></Show></div>
+          <div class="overflow-y-auto p-2"><Show when={rooms().some((room) => room.request_status !== "rejected")} fallback={<div class="grid h-full place-content-center justify-items-center px-8 text-center"><IconMessageCircle class="size-8 stroke-neutral-300"/><h2 class="mt-4 text-base font-semibold text-ink">还没有对话</h2><p class="mt-1 text-sm/5 text-muted">添加同一服务器上的用户开始聊天。</p><button type="button" class="mt-4 text-sm font-semibold text-brand" onClick={() => setNewRoom(true)}>新建对话</button></div>}><Show when={showArchived()}><button type="button" class="mb-1 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-brand hover:bg-brand-soft" onClick={() => setShowArchived(false)}><IconChevronLeft class="size-4 stroke-brand"/>返回消息</button></Show><Show when={!showArchived() && incomingRequests().length}><section class="mb-3" aria-labelledby="message-requests-heading"><div class="flex items-center justify-between px-3 py-2"><h2 id="message-requests-heading" class="text-xs font-semibold uppercase tracking-wide text-muted">消息请求</h2><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">{incomingRequests().length}</span></div><div role="list"><For each={incomingRequests()}>{(room) => <div role="listitem"><button type="button" aria-current={selectedId() === room.room_id ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)] items-center gap-3 rounded-xl px-2.5 text-left ${selectedId() === room.room_id ? "bg-amber-50" : "hover:bg-neutral-100"}`} onClick={() => setSelectedId(room.room_id)}><Avatar class="size-11" label={initials(roomTitle(room, currentSession().user_id))} color={avatarColor(room.room_id)}/><span class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{roomTitle(room, currentSession().user_id)}</strong><small class="mt-1 block truncate text-sm text-amber-700">想给你发送消息</small></span></button></div>}</For></div></section></Show><div role="list"><For each={listedRooms()}>{(room) => { const peer = () => room.kind === "direct" ? room.members.find((member) => member.user_id !== currentSession().user_id) : undefined; return <RoomListItem room={room} title={roomTitle(room, currentSession().user_id)} avatarLabel={initials(roomTitle(room, currentSession().user_id))} avatarColor={avatarColor(room.room_id)} groupAvatar={roomProfileAvatars()[room.room_id]} decryptGroupAvatar={decryptRoomProfileAvatar} preview={roomPreview(room)} activityAt={roomActivityTimes()[room.room_id]} selected={selectedId() === room.room_id} unread={unreadCounts()[room.room_id] ?? 0} preference={preferenceFor(room.room_id)} recoveryRequired={historyRecoveryRooms().has(room.room_id)} onOpen={() => setSelectedId(room.room_id)} onTogglePinned={() => void updateRoomPreference(room.room_id, "pin")} onSetMutedUntil={(mutedUntil) => void setRoomMute(room.room_id, mutedUntil)} onSetReadState={(markedUnread) => void setRoomReadState(room.room_id, markedUnread)} onToggleArchived={() => void updateRoomPreference(room.room_id, "archive")} blockable={Boolean(peer())} blockedByMe={room.blocked_by_me} onToggleBlocked={() => void toggleRoomBlock(room)}/>; }}</For></div><Show when={!listedRooms().length && !incomingRequests().length}><div class="grid place-content-center justify-items-center px-8 py-12 text-center"><IconArchive class="size-7 stroke-neutral-300"/><p class="mt-3 text-sm text-muted">{showArchived() ? "没有已归档的对话" : "所有对话都已归档"}</p></div></Show><Show when={!showArchived() && archivedRoomCount() > 0}><button type="button" class="mt-2 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted hover:bg-neutral-100" onClick={() => setShowArchived(true)}><IconArchive class="size-4 stroke-muted"/><span class="flex-1 text-left">已归档</span><span class="text-xs tabular-nums text-neutral-400">{archivedRoomCount()}</span></button></Show></Show></div>
           <footer role="status" aria-live="polite" class="flex items-center gap-2 border-t border-black/5 px-4 text-xs text-muted"><span aria-hidden="true" class={`size-1.5 rounded-full ${connectionState() === "online" ? "bg-emerald-500" : connectionState() === "syncing" ? "animate-pulse bg-amber-500" : "bg-neutral-400"}`}/>{connectionState() === "online" ? "已连接" : connectionState() === "syncing" ? "正在同步" : "离线，可查看和发送"}</footer>
         </div>
       </aside>

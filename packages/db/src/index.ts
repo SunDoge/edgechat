@@ -89,6 +89,23 @@ export const FIRST_UNREAD_VISIBLE_MESSAGE_SQL = `SELECT message_id, seq FROM mes
     AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
   ORDER BY seq ASC LIMIT 1`;
 
+export const ROOM_LIST_ACTIVITIES_SQL = `WITH latest_messages AS (
+    SELECT DISTINCT ON (m.room_id) m.room_id, m.message_id, m.sender, m.event_type, m.created_at, m.plaintext, m.payload, m.deleted_at,
+      NULL::text AS outbox_status, 0 AS source_priority
+    FROM messages m
+    WHERE m.event_type IN ('message.text','message.file','message.image','message.contact')
+      AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
+    ORDER BY m.room_id, m.seq DESC
+  ), latest_outbox AS (
+    SELECT DISTINCT ON (o.room_id) o.room_id, o.message_id, o.event_json->>'sender' AS sender, o.event_json->>'type' AS event_type,
+      o.created_at, o.plaintext, o.payload, NULL::bigint AS deleted_at, o.status::text AS outbox_status, 1 AS source_priority
+    FROM outbox o
+    WHERE o.event_json->>'type' IN ('message.text','message.file','message.image','message.contact')
+    ORDER BY o.room_id, o.created_at DESC, o.event_id DESC
+  ), candidates AS (SELECT * FROM latest_messages UNION ALL SELECT * FROM latest_outbox)
+  SELECT DISTINCT ON (room_id) room_id, message_id, sender, event_type, created_at, plaintext, payload, deleted_at, outbox_status
+  FROM candidates ORDER BY room_id, source_priority DESC, created_at DESC, message_id DESC`;
+
 export const APPLY_ROOM_PROFILE_SQL = `INSERT INTO room_profiles (room_id,event_id,event_seq,name,avatar,updated_by,updated_at)
   VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
   ON CONFLICT (room_id) DO UPDATE SET event_id = EXCLUDED.event_id, event_seq = EXCLUDED.event_seq,
@@ -137,6 +154,10 @@ export type LocalReadReceipt = { room_id: RoomId; user_id: string; last_read_seq
 export type LocalDeliveryReceipt = { room_id: RoomId; user_id: string; last_delivered_seq: number; delivered_at: number };
 export type RoomUnreadCount = { room_id: RoomId; unread_count: number; last_read_seq: number };
 export type LocalRoomPreference = { room_id: RoomId; pinned_at: number | null; archived_at: number | null; muted_until: number | null; local_retention_days: LocalRetentionDays | null; manually_unread: boolean; updated_at: number };
+export type LocalRoomListActivity = {
+  room_id: RoomId; message_id: string; sender: string; event_type: string; created_at: number; plaintext: string | null;
+  payload: Record<string, unknown>; deleted_at: number | null; outbox_status: OutboxStatus | null;
+};
 export type LocalMessageExpiryPolicy = { room_id: RoomId; event_id: string; effective_after_seq: number; expires_in_seconds: MessageExpirySeconds | null; updated_by: string; updated_at: number };
 export type LocalRoomProfile = { room_id: RoomId; event_id: string; event_seq: number; name: string; avatar: RoomProfileAvatar | null; updated_by: string; updated_at: number };
 export type LocalComposerDraft = { room_id: RoomId; text_content: string; mode: "message" | "reply" | "quote" | "edit"; target_message_id: string | null; quote_text: string | null; updated_at: number };
@@ -527,6 +548,11 @@ export class LocalDatabase {
 
   async messages(roomId: RoomId, limit = 200): Promise<LocalMessage[]> {
     return this.query<LocalMessage>("SELECT event_id, message_id, room_id, seq, sender, device_id, event_type, created_at, ciphertext, plaintext, payload, deleted_at, deleted_by, delete_event_id, edited_at, edit_event_id, expires_at FROM messages m WHERE room_id = $1 AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender) ORDER BY seq DESC LIMIT $2", [roomId, limit]);
+  }
+
+  async roomListActivities(): Promise<LocalRoomListActivity[]> {
+    const rows = await this.query<Omit<LocalRoomListActivity, "payload"> & { payload: Record<string, unknown> | string }>(ROOM_LIST_ACTIVITIES_SQL);
+    return rows.map((row) => ({ ...row, created_at: Number(row.created_at), deleted_at: row.deleted_at === null ? null : Number(row.deleted_at), payload: jsonValue(row.payload) }));
   }
 
   async message(roomId: RoomId, messageId: string): Promise<LocalMessage | null> {
