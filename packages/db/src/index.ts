@@ -89,6 +89,11 @@ export const FIRST_UNREAD_VISIBLE_MESSAGE_SQL = `SELECT message_id, seq FROM mes
     AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
   ORDER BY seq ASC LIMIT 1`;
 
+export const MESSAGES_AFTER_SQL = `SELECT event_id, message_id, room_id, seq, sender, device_id, event_type, created_at, ciphertext, plaintext, payload, deleted_at, deleted_by, delete_event_id, edited_at, edit_event_id, expires_at
+  FROM messages m WHERE room_id = $1 AND seq > $2
+    AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
+  ORDER BY seq ASC LIMIT $3`;
+
 export const ROOM_LIST_ACTIVITIES_SQL = `WITH latest_messages AS (
     SELECT DISTINCT ON (m.room_id) m.room_id, m.message_id, m.sender, m.event_type, m.created_at, m.plaintext, m.payload, m.deleted_at,
       NULL::text AS outbox_status, 0 AS source_priority
@@ -570,6 +575,12 @@ export class LocalDatabase {
       "SELECT event_id, message_id, room_id, seq, sender, device_id, event_type, created_at, ciphertext, plaintext, payload, deleted_at, deleted_by, delete_event_id, edited_at, edit_event_id, expires_at FROM messages m WHERE room_id = $1 AND seq < $2 AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender) ORDER BY seq DESC LIMIT $3",
       [roomId, beforeSeq, safeLimit],
     );
+  }
+
+  async messagesAfter(roomId: RoomId, afterSeq: number, limit = 200): Promise<LocalMessage[]> {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) return [];
+    return this.query<LocalMessage>(MESSAGES_AFTER_SQL, [roomId, afterSeq, safeLimit]);
   }
 
   async roomAttachments(roomId: RoomId, cursor: LocalRoomAttachmentCursor | null = null, limit = 48): Promise<LocalRoomAttachmentPage> {

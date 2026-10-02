@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, isAccountExportStorageError } from "./account-export-staging";
+import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, createBoundedConversationExportBuffer, createConversationExportStaging, isAccountExportStorageError } from "./account-export-staging";
 
 const PROFILE = "11111111-1111-4111-8111-111111111111";
 const OTHER_PROFILE = "22222222-2222-4222-8222-222222222222";
@@ -67,5 +67,15 @@ describe("account export staging", () => {
     expect(() => buffer.write("c")).toThrow("导出内容较大");
     expect(isAccountExportStorageError(new DOMException("full", "QuotaExceededError"))).toBe(true);
     expect(isAccountExportStorageError(new DOMException("cancel", "AbortError"))).toBe(false);
+  });
+
+  it("uses a plaintext download type and includes conversation staging in profile cleanup", async () => {
+    const buffer = createBoundedConversationExportBuffer(); buffer.write("聊天记录\n");
+    expect(buffer.blob().type).toBe("text/plain;charset=utf-8");
+    const opfs = fakeOpfs(); const staging = await createConversationExportStaging(PROFILE, async () => opfs.root);
+    await staging.write("聊天记录\n"); await staging.close();
+    expect([...opfs.files.keys()][0]).toMatch(/\.txt$/);
+    await clearAccountExportStaging(PROFILE, async () => opfs.root);
+    expect(opfs.files.size).toBe(0);
   });
 });

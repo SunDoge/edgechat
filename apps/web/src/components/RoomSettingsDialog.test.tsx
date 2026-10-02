@@ -37,6 +37,9 @@ function mount(overrides: Partial<Parameters<typeof RoomSettingsDialog>[0]> = {}
     onRequestLeave: vi.fn(async () => undefined),
     onCancelLeave: vi.fn(async () => undefined),
     onOpenMedia: vi.fn(),
+    exportBusy: false,
+    onExportConversation: vi.fn(async () => undefined),
+    onCancelExport: vi.fn(),
     onVerifyIdentity: vi.fn(), onClose: vi.fn(),
     ...overrides,
   };
@@ -49,6 +52,21 @@ describe("RoomSettingsDialog group membership", () => {
     const props = mount();
     [...document.querySelectorAll("button")].find((button) => button.textContent === "查看媒体")?.click();
     expect(props.onOpenMedia).toHaveBeenCalledOnce();
+  });
+
+  it("exports the readable local transcript from the history section", async () => {
+    const props = mount();
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "导出聊天记录")?.click();
+    await vi.waitFor(() => expect(props.onExportConversation).toHaveBeenCalledOnce());
+    expect(document.body.textContent).toContain("不会下载附件内容");
+    expect(document.body.textContent).toContain("未加密的消息文字");
+  });
+
+  it("keeps cancellation available while a large transcript is exporting", () => {
+    const props = mount({ exportBusy: true });
+    const cancel = [...document.querySelectorAll("button")].find((button) => button.textContent === "取消导出") as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false); cancel.click();
+    expect(props.onCancelExport).toHaveBeenCalledOnce(); expect(props.onExportConversation).not.toHaveBeenCalled();
   });
 
   it("lets an owner search only non-members and add one", async () => {

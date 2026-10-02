@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
-import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_LIST_ACTIVITIES_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
+import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, MESSAGES_AFTER_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_LIST_ACTIVITIES_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
 import { LOCAL_CLEAR_ACCOUNT_DATA, LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
 import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4, LOCAL_SCHEMA_V5 } from "./migrations";
 import { purgeRoomBefore, setRoomRetention } from "./retention";
@@ -272,6 +272,11 @@ describe("PGlite local full-text index", () => {
     const older = await db.query<{ seq: number }>("SELECT seq FROM messages WHERE room_id = $1 AND seq < $2 ORDER BY seq DESC LIMIT 100", [room, 51]);
     expect(older.rows).toHaveLength(50);
     expect(older.rows.map((row) => Number(row.seq))).toEqual(Array.from({ length: 50 }, (_, index) => 50 - index));
+    await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload)
+      VALUES ('event-hidden','$message-hidden:example.com',$1,251,'@hidden:example.com','d','message.text',251,'cipher','hidden','{}')`, [room]);
+    await db.query("INSERT INTO room_hidden_senders VALUES ($1,'@hidden:example.com',251)", [room]);
+    const ascending = await db.query<{ seq: number }>(MESSAGES_AFTER_SQL, [room, 248, 10]);
+    expect(ascending.rows.map((row) => Number(row.seq))).toEqual([249, 250]);
     await db.close();
   });
 

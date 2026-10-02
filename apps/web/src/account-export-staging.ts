@@ -1,5 +1,6 @@
 const DIRECTORY_NAME = "edgechat-account-export-staging-v1";
-const SUFFIX = ".ndjson";
+const ACCOUNT_SUFFIX = ".ndjson";
+const CONVERSATION_SUFFIX = ".txt";
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const encoder = new TextEncoder();
 
@@ -13,6 +14,8 @@ export type AccountExportStaging = {
   abort(cause?: unknown): Promise<void>;
   cleanup(): Promise<void>;
 };
+
+export type ConversationExportStaging = AccountExportStaging;
 
 function assertProfileId(profileId: string): void {
   if (!PROFILE_ID.test(profileId)) throw new Error("Invalid local profile id");
@@ -35,7 +38,7 @@ export function isAccountExportStorageError(cause: unknown): boolean {
   return cause instanceof DOMException && ["InvalidStateError", "NotAllowedError", "NotSupportedError", "QuotaExceededError", "UnknownError"].includes(cause.name);
 }
 
-export function createBoundedAccountExportBuffer(maxBytes = MAX_MEMORY_ACCOUNT_EXPORT_BYTES): {
+function createBoundedExportBuffer(mimeType: string, maxBytes = MAX_MEMORY_ACCOUNT_EXPORT_BYTES): {
   write(line: string): void;
   blob(): Blob;
   readonly bytes: number;
@@ -49,16 +52,24 @@ export function createBoundedAccountExportBuffer(maxBytes = MAX_MEMORY_ACCOUNT_E
       if (byteCount + bytes.byteLength > maxBytes) throw new Error("导出内容较大，当前浏览器无法安全保存。请更新当前浏览器，或改用新版桌面浏览器重试");
       parts.push(bytes.slice().buffer as ArrayBuffer); byteCount += bytes.byteLength;
     },
-    blob: () => new Blob(parts, { type: "application/x-ndjson" }),
+    blob: () => new Blob(parts, { type: mimeType }),
     get bytes() { return byteCount; },
   };
 }
 
-export async function createAccountExportStaging(profileId: string, rootProvider: RootProvider = defaultRootProvider): Promise<AccountExportStaging> {
+export function createBoundedAccountExportBuffer(maxBytes = MAX_MEMORY_ACCOUNT_EXPORT_BYTES) {
+  return createBoundedExportBuffer("application/x-ndjson", maxBytes);
+}
+
+export function createBoundedConversationExportBuffer(maxBytes = MAX_MEMORY_ACCOUNT_EXPORT_BYTES) {
+  return createBoundedExportBuffer("text/plain;charset=utf-8", maxBytes);
+}
+
+async function createExportStaging(profileId: string, suffix: string, rootProvider: RootProvider): Promise<AccountExportStaging> {
   assertProfileId(profileId);
   const root = await rootProvider();
   const directory = await root.getDirectoryHandle(DIRECTORY_NAME, { create: true });
-  const filename = `${profileId}-${crypto.randomUUID()}${SUFFIX}`;
+  const filename = `${profileId}-${crypto.randomUUID()}${suffix}`;
   const handle = await directory.getFileHandle(filename, { create: true });
   let writable: FileSystemWritableFileStream;
   try { writable = await handle.createWritable(); }
@@ -83,6 +94,15 @@ export async function createAccountExportStaging(profileId: string, rootProvider
   };
 }
 
+
+export function createAccountExportStaging(profileId: string, rootProvider: RootProvider = defaultRootProvider): Promise<AccountExportStaging> {
+  return createExportStaging(profileId, ACCOUNT_SUFFIX, rootProvider);
+}
+
+export function createConversationExportStaging(profileId: string, rootProvider: RootProvider = defaultRootProvider): Promise<ConversationExportStaging> {
+  return createExportStaging(profileId, CONVERSATION_SUFFIX, rootProvider);
+}
+
 export async function clearAccountExportStaging(profileId: string, rootProvider?: RootProvider): Promise<void> {
   assertProfileId(profileId);
   let root: FileSystemDirectoryHandle;
@@ -101,6 +121,6 @@ export async function clearAccountExportStaging(profileId: string, rootProvider?
   const iterable = directory as FileSystemDirectoryHandle & { values?: () => AsyncIterableIterator<FileSystemHandle> };
   if (!iterable.values) throw new Error("Browser cannot enumerate account export staging storage");
   for await (const handle of iterable.values()) {
-    if (handle.kind === "file" && handle.name.startsWith(`${profileId}-`) && handle.name.endsWith(SUFFIX)) await removeExact(directory, handle.name);
+    if (handle.kind === "file" && handle.name.startsWith(`${profileId}-`) && (handle.name.endsWith(ACCOUNT_SUFFIX) || handle.name.endsWith(CONVERSATION_SUFFIX))) await removeExact(directory, handle.name);
   }
 }

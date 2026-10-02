@@ -76,9 +76,10 @@ import { activateLocalProfile, bindLocalProfile, clearLocalProfileToken, createL
 import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE, type StartupFailure } from "./startup-recovery";
 import { StartupRecoveryScreen } from "./components/StartupRecoveryScreen";
 import { inspectLocalStorageHealth, requestPersistentLocalStorage, type LocalStorageHealth, type PersistenceRequestResult } from "./local-storage-health";
-import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, isAccountExportStorageError, type AccountExportStaging } from "./account-export-staging";
+import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, createBoundedConversationExportBuffer, createConversationExportStaging, isAccountExportStorageError, type AccountExportStaging, type ConversationExportStaging } from "./account-export-staging";
 import { startsNewMessageDay } from "./message-date";
 import { formatRoomActivityPreview } from "./room-list-preview";
+import { conversationExportFilename, streamConversationTranscript } from "./conversation-export";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -162,6 +163,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [accountDeletionOpen, setAccountDeletionOpen] = createSignal(false);
   const [backupOpen, setBackupOpen] = createSignal(false);
   const [accountExportBusy, setAccountExportBusy] = createSignal(false);
+  const [conversationExportBusy, setConversationExportBusy] = createSignal(false);
   const [devices, setDevices] = createSignal<DeviceRow[]>([]);
   const [deviceRevocations, setDeviceRevocations] = createSignal<Record<string, DeviceRevocationProgress>>({});
   const [storage, setStorage] = createSignal<StorageUsage | null>(null);
@@ -208,6 +210,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   let searchRequestVersion = 0;
   let mlsMutationTail: Promise<void> = Promise.resolve();
   let accountRemovalRun: Promise<void> | null = null;
+  let conversationExportAbort: AbortController | null = null;
   let roomMembershipRun: Promise<void> | null = null;
   let keyPackageRefill: Promise<void> | null = null;
   let retentionRun: Promise<number> | null = null;
@@ -974,7 +977,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     window.addEventListener("keydown", shortcuts);
     const online = () => setConnectionState("syncing"); const offline = () => setConnectionState("offline");
     window.addEventListener("online", online); window.addEventListener("offline", offline);
-    onCleanup(() => { window.removeEventListener("keydown", shortcuts); window.removeEventListener("online", online); window.removeEventListener("offline", offline); window.clearTimeout(semanticSearchTimer); window.clearTimeout(readReceiptTimer); window.clearTimeout(typingStopTimer); window.clearTimeout(draftSaveTimer); window.clearTimeout(draftRemoteSyncTimer); for (const timer of typingExpiryTimers.values()) window.clearTimeout(timer); for (const timer of deliveryReceiptTimers.values()) window.clearTimeout(timer); semanticRef?.close(); db.close(); });
+    onCleanup(() => { window.removeEventListener("keydown", shortcuts); window.removeEventListener("online", online); window.removeEventListener("offline", offline); window.clearTimeout(semanticSearchTimer); window.clearTimeout(readReceiptTimer); window.clearTimeout(typingStopTimer); window.clearTimeout(draftSaveTimer); window.clearTimeout(draftRemoteSyncTimer); conversationExportAbort?.abort(); for (const timer of typingExpiryTimers.values()) window.clearTimeout(timer); for (const timer of deliveryReceiptTimers.values()) window.clearTimeout(timer); semanticRef?.close(); db.close(); });
   });
 
   createEffect(() => {
@@ -2251,6 +2254,60 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     finally { setAccountExportBusy(false); }
   }
 
+  async function exportConversation(room: ServerRoom): Promise<void> {
+    if (conversationExportBusy()) return;
+    setConversationExportBusy(true);
+    let writable: ExportWritable | null = null;
+    let staging: ConversationExportStaging | null = null;
+    let stagedCleanup: (() => Promise<void>) | null = null;
+    const controller = new AbortController(); conversationExportAbort = controller;
+    try {
+      const exportedAt = Date.now(); const title = roomTitle(room, session()?.user_id ?? ""); const filename = conversationExportFilename(title, exportedAt);
+      const pickerWindow = window as ExportPickerWindow;
+      if (pickerWindow.showSaveFilePicker) {
+        const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: "EdgeChat 聊天记录", accept: { "text/plain": [".txt"] } }] });
+        writable = await handle.createWritable();
+      }
+      let memory = writable ? null : createBoundedConversationExportBuffer();
+      if (!writable) {
+        const localStorageManager = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
+        if (localStorageManager?.getDirectory) {
+          try { staging = await createConversationExportStaging(profileId); memory = null; }
+          catch (cause) { if (!isAccountExportStorageError(cause)) throw cause; }
+        }
+      }
+      const write = async (chunk: string) => {
+        if (writable) await writable.write(chunk);
+        else if (staging) await staging.write(chunk);
+        else memory!.write(chunk);
+      };
+      const count = await streamConversationTranscript({
+        roomId: room.room_id, roomTitle: title, exportedAt, displayName: (userId) => memberName(room, userId),
+        loadPage: (afterSeq, limit) => db.messagesAfter(room.room_id, afterSeq, limit), write, signal: controller.signal,
+      });
+      if (writable) { await writable.close(); writable = null; }
+      else {
+        let file: Blob;
+        if (staging) { file = await staging.close(); stagedCleanup = staging.cleanup; staging = null; }
+        else file = memory!.blob();
+        const url = URL.createObjectURL(file); const anchor = document.createElement("a");
+        anchor.href = url; anchor.download = filename; anchor.click();
+        const cleanup = stagedCleanup;
+        window.setTimeout(() => { URL.revokeObjectURL(url); if (cleanup) void cleanup().catch(() => undefined); }, 5 * 60_000);
+        stagedCleanup = null;
+      }
+      setNotice(`已导出 ${count} 条本机消息；附件内容未下载`);
+    } catch (cause) {
+      await writable?.abort(cause).catch(() => undefined); writable = null;
+      await staging?.abort(cause).catch(() => undefined); staging = null;
+      await stagedCleanup?.().catch(() => undefined); stagedCleanup = null;
+      if (!(cause instanceof DOMException && cause.name === "AbortError")) {
+        const reason = isAccountExportStorageError(cause) ? "本机可用空间不足，请释放一些设备空间后重试" : cause instanceof Error ? cause.message : null;
+        setNotice(reason ? `无法导出聊天记录：${reason}` : "无法导出聊天记录");
+      }
+    } finally { if (conversationExportAbort === controller) conversationExportAbort = null; setConversationExportBusy(false); }
+  }
+
   async function exportPortableBackup(password: string): Promise<void> {
     const currentSession = session(); const currentMls = mlsRef;
     if (!currentSession || !identityRef || !currentMls) throw new Error("设备加密状态尚未就绪");
@@ -3086,7 +3143,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
       <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>
       <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticStatus={semanticStatus()} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
-      <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} ownershipTransferSupported={serverSupports(currentSession().protocol, "rooms.owner-transfer.v1")} ownershipBusyUserId={roomOwnershipBusy()} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onTransferOwnership={(userId) => transferRoomOwnership(room(), userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onOpenMedia={() => { setRoomSettingsOpen(false); setConversationMediaOpen(true); }} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
+      <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} ownershipTransferSupported={serverSupports(currentSession().protocol, "rooms.owner-transfer.v1")} ownershipBusyUserId={roomOwnershipBusy()} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onTransferOwnership={(userId) => transferRoomOwnership(room(), userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onOpenMedia={() => { setRoomSettingsOpen(false); setConversationMediaOpen(true); }} exportBusy={conversationExportBusy()} onExportConversation={() => exportConversation(room())} onCancelExport={() => conversationExportAbort?.abort()} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
       <Show when={conversationMediaOpen() && selected()}>{(room) => <ConversationMediaDialog roomTitle={roomTitle(room(), currentSession().user_id)} coverageComplete={coverageComplete()} loadPage={(cursor: LocalRoomAttachmentCursor | null) => db.roomAttachments(room().room_id, cursor)} loadCachedImage={decryptCachedAttachment} displayName={(userId) => memberName(room(), userId)} onOpenMessage={(messageId) => { setConversationMediaOpen(false); openSearchResult(room().room_id, messageId); }} onClose={() => setConversationMediaOpen(false)}/>}</Show>
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>
       <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
