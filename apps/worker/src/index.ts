@@ -1127,7 +1127,7 @@ export async function processProfileAvatarDeletions(env: Env, objectKey?: string
   }
 }
 
-async function stageAvatarDeletion(env: Env, userId: UserId, objectKey: string, bytes: number): Promise<boolean> {
+async function stageAvatarDeletion(env: Env, userId: UserId, objectKey: string, bytes: number): Promise<"created" | "existing" | null> {
   const now = Date.now();
   const inserted = await env.DB.prepare(`INSERT INTO profile_avatar_deletions
       (object_key, owner_user_id, byte_size, requested_at, attempts, last_error)
@@ -1138,7 +1138,7 @@ async function stageAvatarDeletion(env: Env, userId: UserId, objectKey: string, 
     )
     ON CONFLICT(object_key) DO NOTHING
     RETURNING object_key`).bind(objectKey, userId, bytes, now).first<{ object_key: string }>();
-  if (inserted?.object_key === objectKey) return true;
+  if (inserted?.object_key === objectKey) return "created";
   const refreshed = await env.DB.prepare(`UPDATE profile_avatar_deletions
       SET requested_at = ?4, attempts = 0, last_error = NULL
     WHERE object_key = ?1 AND owner_user_id = ?2 AND byte_size = ?3 AND deleting_token IS NULL
@@ -1147,7 +1147,7 @@ async function stageAvatarDeletion(env: Env, userId: UserId, objectKey: string, 
         WHERE pending.owner_user_id = ?2 AND pending.object_key <> ?1
       )
     RETURNING object_key`).bind(objectKey, userId, bytes, now).first<{ object_key: string }>();
-  return refreshed?.object_key === objectKey;
+  return refreshed?.object_key === objectKey ? "existing" : null;
 }
 
 async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext): Promise<Response> {
@@ -1209,12 +1209,26 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
   const avatarId = randomId(18); const now = Date.now(); const limits = defaultStorageLimits(env);
   // This row doubles as a write intent. A crash after the R2 put but before
   // the profile CAS remains recoverable without listing the bucket.
-  if (!(await stageAvatarDeletion(env, auth.userId, objectKey, bytes.byteLength))) {
+  const intent = await stageAvatarDeletion(env, auth.userId, objectKey, bytes.byteLength);
+  if (!intent) {
     throw new HttpError(409, "Another profile avatar upload or cleanup is still in progress", "avatar_upload_busy", { "retry-after": "30" });
   }
-  await objectStore(env).put(objectKey, buffer, {
-    expectedSize: bytes.byteLength, checksumSha256: digestBytes, contentType: "image/webp", cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
-  });
+  const matchesStored = (object: ObjectStoreObject): boolean => object.size === bytes.byteLength && object.metadata.sha256 === digest;
+  let stored: ObjectStoreObject | null = null;
+  if (intent === "existing") stored = await objectStore(env).head(objectKey);
+  if (stored && !matchesStored(stored)) {
+    throw new HttpError(409, "Stored profile avatar conflicts with the upload intent", "avatar_upload_conflict");
+  }
+  if (!stored) {
+    stored = await objectStore(env).put(objectKey, buffer, {
+      ifAbsent: true, expectedSize: bytes.byteLength, checksumSha256: digestBytes, contentType: "image/webp",
+      cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
+    });
+    if (!stored) stored = await objectStore(env).head(objectKey);
+    if (!stored || !matchesStored(stored)) {
+      throw new HttpError(409, "Stored profile avatar conflicts with the upload intent", "avatar_upload_conflict");
+    }
+  }
   const eventId = `profile:${auth.userId}:${now}:${randomId(8)}`;
   const payload = profileUpdatePayload(auth.userId, before.display_name, avatarId);
   const statements = [

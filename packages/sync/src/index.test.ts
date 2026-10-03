@@ -1022,6 +1022,21 @@ describe("ApiClient request deadlines", () => {
 });
 
 describe("ApiClient ciphertext uploads", () => {
+  it("retries a profile avatar with the same fixed bytes after an ambiguous response", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("connection reset after upload"))
+      .mockResolvedValueOnce(Response.json({ profile: { user_id: "@alice:example.com", display_name: "Alice", bio: "", avatar_url: "/avatars/id.webp" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await new ApiClient("https://edgechat.test", "token").updateProfileAvatar(new Blob([new Uint8Array([11, 22, 33, 44])]));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const first = fetchMock.mock.calls[0]![1]!; const second = fetchMock.mock.calls[1]![1]!;
+      expect(first.body).toBeInstanceOf(ArrayBuffer);
+      expect(second.body).toBe(first.body);
+      expect(new Headers(second.headers).get("content-type")).toBe("image/webp");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("retries a peer-recovery bundle with the same checksum and fixed bytes after an ambiguous response", async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError("connection reset after upload"))

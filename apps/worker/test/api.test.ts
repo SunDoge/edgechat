@@ -1057,6 +1057,7 @@ describe("single-server durable delivery", () => {
     await env.DB.prepare(`INSERT INTO profile_avatar_deletions
       (object_key, owner_user_id, byte_size, requested_at, attempts, last_error)
       VALUES (?1, ?2, ?3, 1, 2, 'response lost')`).bind(objectKey, account.user_id, bytes.byteLength).run();
+    await env.ARCHIVE.put(objectKey, bytes, { customMetadata: { sha256: digest, recovery_marker: "preserve-without-second-put" } });
 
     const response = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", {
       method: "PUT",
@@ -1064,7 +1065,7 @@ describe("single-server durable delivery", () => {
       body: bytes,
     });
     expect(response.status, await response.clone().text()).toBe(200);
-    expect(await env.ARCHIVE.head(objectKey)).not.toBeNull();
+    expect((await env.ARCHIVE.head(objectKey))?.customMetadata).toMatchObject({ sha256: digest, recovery_marker: "preserve-without-second-put" });
     expect(await env.DB.prepare("SELECT object_key FROM profile_avatar_deletions WHERE object_key = ?").bind(objectKey).first()).toBeNull();
   });
 

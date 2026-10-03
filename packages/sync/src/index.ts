@@ -241,7 +241,18 @@ export class ApiClient {
   me() { return this.sessionRequest<SessionIdentity>("/api/v1/me"); }
   profile(userId?: string) { return this.request<{ profile: UserProfile }>(userId ? `/api/v1/users/${encodeURIComponent(userId)}/profile` : "/api/v1/profile"); }
   updateProfile(displayName: string, bio: string) { return this.request<{ profile: UserProfile }>("/api/v1/profile", { method: "PUT", body: JSON.stringify({ display_name: displayName, bio }) }); }
-  updateProfileAvatar(blob: Blob) { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "PUT", body: blob, headers: { "content-type": "image/webp" } }, API_TRANSFER_TIMEOUT_MS); }
+  async updateProfileAvatar(blob: Blob) {
+    const bytes = await blob.arrayBuffer();
+    const upload = () => this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", {
+      method: "PUT", body: bytes, headers: { "content-type": "image/webp" },
+    }, API_TRANSFER_TIMEOUT_MS);
+    try { return await upload(); }
+    catch (error) {
+      if (!(error instanceof ApiTimeoutError) && !(error instanceof TypeError)
+        && !(error instanceof ApiError && error.status >= 500 && error.code !== "server_upgrade_required")) throw error;
+      return upload();
+    }
+  }
   deleteProfileAvatar() { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "DELETE" }); }
   changePassword(currentPassword: string, newPassword: string, logoutOtherDevices: boolean) {
     return this.request<{ changed: true; other_sessions_revoked: boolean }>("/api/v1/account/password", {
