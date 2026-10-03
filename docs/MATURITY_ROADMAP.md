@@ -15,6 +15,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] D1-backed per-user R2 byte and object accounting.
 - [x] Atomic quota reservations before R2 writes and rollback after failed writes.
 - [x] Client-hash and stream normal encrypted attachment and archive-segment uploads through a Worker `FixedLengthStream`; archive validation buffers only the bounded framing/key-envelope prefix, while attachment and archive repair uploads stream against their D1-pinned digest. R2 verifies SHA-256 during the single normal PUT, so neither `Content-Length` nor a whole-ciphertext Worker buffer is trusted.
+- [x] Client-ID idempotent attachment upload: a 192-bit opaque ID is bound in D1 to uploader, room, length and ciphertext digest; one automatic retry after an ambiguous response reuses it, costs zero object calls after D1 commit, and uses only a conditional PUT plus at most one exact HEAD in the post-PUT/pre-D1 crash window.
 - [x] Avoid tiny archive objects: compact at 1 MiB input or 500 events.
 - [x] User quota UI with attachment/archive split and warning thresholds.
 - [x] D1-only Operator totals and configurable per-user byte/object overrides, without bucket listing.

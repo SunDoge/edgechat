@@ -2,6 +2,8 @@ import { chromium } from "playwright";
 
 const baseUrl = process.env.EDGECHAT_SMOKE_URL;
 if (!baseUrl) throw new Error("EDGECHAT_SMOKE_URL is required");
+const browserUrl = process.env.EDGECHAT_SMOKE_BROWSER_URL ?? baseUrl;
+const attachmentOnly = process.env.EDGECHAT_SMOKE_ATTACHMENT_ONLY === "1";
 
 const suffix = Math.random().toString(36).slice(2, 10);
 const alice = { name: `Alice ${suffix}` };
@@ -11,6 +13,10 @@ const reply = `已收到 ${suffix}`;
 const savedMessage = `给自己的备忘 ${suffix}`;
 const failures = [];
 const optionalModelRequests = [];
+
+function base64Url(bytes) {
+  return Buffer.from(bytes).toString("base64url");
+}
 
 function observe(page, label) {
   page.on("request", (request) => {
@@ -30,13 +36,17 @@ function observe(page, label) {
 }
 
 async function register(page, account) {
-  await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
+  await page.goto(browserUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
   const displayName = page.getByLabel("显示名称");
   const startupTimeout = page.getByRole("heading", { name: "打开本机消息库用时过长", exact: true });
   await displayName.or(startupTimeout).waitFor({ state: "visible", timeout: 75_000 });
   if (await startupTimeout.isVisible()) {
     await page.getByRole("button", { name: "重新打开应用", exact: true }).click();
-    await displayName.waitFor({ state: "visible", timeout: 75_000 });
+    await displayName.or(startupTimeout).waitFor({ state: "visible", timeout: 120_000 });
+    if (await startupTimeout.isVisible()) {
+      await page.getByRole("button", { name: "重新打开应用", exact: true }).click();
+      await displayName.waitFor({ state: "visible", timeout: 120_000 });
+    }
   }
   await displayName.fill(account.name);
   const registration = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/register/opaque", { timeout: 120_000 });
@@ -45,8 +55,26 @@ async function register(page, account) {
   if (!response.ok()) throw new Error(`registration failed with ${response.status()}: ${(await response.text()).slice(0, 1_000)}`);
   const session = await response.json();
   if (typeof session.user_id !== "string") throw new Error("registration response did not contain a user_id");
+  if (typeof session.access_token !== "string") throw new Error("registration response did not contain an access_token");
+  account.userId = session.user_id;
+  account.accessToken = session.access_token;
   account.username = session.user_id.replace(/^@/, "").split(":", 1)[0];
   await page.getByRole("heading", { name: "消息", exact: true }).waitFor({ timeout: 300_000 });
+}
+
+async function verifyIdempotentAttachment(account, roomId) {
+  const attachmentId = base64Url(crypto.getRandomValues(new Uint8Array(24)));
+  const ciphertext = crypto.getRandomValues(new Uint8Array(64));
+  const digest = base64Url(await crypto.subtle.digest("SHA-256", ciphertext));
+  const headers = { authorization: `Bearer ${account.accessToken}`, "content-type": "application/octet-stream", "content-length": String(ciphertext.byteLength), "x-room-id": roomId, "x-attachment-id": attachmentId, "x-content-sha256": digest };
+  const first = await fetch(`${baseUrl}/api/v1/attachments`, { method: "POST", headers, body: ciphertext });
+  if (first.status !== 201) throw new Error(`first attachment upload failed with ${first.status}: ${(await first.text()).slice(0, 1_000)}`);
+  const repeated = await fetch(`${baseUrl}/api/v1/attachments`, { method: "POST", headers, body: ciphertext });
+  if (repeated.status !== 200) throw new Error(`idempotent attachment upload failed with ${repeated.status}: ${(await repeated.text()).slice(0, 1_000)}`);
+  const repeatedBody = await repeated.json();
+  if (repeatedBody.attachment_id !== attachmentId) throw new Error("idempotent attachment upload returned a different ID");
+  const abandoned = await fetch(`${baseUrl}/api/v1/attachments/abandon`, { method: "POST", headers: { authorization: `Bearer ${account.accessToken}`, "content-type": "application/json" }, body: JSON.stringify({ attachment_ids: [attachmentId] }) });
+  if (!abandoned.ok || (await abandoned.json()).abandoned !== 1) throw new Error("temporary attachment cleanup failed");
 }
 
 async function main() {
@@ -69,7 +97,12 @@ async function main() {
     await alicePage.getByLabel("新建对话").click();
     await alicePage.getByLabel("搜索用户").fill(bob.username);
     await alicePage.getByRole("button", { name: new RegExp(bob.name) }).click();
+    const roomCreation = alicePage.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/rooms", { timeout: 120_000 });
     await alicePage.getByRole("button", { name: "开始对话", exact: true }).click();
+    const roomResponse = await roomCreation;
+    if (!roomResponse.ok()) throw new Error(`room creation failed with ${roomResponse.status()}: ${(await roomResponse.text()).slice(0, 1_000)}`);
+    const roomId = (await roomResponse.json()).room_id;
+    if (typeof roomId !== "string") throw new Error("room creation response did not contain a room_id");
     await alicePage.getByRole("dialog").waitFor({ state: "hidden", timeout: 120_000 });
     await alicePage.getByRole("textbox", { name: "消息", exact: true }).fill(firstMessage);
     await alicePage.getByRole("button", { name: "发送", exact: true }).click();
@@ -85,6 +118,13 @@ async function main() {
     await bobPage.getByRole("button", { name: "接受", exact: true }).click();
     await bobPage.getByText(firstMessage, { exact: true }).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "bob-synced-and-decrypted" }));
+
+    await verifyIdempotentAttachment(alice, roomId);
+    console.log(JSON.stringify({ step: "idempotent-attachment-upload-and-cleanup" }));
+    if (attachmentOnly) {
+      console.log(JSON.stringify({ ok: true, suffix, attachmentOnly: true, failures, optionalModelRequests }));
+      return;
+    }
 
     const bobComposer = bobPage.getByRole("textbox", { name: "消息", exact: true });
     await bobComposer.waitFor({ state: "visible", timeout: 120_000 });

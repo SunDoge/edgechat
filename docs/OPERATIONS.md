@@ -167,6 +167,13 @@ semantics. The SigV4 S3/B2 adapter must pass the same contract against the
 selected live provider before that provider is deployable. D1—not ETag or provider metadata—is
 authoritative for keys, sizes, digests, accounting, retention and repair state.
 
+Normal attachment upload uses one client-chosen 192-bit opaque ID and one
+conditional PUT. D1 binds that ID to the uploader, room, size and ciphertext
+digest. Retrying after an ambiguous response returns the committed D1 row with
+zero object-store requests. Only the crash window after PUT but before D1
+finalization repeats the conditional PUT and performs one exact-key HEAD to
+validate the existing object; it never creates a second key or uses LIST.
+
 EdgeChat does not make a second R2/S3 copy by default, does not store plaintext backups, and does not
 enable lifecycle deletion on committed `attachments/` or `rooms/` prefixes.
 Routine readiness uses the D1 ledger; periodic integrity audits may list the

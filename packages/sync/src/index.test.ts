@@ -966,14 +966,43 @@ describe("ApiClient request deadlines", () => {
 
 describe("ApiClient attachment uploads", () => {
   it("sends the client-computed ciphertext checksum with the fixed-length body", async () => {
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ attachment_id: "attachment-1" }));
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => Response.json({ attachment_id: new Headers(init?.headers).get("x-attachment-id") }));
     vi.stubGlobal("fetch", fetchMock);
     try {
       const ciphertext = new Uint8Array([11, 22, 33, 44]).buffer;
       await new ApiClient("https://edgechat.test", "token").uploadAttachment("!room-000000000001:example.com", ciphertext);
       const init = fetchMock.mock.calls[0]![1]!; const headers = new Headers(init.headers);
       expect(headers.get("x-content-sha256")).toBe("vb3OMS9XYlcfqhfz9HgCNe0sVPlmwPYNrOHN3SY09PM");
+      expect(headers.get("x-attachment-id")).toMatch(/^[A-Za-z0-9_-]{32}$/);
       expect(init.body).toBe(ciphertext);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("reuses one client attachment ID when a successful response may have been lost", async () => {
+    const attachmentId = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("connection reset after upload"))
+      .mockResolvedValueOnce(Response.json({ attachment_id: attachmentId }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const ciphertext = new Uint8Array([11, 22, 33, 44]).buffer;
+      await new ApiClient("https://edgechat.test", "token").uploadAttachment("!room-000000000001:example.com", ciphertext, attachmentId);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const first = new Headers(fetchMock.mock.calls[0]![1]!.headers);
+      const second = new Headers(fetchMock.mock.calls[1]![1]!.headers);
+      expect(first.get("x-attachment-id")).toBe(attachmentId);
+      expect(second.get("x-attachment-id")).toBe(first.get("x-attachment-id"));
+      expect(fetchMock.mock.calls[0]![1]!.body).toBe(ciphertext);
+      expect(fetchMock.mock.calls[1]![1]!.body).toBe(ciphertext);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("rejects a server response that substitutes a different attachment ID", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ attachment_id: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" })));
+    try {
+      await expect(new ApiClient("https://edgechat.test", "token").uploadAttachment(
+        "!room-000000000001:example.com", new Uint8Array([1]).buffer, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      )).rejects.toMatchObject({ code: "invalid_attachment_response" });
     } finally { vi.unstubAllGlobals(); }
   });
 

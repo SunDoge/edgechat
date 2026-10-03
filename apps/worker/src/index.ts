@@ -289,6 +289,8 @@ type PendingR2Write = {
   owner_user_id: string;
   kind: StorageKind;
   expected_bytes: number;
+  room_id?: string | null;
+  content_sha256?: string | null;
 };
 
 async function stageR2Write(env: Env, item: PendingR2Write): Promise<void> {
@@ -297,6 +299,37 @@ async function stageR2Write(env: Env, item: PendingR2Write): Promise<void> {
     await createDatabase(env.DB).insertInto("pending_r2_writes").values({ ...item, created_at: Date.now(), attempts: 0, last_error: null }).execute();
   } catch (error) {
     await releaseStorage(env, item.owner_user_id, item.expected_bytes, item.kind);
+    throw error;
+  }
+}
+
+function pendingR2WriteMatches(existing: PendingR2Write, expected: PendingR2Write): boolean {
+  return existing.object_key === expected.object_key
+    && existing.owner_user_id === expected.owner_user_id
+    && existing.kind === expected.kind
+    && existing.expected_bytes === expected.expected_bytes
+    && (existing.room_id ?? null) === (expected.room_id ?? null)
+    && (existing.content_sha256 ?? null) === (expected.content_sha256 ?? null);
+}
+
+async function stageIdempotentR2Write(env: Env, item: PendingR2Write): Promise<boolean> {
+  const findExisting = () => createDatabase(env.DB).selectFrom("pending_r2_writes")
+    .select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256"])
+    .where("object_key", "=", item.object_key).executeTakeFirst();
+  const existing = await findExisting();
+  if (existing) {
+    if (!pendingR2WriteMatches(existing as PendingR2Write, item)) throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
+    return false;
+  }
+  try {
+    await stageR2Write(env, item);
+    return true;
+  } catch (error) {
+    // Two identical retries may race between the initial lookup and the
+    // reservation insert. stageR2Write has already released the losing quota
+    // reservation, so only adopt the winner when every bound field matches.
+    const raced = await findExisting();
+    if (raced && pendingR2WriteMatches(raced as PendingR2Write, item)) return false;
     throw error;
   }
 }
@@ -4268,14 +4301,28 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
   if (declaredSize > MAX_ATTACHMENT) throw new HttpError(413, "Encrypted attachment is too large", "attachment_too_large");
   const suppliedDigest = requestContentSha256(request);
   if (!suppliedDigest) throw new HttpError(400, "Ciphertext SHA-256 required for attachment uploads", "attachment_digest_required");
-  const id = randomId(24);
+  const id = request.headers.get("x-attachment-id");
+  if (!id || !/^[A-Za-z0-9_-]{32}$/.test(id)) throw new HttpError(400, "A 192-bit client attachment ID is required", "invalid_attachment_id");
   const key = `attachments/${id}`;
-  const pending = { object_key: key, owner_user_id: auth.userId, kind: "attachment" as const, expected_bytes: declaredSize };
-  await stageR2Write(env, pending);
+  const db = createDatabase(env.DB);
+  const matchesUpload = (row: { room_id: string; uploader_user_id: string; ciphertext_bytes: number; ciphertext_sha256: string | null; source_deleted_at: number | null }): boolean => (
+    row.room_id === roomId && row.uploader_user_id === auth.userId && row.ciphertext_bytes === declaredSize
+      && row.ciphertext_sha256 === suppliedDigest.text && row.source_deleted_at === null
+  );
+  const existing = await db.selectFrom("attachments").select(["room_id", "uploader_user_id", "ciphertext_bytes", "ciphertext_sha256", "source_deleted_at"])
+    .where("attachment_id", "=", id).executeTakeFirst();
+  if (existing) {
+    if (!matchesUpload(existing)) throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
+    return json({ attachment_id: id, ciphertext_bytes: declaredSize }, 200);
+  }
+  const pending = { object_key: key, owner_user_id: auth.userId, kind: "attachment" as const, expected_bytes: declaredSize, room_id: roomId, content_sha256: suppliedDigest.text };
+  const reservationCreated = await stageIdempotentR2Write(env, pending);
+  let objectReady = false;
   try {
     const limited = exactLengthUploadStream(request.body, declaredSize);
     const put = objectStore(env).put(key, limited.body, {
-      expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream", metadata: { roomId, sha256: suppliedDigest.text },
+      ifAbsent: true, expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream",
+      metadata: { roomId, uploaderUserId: auth.userId, sha256: suppliedDigest.text },
     });
     let stored: ObjectStoreObject | null;
     try {
@@ -4285,17 +4332,31 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
       if (isFixedLengthMismatch(error)) throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
       throw error;
     }
+    if (stored) objectReady = true;
     if (!stored || stored.size !== declaredSize) {
-      throw new HttpError(400, "Attachment length or digest mismatch", "invalid_attachment_digest");
+      if (stored) throw new HttpError(400, "Attachment length or digest mismatch", "invalid_attachment_digest");
+      const recovered = await objectStore(env).head(key);
+      if (!recovered || recovered.size !== declaredSize || recovered.metadata.roomId !== roomId
+        || recovered.metadata.uploaderUserId !== auth.userId || recovered.metadata.sha256 !== suppliedDigest.text) {
+        throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
+      }
     }
-    const db = createDatabase(env.DB);
+    objectReady = true;
     await batch(env.DB, [
-      db.insertInto("attachments").values({ attachment_id: id, room_id: roomId, uploader_user_id: auth.userId, object_key: key, ciphertext_bytes: declaredSize, ciphertext_sha256: suppliedDigest.text, created_at: Date.now(), committed_event_id: null, committed_at: null, source_deleted_at: null }),
+      db.insertInto("attachments").values({ attachment_id: id, room_id: roomId, uploader_user_id: auth.userId, object_key: key, ciphertext_bytes: declaredSize, ciphertext_sha256: suppliedDigest.text, created_at: Date.now(), committed_event_id: null, committed_at: null, source_deleted_at: null })
+        .onConflict((conflict) => conflict.column("attachment_id").doNothing()),
       attachmentRetentionRequirement(db, id, roomId),
       db.deleteFrom("pending_r2_writes").where("object_key", "=", key),
     ]);
+    const committed = await db.selectFrom("attachments").select(["room_id", "uploader_user_id", "ciphertext_bytes", "ciphertext_sha256", "source_deleted_at"])
+      .where("attachment_id", "=", id).executeTakeFirst();
+    if (!committed || !matchesUpload(committed)) throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
   } catch (error) {
-    await abandonPendingR2Write(env, pending);
+    // Once the object is known to exist, retain the reservation so the same
+    // client ID can finish D1 finalization without another object write. The
+    // bounded pending-write janitor remains the crash fallback. Before that
+    // point no valid object was created, so release only this new reservation.
+    if (reservationCreated && !objectReady) await finalizePendingR2Cleanup(env, [pending]);
     throw error;
   }
   return json({ attachment_id: id, ciphertext_bytes: declaredSize }, 201);

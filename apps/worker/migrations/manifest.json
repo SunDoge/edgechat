@@ -180,6 +180,10 @@
     {
       "file": "0045_device_link_account_credentials.sql",
       "sha256": "b2b89ad53bf0d4cc4f56b5462edee5dc4a027a393ba2c640a0f1986eaeb5ce25"
+    },
+    {
+      "file": "0046_idempotent_attachment_uploads.sql",
+      "sha256": "60262b6533d73374ec45da4d4b4c48325c6db63b65ebffb4d217ff3519d6e13e"
     }
   ]
 }

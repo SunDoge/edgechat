@@ -44,6 +44,7 @@ describe("federation-ready identifiers", () => {
     expect(serverSupports(currentServerProtocol, "attachments.multi.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "history.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "attachments.repair.v1")).toBe(true);
+    expect(serverSupports(currentServerProtocol, "attachments.idempotent-upload.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "archive.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "messages.contact.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.profile.v1")).toBe(true);

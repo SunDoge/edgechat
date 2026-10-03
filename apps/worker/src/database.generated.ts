@@ -417,12 +417,14 @@ export interface Passkeys {
 
 export interface PendingR2Writes {
   attempts: Generated<number>;
+  content_sha256: Generated<string | null>;
   created_at: number;
   expected_bytes: number;
   kind: string;
   last_error: string | null;
   object_key: string;
   owner_user_id: string;
+  room_id: Generated<string | null>;
 }
 
 export interface ProfileAvatarDeletions {

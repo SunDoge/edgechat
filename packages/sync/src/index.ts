@@ -332,9 +332,24 @@ export class ApiClient {
     await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "DELETE", headers: { "x-compaction-token": token } });
   }
 
-  async uploadAttachment(roomId: RoomId, ciphertext: ArrayBuffer): Promise<{ attachment_id: string }> {
+  async uploadAttachment(roomId: RoomId, ciphertext: ArrayBuffer, attachmentId = base64Url(crypto.getRandomValues(new Uint8Array(24)).buffer)): Promise<{ attachment_id: string }> {
     const digest = base64Url(await crypto.subtle.digest("SHA-256", ciphertext));
-    return this.request("/api/v1/attachments", { method: "POST", headers: { "x-room-id": roomId, "x-content-sha256": digest }, body: ciphertext }, API_TRANSFER_TIMEOUT_MS);
+    const upload = async () => {
+      const result = await this.request<{ attachment_id: string }>("/api/v1/attachments", {
+        method: "POST", headers: { "x-room-id": roomId, "x-attachment-id": attachmentId, "x-content-sha256": digest }, body: ciphertext,
+      }, API_TRANSFER_TIMEOUT_MS);
+      if (result.attachment_id !== attachmentId) throw new ApiError("服务器返回了不匹配的附件 ID", 502, "invalid_attachment_response");
+      return result;
+    };
+    try { return await upload(); }
+    catch (error) {
+      // A response can be lost after the object and D1 row were committed. A
+      // single retry with the same opaque ID lets the Worker answer from D1
+      // without another S3/R2 operation.
+      if (!(error instanceof ApiTimeoutError) && !(error instanceof TypeError)
+        && !(error instanceof ApiError && error.status >= 500 && error.code !== "server_upgrade_required")) throw error;
+      return upload();
+    }
   }
   async abandonAttachments(attachmentIds: string[]): Promise<{ abandoned: number }> {
     return this.request("/api/v1/attachments/abandon", { method: "POST", body: JSON.stringify({ attachment_ids: attachmentIds }) });

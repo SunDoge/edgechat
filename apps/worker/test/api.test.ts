@@ -17,6 +17,10 @@ function eventId(domain = "localhost"): EventId {
   return `$${crypto.randomUUID()}:${domain}`;
 }
 
+function newAttachmentId(): string {
+  return b64url(crypto.getRandomValues(new Uint8Array(24)).buffer);
+}
+
 async function ciphertextDigest(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   return b64url(await crypto.subtle.digest("SHA-256", bytes));
 }
@@ -52,7 +56,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "attachments.idempotent-upload.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
   expect(tooNew.status).toBe(426);
@@ -950,13 +954,41 @@ describe("single-server durable delivery", () => {
     expect(created.status, await created.clone().text()).toBe(201);
     await acceptRequest(roomId, bob.access_token);
 
-    const upload = async (bytes: number[]) => {
+    const upload = async (bytes: number[], id = newAttachmentId()) => {
       const body = new Uint8Array(bytes);
-      const response = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "content-length": String(bytes.length), "x-content-sha256": await ciphertextDigest(body) }, body });
+      const response = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": id, "content-length": String(bytes.length), "x-content-sha256": await ciphertextDigest(body) }, body });
       expect(response.status, await response.clone().text()).toBe(201);
       return (await response.json() as { attachment_id: string }).attachment_id;
     };
-    const abandonedIds = [await upload([1]), await upload([2, 3])];
+    const crashId = newAttachmentId(); const crashBody = new Uint8Array([99]); const crashDigest = await ciphertextDigest(crashBody);
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO user_storage_usage (user_id, attachment_bytes, archive_bytes, attachment_objects, archive_objects, updated_at) VALUES (?, 0, 0, 0, 0, ?) ON CONFLICT(user_id) DO NOTHING").bind(alice.user_id, Date.now()),
+      env.DB.prepare("INSERT INTO pending_r2_writes (object_key, owner_user_id, kind, expected_bytes, room_id, content_sha256, created_at, attempts, last_error) VALUES (?, ?, 'attachment', 1, ?, ?, ?, 0, NULL)")
+        .bind(`attachments/${crashId}`, alice.user_id, roomId, crashDigest, Date.now()),
+      env.DB.prepare("UPDATE user_storage_usage SET attachment_bytes = attachment_bytes + 1, attachment_objects = attachment_objects + 1 WHERE user_id = ?").bind(alice.user_id),
+    ]);
+    await env.ARCHIVE.put(`attachments/${crashId}`, crashBody, { customMetadata: { roomId, uploaderUserId: alice.user_id, sha256: crashDigest } });
+    const crashRetry = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": crashId, "content-length": "1", "x-content-sha256": crashDigest }, body: crashBody });
+    expect(crashRetry.status, await crashRetry.clone().text()).toBe(201);
+    expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(`attachments/${crashId}`).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(alice.user_id).first()).toEqual({ attachment_bytes: 1, attachment_objects: 1 });
+    expect(await (await SELF.fetch("https://edgechat.test/api/v1/attachments/abandon", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ attachment_ids: [crashId] }) })).json()).toEqual({ abandoned: 1 });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+    const retryId = newAttachmentId();
+    const retryBody = new Uint8Array([1]);
+    const firstRetryableUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": retryId, "content-length": "1", "x-content-sha256": await ciphertextDigest(retryBody) }, body: retryBody });
+    expect(firstRetryableUpload.status).toBe(201);
+    const repeatedUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": retryId, "content-length": "1", "x-content-sha256": await ciphertextDigest(retryBody) }, body: retryBody });
+    expect(repeatedUpload.status).toBe(200);
+    expect(await repeatedUpload.json()).toMatchObject({ attachment_id: retryId, ciphertext_bytes: 1 });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
+    expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(alice.user_id).first()).toEqual({ attachment_bytes: 1, attachment_objects: 1 });
+    const conflictingBody = new Uint8Array([9]);
+    const conflictingUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": retryId, "content-length": "1", "x-content-sha256": await ciphertextDigest(conflictingBody) }, body: conflictingBody });
+    expect(conflictingUpload.status).toBe(409);
+    expect(await conflictingUpload.json()).toMatchObject({ code: "attachment_id_conflict" });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
+    const abandonedIds = [retryId, await upload([2, 3])];
     const abandoned = await SELF.fetch("https://edgechat.test/api/v1/attachments/abandon", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ attachment_ids: abandonedIds }) });
     expect(await abandoned.json()).toEqual({ abandoned: 2 });
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
@@ -1165,8 +1197,7 @@ describe("single-server durable delivery", () => {
 
     const avatarBody = new Uint8Array([11, 22, 33, 44]);
     const avatarUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": groupRoom,
-        "content-length": String(avatarBody.byteLength), "x-content-sha256": await ciphertextDigest(avatarBody) }, body: avatarBody,
+      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": groupRoom, "x-attachment-id": newAttachmentId(), "content-length": String(avatarBody.byteLength), "x-content-sha256": await ciphertextDigest(avatarBody) }, body: avatarBody,
     });
     expect(avatarUpload.status, await avatarUpload.clone().text()).toBe(201);
     const avatarId = (await avatarUpload.json() as { attachment_id: string }).attachment_id;
@@ -1248,8 +1279,7 @@ describe("single-server durable delivery", () => {
     expect(blockedMessageResponse.status).toBe(409);
     expect(await blockedMessageResponse.json()).toMatchObject({ code: "room_leave_pending" });
     const blockedAttachment = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { authorization: `Bearer ${carol.access_token}`, "x-room-id": groupRoom,
-        "content-length": "4", "x-content-sha256": await ciphertextDigest(new Uint8Array([1, 2, 3, 4])) }, body: new Uint8Array([1, 2, 3, 4]),
+      method: "POST", headers: { authorization: `Bearer ${carol.access_token}`, "x-room-id": groupRoom, "x-attachment-id": newAttachmentId(), "content-length": "4", "x-content-sha256": await ciphertextDigest(new Uint8Array([1, 2, 3, 4])) }, body: new Uint8Array([1, 2, 3, 4]),
     });
     expect(blockedAttachment.status).toBe(409);
     expect(await blockedAttachment.json()).toMatchObject({ code: "room_leave_pending" });
@@ -1475,7 +1505,7 @@ describe("single-server durable delivery", () => {
     ]));
     const attachmentUploadBody = new Uint8Array([7, 8, 9]);
     const attachmentUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": "3", "x-content-sha256": await ciphertextDigest(attachmentUploadBody) }, body: attachmentUploadBody,
+      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "3", "x-content-sha256": await ciphertextDigest(attachmentUploadBody) }, body: attachmentUploadBody,
     });
     expect(attachmentUpload.status, await attachmentUpload.clone().text()).toBe(201);
     const attachmentId = (await attachmentUpload.json() as { attachment_id: string }).attachment_id;
@@ -1554,15 +1584,24 @@ describe("single-server durable delivery", () => {
 
     const missingDigest = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
       method: "POST",
-      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": "4" },
+      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "4" },
       body: new Uint8Array([11, 22, 33, 44]),
     });
     expect(missingDigest.status).toBe(400);
     expect(await missingDigest.json()).toMatchObject({ code: "attachment_digest_required" });
 
+    const missingIdBody = new Uint8Array([11, 22, 33, 44]);
+    const missingId = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
+      method: "POST",
+      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": "4", "x-content-sha256": await ciphertextDigest(missingIdBody) },
+      body: missingIdBody,
+    });
+    expect(missingId.status).toBe(400);
+    expect(await missingId.json()).toMatchObject({ code: "invalid_attachment_id" });
+
     const malformedDigest = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
       method: "POST",
-      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": "4", "x-content-sha256": "not-a-digest" },
+      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "4", "x-content-sha256": "not-a-digest" },
       body: new Uint8Array([11, 22, 33, 44]),
     });
     expect(malformedDigest.status).toBe(400);
@@ -1570,7 +1609,7 @@ describe("single-server durable delivery", () => {
 
     const wrongDigest = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
       method: "POST",
-      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": "4", "x-content-sha256": b64url(new Uint8Array(32).buffer) },
+      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "4", "x-content-sha256": b64url(new Uint8Array(32).buffer) },
       body: new Uint8Array([11, 22, 33, 44]),
     });
     expect(wrongDigest.status).toBe(400);
@@ -1579,7 +1618,7 @@ describe("single-server durable delivery", () => {
     const lengthMismatchBody = new Uint8Array([11, 22, 33, 44]);
     const lengthMismatch = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
       method: "POST",
-      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": "3", "x-content-sha256": await ciphertextDigest(lengthMismatchBody) },
+      headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "3", "x-content-sha256": await ciphertextDigest(lengthMismatchBody) },
       body: lengthMismatchBody,
     });
     expect(lengthMismatch.status).toBe(400);
@@ -1590,7 +1629,7 @@ describe("single-server durable delivery", () => {
     const ciphertext = new Uint8Array([11, 22, 33, 44]);
     const ciphertextHash = b64url(await crypto.subtle.digest("SHA-256", ciphertext));
     const upload = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": String(ciphertext.byteLength), "x-content-sha256": ciphertextHash }, body: ciphertext,
+      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": String(ciphertext.byteLength), "x-content-sha256": ciphertextHash }, body: ciphertext,
     });
     expect(upload.status, await upload.clone().text()).toBe(201);
     const attachmentId = (await upload.json() as { attachment_id: string }).attachment_id;
@@ -1751,7 +1790,7 @@ describe("single-server durable delivery", () => {
       body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }) })).status).toBe(201);
     const uploadBody = new Uint8Array([1, 2, 3, 4]);
     const uploaded = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { ...headers, "x-room-id": roomId, "content-length": "4", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
+      method: "POST", headers: { ...headers, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "4", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
     });
     expect(uploaded.status, await uploaded.clone().text()).toBe(201);
     const attachmentId = (await uploaded.json() as { attachment_id: string }).attachment_id;
@@ -2233,7 +2272,7 @@ describe("single-server durable delivery", () => {
     expect(await eligiblePushEndpoints(env, roomId, alice.device_id)).toEqual(["https://push.example.test/bob"]);
     const uploadBody = new Uint8Array([1, 2, 3, 4]);
     const attachment = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "content-length": "4", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
+      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "4", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
     });
     expect(attachment.status, await attachment.clone().text()).toBe(201);
     const uploadedAttachment = await attachment.json() as { attachment_id: string };
@@ -2331,7 +2370,7 @@ describe("single-server durable delivery", () => {
     await env.DB.prepare("UPDATE attachments SET created_at = 0 WHERE attachment_id = ?").bind(uploadedAttachment.attachment_id).run();
     expect(await purgeUncommittedAttachments(env)).toBe(0);
     const orphanBody = new Uint8Array([5, 6, 7]);
-    const orphanUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "content-length": "3", "x-content-sha256": await ciphertextDigest(orphanBody) }, body: orphanBody });
+    const orphanUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "3", "x-content-sha256": await ciphertextDigest(orphanBody) }, body: orphanBody });
     const orphan = await orphanUpload.json() as { attachment_id: string };
     const orphanRow = await env.DB.prepare("SELECT object_key FROM attachments WHERE attachment_id = ?").bind(orphan.attachment_id).first<{ object_key: string }>();
     await env.DB.prepare("UPDATE attachments SET created_at = 0 WHERE attachment_id = ?").bind(orphan.attachment_id).run();
@@ -2351,7 +2390,7 @@ describe("single-server durable delivery", () => {
     expect(await usageAfterRecovery.json()).toMatchObject({ attachment_bytes: 4, attachment_objects: 1 });
 
     const missingBody = new Uint8Array([10, 11]);
-    const missingUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "content-length": "2", "x-content-sha256": await ciphertextDigest(missingBody) }, body: missingBody });
+    const missingUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "2", "x-content-sha256": await ciphertextDigest(missingBody) }, body: missingBody });
     const missing = await missingUpload.json() as { attachment_id: string };
     const missingRow = await env.DB.prepare("SELECT object_key FROM attachments WHERE attachment_id = ?").bind(missing.attachment_id).first<{ object_key: string }>();
     await env.ARCHIVE.delete(missingRow!.object_key);
@@ -2469,7 +2508,7 @@ describe("single-server durable delivery", () => {
     expect(await blockedSend.json()).toMatchObject({ code: "direct_unavailable" });
     expect(await env.DB.prepare("SELECT event_id FROM room_events WHERE event_id = ?").bind(blockedUnsigned.event_id).first()).toBeNull();
     const blockedAttachmentBody = new Uint8Array([1]);
-    const blockedAttachment = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "x-room-id": roomId, "content-length": "1", "x-content-sha256": await ciphertextDigest(blockedAttachmentBody) }, body: blockedAttachmentBody });
+    const blockedAttachment = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "1", "x-content-sha256": await ciphertextDigest(blockedAttachmentBody) }, body: blockedAttachmentBody });
     expect(blockedAttachment.status).toBe(403);
     expect(await blockedAttachment.json()).toMatchObject({ code: "direct_unavailable" });
     const blockedTicket = await SELF.fetch("https://edgechat.test/api/v1/ws-ticket", { method: "POST", headers: { authorization: `Bearer ${bob.access_token}` } }).then((response) => response.json()) as { ticket: string };
@@ -2602,7 +2641,7 @@ describe("single-server durable delivery", () => {
     alicePendingSocket.socket.close(1000, "done"); bobPendingSocket.socket.close(1000, "done");
 
     const beforeAcceptBody = new Uint8Array([1]);
-    const uploadBeforeAccept = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "content-length": "1", "x-content-sha256": await ciphertextDigest(beforeAcceptBody) }, body: beforeAcceptBody });
+    const uploadBeforeAccept = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "1", "x-content-sha256": await ciphertextDigest(beforeAcceptBody) }, body: beforeAcceptBody });
     expect(uploadBeforeAccept.status).toBe(409);
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 
@@ -2621,7 +2660,7 @@ describe("single-server durable delivery", () => {
 
     await acceptRequest(roomId, bob.access_token);
     const afterAcceptBody = new Uint8Array([2]);
-    const uploadAfterAccept = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "content-length": "1", "x-content-sha256": await ciphertextDigest(afterAcceptBody) }, body: afterAcceptBody });
+    const uploadAfterAccept = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "1", "x-content-sha256": await ciphertextDigest(afterAcceptBody) }, body: afterAcceptBody });
     expect(uploadAfterAccept.status, await uploadAfterAccept.clone().text()).toBe(201);
     expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
   });
@@ -2803,7 +2842,7 @@ describe("single-server durable delivery", () => {
     const upload = async (bytes: number[]) => {
       const body = new Uint8Array(bytes);
       return SELF.fetch("https://edgechat.test/api/v1/attachments", {
-        method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": String(bytes.length), "x-content-sha256": await ciphertextDigest(body) }, body,
+        method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": String(bytes.length), "x-content-sha256": await ciphertextDigest(body) }, body,
       });
     };
     expect((await upload([1, 2, 3, 4])).status).toBe(413);
@@ -2832,7 +2871,7 @@ describe("single-server durable delivery", () => {
     expect(room.status, await room.clone().text()).toBe(201);
     const attachmentBody = new Uint8Array([9, 8, 7, 6]);
     const attachment = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { ...headers, "x-room-id": roomId, "content-length": "4", "x-content-sha256": await ciphertextDigest(attachmentBody) }, body: attachmentBody,
+      method: "POST", headers: { ...headers, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "4", "x-content-sha256": await ciphertextDigest(attachmentBody) }, body: attachmentBody,
     });
     const { attachment_id: attachmentId } = await attachment.json() as { attachment_id: string };
     const unsigned: Omit<ClientEvent, "signature"> = {
@@ -2886,7 +2925,7 @@ describe("single-server durable delivery", () => {
     await acceptRequest(roomId, bob.access_token);
     const uploadBody = new Uint8Array([4, 5, 6]);
     const upload = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "content-length": "3", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
+      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "3", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
     });
     const { attachment_id: attachmentId } = await upload.json() as { attachment_id: string };
     const unsigned: Omit<ClientEvent, "signature"> = {
@@ -2953,7 +2992,7 @@ describe("single-server durable delivery", () => {
     })).status).toBe(201);
     const uploadBody = new Uint8Array([1, 2]);
     const upload = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
-      method: "POST", headers: { ...headers, "x-room-id": roomId, "content-length": "2", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
+      method: "POST", headers: { ...headers, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "2", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
     });
     const attachment = await upload.json() as { attachment_id: string };
     const objectKey = (await env.DB.prepare("SELECT object_key FROM attachments WHERE attachment_id = ?").bind(attachment.attachment_id).first<{ object_key: string }>())!.object_key;
