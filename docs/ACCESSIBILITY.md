@@ -1,6 +1,6 @@
 # Accessibility baseline
 
-EdgeChat treats keyboard, assistive-technology, reduced-motion and CJK input behavior as messaging correctness, not visual polish. The current interface language is Simplified Chinese (`zh-Hans`). The authentication, account-appeal, device-link and encrypted-backup entry journey now uses a typed, bundled string catalog; the signed-in workspace still needs the same migration before another language or a language selector can ship.
+EdgeChat treats keyboard, assistive-technology, reduced-motion and CJK input behavior as messaging correctness, not visual polish. The current interface language is Simplified Chinese (`zh-Hans`). The authentication, account-appeal, device-link and encrypted-backup entry journey uses a typed, bundled string catalog. The signed-in workspace shell now uses the same catalog for its conversation list, connection state, conversation header, history navigation, message-request actions, composer availability/attachment labels, startup state and update prompt. Its remaining dialogs, banners and operation feedback still need migration before another language or a language selector can ship.
 
 ## Implemented interaction contract
 

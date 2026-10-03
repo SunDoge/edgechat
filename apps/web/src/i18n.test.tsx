@@ -15,6 +15,8 @@ describe("local message catalog", () => {
   it("resolves static messages and requires named interpolation values", () => {
     expect(translate("auth.login.title")).toBe("欢迎回来");
     expect(translate("deviceLink.rooms", { count: 12 })).toBe("12 个对话将使用新的加密身份");
+    expect(translate("workspace.identity.verified", { verified: 2, total: 3 })).toBe("身份已核验 · 2/3 台设备");
+    expect(translate("workspace.composer.removeAttachment", { name: "照片.png" })).toBe("移除 照片.png");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {
