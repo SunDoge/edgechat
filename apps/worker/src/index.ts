@@ -1390,6 +1390,31 @@ async function setUserBlock(env: Env, auth: AuthContext, targetUserId: UserId, b
   return new Response(null, { status: 204 });
 }
 
+async function listBlockedUsers(url: URL, env: Env, auth: AuthContext): Promise<Response> {
+  requireUser(auth);
+  const requestedLimit = Number(url.searchParams.get("limit") ?? 50);
+  if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) throw new HttpError(400, "Invalid limit", "invalid_input");
+  const cursor = url.searchParams.get("cursor");
+  if (cursor && (!isNamespacedUserId(cursor) || cursor.slice(cursor.lastIndexOf(":") + 1) !== env.SERVER_NAME)) {
+    throw new HttpError(400, "Invalid cursor", "invalid_input");
+  }
+  const db = createDatabase(env.DB);
+  let query = db.selectFrom("user_blocks as block")
+    .innerJoin("users as blocked", "blocked.user_id", "block.blocked_user_id")
+    .select(["blocked.user_id", "blocked.display_name", "blocked.avatar_id", "block.created_at as blocked_at"])
+    .where("block.blocker_user_id", "=", auth.userId)
+    .orderBy("block.blocked_user_id")
+    .limit(requestedLimit + 1);
+  if (cursor) query = query.where("block.blocked_user_id", ">", cursor);
+  const rows = await query.execute();
+  const hasMore = rows.length > requestedLimit;
+  const page = hasMore ? rows.slice(0, requestedLimit) : rows;
+  return json({
+    users: page.map(({ avatar_id, ...user }) => ({ ...user, avatar_url: avatarUrl(avatar_id) })),
+    next_cursor: hasMore ? page.at(-1)?.user_id ?? null : null,
+  });
+}
+
 async function appendRoomEvent(env: Env, roomId: RoomId, event: ClientEvent, currentEpoch: number): Promise<RoomEvent> {
   const result = await env.ROOMS.getByName(roomId).appendEvent(event, currentEpoch);
   if (!result.ok) {
@@ -5836,6 +5861,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (userDevices && request.method === "GET") { requireUser(auth); const userId = decodeURIComponent(userDevices[1]); assertLocalId(userId, "@", env); return listDevices(env, userId); }
   const publicUserProfile = path.match(/^\/api\/v1\/users\/(.+)\/profile$/);
   if (publicUserProfile && request.method === "GET") { requireUser(auth); return userProfile(env, decodeURIComponent(publicUserProfile[1]) as UserId); }
+  if (path === "/api/v1/users/blocked" && request.method === "GET") return listBlockedUsers(url, env, auth);
   const userBlock = path.match(/^\/api\/v1\/users\/(.+)\/block$/);
   if (userBlock && (request.method === "PUT" || request.method === "DELETE")) {
     const userId = decodeURIComponent(userBlock[1]) as UserId;

@@ -3203,6 +3203,31 @@ describe("single-server durable delivery", () => {
     expect(denied.status).toBe(401);
   });
 
+  it("lists only the current user's blocked accounts with bounded keyset pagination and no R2 access", async () => {
+    const alice = await register("blocked_list_alice", await device("blocked-list-alice-device"));
+    const bob = await register("blocked_list_bob", await device("blocked-list-bob-device"));
+    const carol = await register("blocked_list_carol", await device("blocked-list-carol-device"));
+    const headers = { authorization: `Bearer ${alice.access_token}` };
+    for (const target of [bob, carol]) {
+      expect((await SELF.fetch(`https://edgechat.test/api/v1/users/${encodeURIComponent(target.user_id)}/block`, { method: "PUT", headers })).status).toBe(204);
+    }
+
+    const firstResponse = await SELF.fetch("https://edgechat.test/api/v1/users/blocked?limit=1", { headers });
+    expect(firstResponse.status).toBe(200);
+    const first = await firstResponse.json() as { users: Array<{ user_id: string; display_name: string; avatar_url: string | null; blocked_at: number }>; next_cursor: string | null };
+    expect(first.users).toEqual([{ user_id: bob.user_id, display_name: "blocked_list_bob", avatar_url: null, blocked_at: expect.any(Number) }]);
+    expect(first.next_cursor).toBe(bob.user_id);
+
+    const second = await SELF.fetch(`https://edgechat.test/api/v1/users/blocked?limit=1&cursor=${encodeURIComponent(first.next_cursor!)}`, { headers }).then((response) => response.json()) as typeof first;
+    expect(second).toEqual({ users: [{ user_id: carol.user_id, display_name: "blocked_list_carol", avatar_url: null, blocked_at: expect.any(Number) }], next_cursor: null });
+    const bobView = await SELF.fetch("https://edgechat.test/api/v1/users/blocked", { headers: { authorization: `Bearer ${bob.access_token}` } }).then((response) => response.json());
+    expect(bobView).toEqual({ users: [], next_cursor: null });
+    expect((await SELF.fetch("https://edgechat.test/api/v1/users/blocked?limit=101", { headers })).status).toBe(400);
+    expect((await SELF.fetch("https://edgechat.test/api/v1/users/blocked?cursor=not-a-user", { headers })).status).toBe(400);
+    expect((await SELF.fetch("https://edgechat.test/api/v1/users/blocked")).status).toBe(401);
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+  });
+
   it("syncs group-local hidden members without changing delivery or allocating R2 objects", async () => {
     const alice = await register("hidden_group_alice", await device("hidden-group-alice-device"));
     const bob = await register("hidden_group_bob", await device("hidden-group-bob-device"));

@@ -973,6 +973,16 @@ describe("ApiClient opaque registration replay", () => {
 });
 
 describe("ApiClient idempotent JSON reads", () => {
+  it("encodes the blocked-user keyset cursor without exposing it outside the query", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ users: [], next_cursor: null }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(new ApiClient("https://edgechat.test", "token").blockedUsers("@bob:example.com", 25)).resolves.toEqual({ users: [], next_cursor: null });
+      expect(fetchMock.mock.calls[0][0]).toBe("https://edgechat.test/api/v1/users/blocked?limit=25&cursor=%40bob%3Aexample.com");
+      expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("authorization")).toBe("Bearer token");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("retries one transient gateway response", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()

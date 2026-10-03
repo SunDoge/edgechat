@@ -123,6 +123,8 @@ export type AccountDeletionProgress = {
   objects: { pending: number; complete: number };
 };
 export type AccountExportPage<T> = { next_cursor: string | null } & T;
+export type BlockedUser = { user_id: string; display_name: string; avatar_url: string | null; blocked_at: number };
+export type BlockedUsersPage = { users: BlockedUser[]; next_cursor: string | null };
 export type RetentionCoverageState = { room_id: RoomId; current_seq: number; retention_floor_seq: number; retention_generation: number };
 export type RetentionCoverageAcknowledgement = { room_id: RoomId; generation: number; from_seq: number; through_seq: number };
 export type PeerRecoveryStatus = "pending" | "transferring" | "ready" | "complete" | "cancelled";
@@ -284,6 +286,11 @@ export class ApiClient {
   cancelRoomLeave(roomId: RoomId) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/leave`, { method: "DELETE" }); }
   roomLeaveTasks() { return this.request<{ tasks: RoomLeaveTask[] }>("/api/v1/room-leave-tasks"); }
   users(query: string) { return this.request<{ users: Array<{ user_id: string; display_name: string; avatar_url: string | null }> }>(`/api/v1/users?q=${encodeURIComponent(query)}`); }
+  blockedUsers(cursor?: string, limit = 50) {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return this.request<BlockedUsersPage>(`/api/v1/users/blocked?${query}`);
+  }
   blockUser(userId: string) { return this.request<void>(`/api/v1/users/${encodeURIComponent(userId)}/block`, { method: "PUT" }); }
   unblockUser(userId: string) { return this.request<void>(`/api/v1/users/${encodeURIComponent(userId)}/block`, { method: "DELETE" }); }
   devices(userId?: string) { return this.request<{ devices: ServerDevice[] }>(userId ? `/api/v1/users/${encodeURIComponent(userId)}/devices` : "/api/v1/devices"); }
