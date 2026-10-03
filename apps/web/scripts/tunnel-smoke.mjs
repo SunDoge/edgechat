@@ -32,7 +32,14 @@ function observe(page, label) {
 
 async function register(page, account) {
   await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
-  await page.getByLabel("显示名称").fill(account.name);
+  const displayName = page.getByLabel("显示名称");
+  const startupTimeout = page.getByRole("heading", { name: "打开本机消息库用时过长", exact: true });
+  await displayName.or(startupTimeout).waitFor({ state: "visible", timeout: 75_000 });
+  if (await startupTimeout.isVisible()) {
+    await page.getByRole("button", { name: "重新打开应用", exact: true }).click();
+    await displayName.waitFor({ state: "visible", timeout: 75_000 });
+  }
+  await displayName.fill(account.name);
   await page.getByLabel("用户名").fill(account.username);
   await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "创建并继续", exact: true }).click();
@@ -40,9 +47,14 @@ async function register(page, account) {
 }
 
 async function main() {
-  const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true });
-  const aliceContext = await browser.newContext({ serviceWorkers: "block" });
-  const bobContext = await browser.newContext({ serviceWorkers: "block" });
+  // Treat each endpoint as a real device process so their browser storage,
+  // Wasm runtime, crash lifecycle and resource limits remain independent.
+  const [aliceBrowser, bobBrowser] = await Promise.all([
+    chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true }),
+    chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true }),
+  ]);
+  const aliceContext = await aliceBrowser.newContext({ serviceWorkers: "block" });
+  const bobContext = await bobBrowser.newContext({ serviceWorkers: "block" });
   const alicePage = await aliceContext.newPage();
   const bobPage = await bobContext.newPage();
   observe(alicePage, "alice"); observe(bobPage, "bob");
@@ -114,7 +126,7 @@ async function main() {
     process.exitCode = 1;
   } finally {
     await Promise.allSettled([aliceContext.close(), bobContext.close()]);
-    await browser.close();
+    await Promise.allSettled([aliceBrowser.close(), bobBrowser.close()]);
   }
 }
 

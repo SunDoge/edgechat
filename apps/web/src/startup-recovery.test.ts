@@ -18,6 +18,17 @@ describe("startup recovery classification", () => {
     expect(describeStartupFailure(new Error("OPFS access denied")).code).toBe("LOCAL_DATABASE_UNAVAILABLE");
   });
 
+  it("turns a stopped startup watchdog into a non-destructive retry path", () => {
+    expect(describeStartupFailure(new Error("Local database startup timed out"))).toEqual({
+      kind: "local-database",
+      code: "LOCAL_DATABASE_STARTUP_TIMEOUT",
+      title: "打开本机消息库用时过长",
+      summary: "浏览器没有在预期时间内完成安全检查。后台数据库任务已停止，现有本机记录没有被删除。",
+      primaryAction: "重新打开应用",
+      primaryIntent: "retry",
+    });
+  });
+
   it("separates crypto and temporary service failures", () => {
     expect(describeStartupFailure(new Error("MLS snapshot could not be decoded")).kind).toBe("device-crypto");
     expect(describeStartupFailure(new TypeError("Failed to fetch")).kind).toBe("service-unavailable");

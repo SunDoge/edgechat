@@ -15,6 +15,16 @@ function errorMessage(cause: unknown): string {
 
 export function describeStartupFailure(cause: unknown): StartupFailure {
   const message = errorMessage(cause);
+  if (/Local database startup timed out/i.test(message)) {
+    return {
+      kind: "local-database",
+      code: "LOCAL_DATABASE_STARTUP_TIMEOUT",
+      title: "打开本机消息库用时过长",
+      summary: "浏览器没有在预期时间内完成安全检查。后台数据库任务已停止，现有本机记录没有被删除。",
+      primaryAction: "重新打开应用",
+      primaryIntent: "retry",
+    };
+  }
   if (/Local database schema \d+ is newer than this client supports/i.test(message)) {
     return {
       kind: "newer-client-required",

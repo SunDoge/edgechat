@@ -8,6 +8,7 @@ type Pending = { resolve: (value: DbResponse) => void; reject: (error: Error) =>
 type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
 
 const LOCAL_CONFIG_DB = "edgechat-local-config";
+export const LOCAL_DATABASE_STARTUP_TIMEOUT_MS = 60_000;
 export const PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY = "edgechat.pending-local-database-destructions.v1";
 
 type PendingLocalDatabaseDestruction = { profile_id: string; backend: "opfs" | "indexeddb" };
@@ -450,6 +451,8 @@ export class LocalDatabase {
   private workerFailure: Error | null = null;
   storage: "opfs" | "indexeddb" | "initializing" = "initializing";
 
+  get unavailable(): boolean { return this.workerFailure !== null; }
+
   constructor(private readonly profileId: string) {
     if (!/^[0-9a-f-]{36}$/i.test(profileId)) throw new Error("Invalid local profile identifier");
     this.worker.onmessage = (event: MessageEvent<DbResponse>) => {
@@ -476,6 +479,17 @@ export class LocalDatabase {
   }
 
   async exec(sql: string): Promise<void> { await this.send(sql, [], true); }
+
+  async open(timeoutMs = LOCAL_DATABASE_STARTUP_TIMEOUT_MS): Promise<"opfs" | "indexeddb"> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) throw new Error("Invalid local database startup timeout");
+    const response = await this.requestWithTimeout(
+      { sql: "SELECT 1 AS ready", params: [], exec: false },
+      timeoutMs,
+      new Error("Local database startup timed out"),
+    );
+    this.storage = response.storage ?? "indexeddb";
+    return this.storage;
+  }
 
   async clearAccountData(): Promise<void> {
     await this.exec(LOCAL_CLEAR_ACCOUNT_DATA);
@@ -1815,6 +1829,20 @@ export class LocalDatabase {
         this.pending.delete(id);
         reject(cause instanceof Error ? cause : new Error(String(cause)));
       }
+    });
+  }
+
+  private requestWithTimeout(message: Record<string, unknown>, timeoutMs: number, timeoutError: Error): Promise<DbResponse> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.worker.terminate();
+        this.failWorker(timeoutError);
+        reject(timeoutError);
+      }, timeoutMs);
+      void this.request(message).then(
+        (response) => { clearTimeout(timer); resolve(response); },
+        (error) => { clearTimeout(timer); reject(error); },
+      );
     });
   }
 }

@@ -1132,6 +1132,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await Promise.all([clearPortableBackupRestoreStaging(profileId), clearAccountExportStaging(profileId)]).catch(() => undefined);
         if (startupFailure()) return;
         if (sessionStorage.getItem(restoreCheckpointKey)) { api.setToken(null); return; }
+        await db.open();
         const storedIdentity = await loadIdentity(profileId);
         if (!storedIdentity || !api.getToken()) return;
         if (!storedIdentity.mlsState) { await clearLocalProfileToken(profileId); api.setToken(null); return; }
@@ -2688,7 +2689,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       let staged = false;
       try {
         await saveIdentity(profileId, restoredIdentity);
-        await db.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId);
+        const restoreDatabase = db.unavailable ? new LocalDatabase(profileId) : db;
+        try { await restoreDatabase.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId); }
+        finally { if (restoreDatabase !== db) await restoreDatabase.close(); }
         staged = true;
         await clearLocalProfileToken(profileId); api.setToken(null);
         sessionStorage.setItem(restorePhaseKey, "ready");

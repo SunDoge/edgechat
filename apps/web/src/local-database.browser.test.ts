@@ -202,6 +202,7 @@ describe("real browser local database", () => {
 
     const first = new LocalDatabase(profileId);
     try {
+      expect(await step("startup readiness", () => first.open())).toBe(expectedStorage);
       expect(await step("sanity query", () => first.query<{ value: number }>("SELECT 1 AS value"))).toEqual([{ value: 1 }]);
       await step("bind account", () => first.bindAccount("@alice:example.com", "Alice"));
       await step("save room", () => first.saveRoom({ room_id: roomId, name: null, kind: "direct", current_seq: 1, joined_seq: 0 }));
