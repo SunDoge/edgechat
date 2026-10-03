@@ -4,13 +4,17 @@ import type { ApiClient } from "@edgechat/sync";
 import { NewRoomDialog } from "./NewRoomDialog";
 
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); });
+afterEach(() => {
+  dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks();
+  Reflect.deleteProperty(window, "BarcodeDetector");
+  Reflect.deleteProperty(navigator, "mediaDevices");
+});
 
 describe("NewRoomDialog encrypted group profile", () => {
   it("does not claim keys while local MLS projection recovery is blocking creation", () => {
     const claimMlsKeyPackages = vi.fn();
     const root = document.createElement("div"); document.body.append(root);
-    dispose = render(() => <NewRoomDialog api={{ claimMlsKeyPackages } as unknown as ApiClient} serverName="example.com"
+    dispose = render(() => <NewRoomDialog api={{ claimMlsKeyPackages } as unknown as ApiClient} serverName="example.com" origin="https://chat.example.com" currentUserId="@alice:example.com"
       initialContact={{ user_id: "@bob:example.com", display_name: "Bob" }} creationBlocked
       createGroup={vi.fn()} queueInitialProfile={vi.fn()} onCreated={vi.fn()} onClose={vi.fn()}/>, root);
 
@@ -37,7 +41,7 @@ describe("NewRoomDialog encrypted group profile", () => {
     const onCreated = vi.fn();
     const queueInitialProfile = vi.fn(async () => undefined);
     const root = document.createElement("div"); document.body.append(root);
-    dispose = render(() => <NewRoomDialog api={api} serverName="example.com"
+    dispose = render(() => <NewRoomDialog api={api} serverName="example.com" origin="https://chat.example.com" currentUserId="@alice:example.com"
       createGroup={vi.fn(async () => ({ welcome: "welcome", ratchet_tree: "tree", epoch: 1 }))}
       queueInitialProfile={queueInitialProfile}
       onCreated={onCreated} onClose={vi.fn()}/>, root);
@@ -58,5 +62,35 @@ describe("NewRoomDialog encrypted group profile", () => {
     expect(JSON.stringify(createRoom.mock.calls[0]![0])).not.toContain("Weekend plans");
     expect(queueInitialProfile).toHaveBeenCalledWith(expect.stringMatching(/^!/), "Weekend plans");
     expect(onCreated).toHaveBeenCalledWith(expect.stringMatching(/^!/), "Weekend plans", true);
+  });
+
+  it("scans a strict same-origin contact link, stops the camera, and waits for confirmation", async () => {
+    const stop = vi.fn();
+    const detect = vi.fn(async () => [{ rawValue: "https://chat.example.com/?contact=%40bob%3Aexample.com" }]);
+    Object.defineProperty(window, "BarcodeDetector", { configurable: true, value: class { detect = detect; } });
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop }] })) } });
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    const claimMlsKeyPackages = vi.fn();
+    const profile = vi.fn(async () => ({ profile: { user_id: "@bob:example.com", display_name: "Bob", bio: "", avatar_url: null } }));
+    const root = document.createElement("div"); document.body.append(root);
+    dispose = render(() => <NewRoomDialog api={{ profile, claimMlsKeyPackages } as unknown as ApiClient} serverName="example.com" origin="https://chat.example.com" currentUserId="@alice:example.com"
+      createGroup={vi.fn()} queueInitialProfile={vi.fn()} onCreated={vi.fn()} onClose={vi.fn()}/>, root);
+
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "扫描联系人二维码")!.click();
+
+    await vi.waitFor(() => expect(profile).toHaveBeenCalledWith("@bob:example.com"));
+    expect(stop).toHaveBeenCalledOnce();
+    expect(document.body.textContent).toContain("已添加 Bob，确认后才会建立加密对话");
+    expect(claimMlsKeyPackages).not.toHaveBeenCalled();
+  });
+
+  it("keeps manual search available when camera scanning is unsupported", () => {
+    const root = document.createElement("div"); document.body.append(root);
+    dispose = render(() => <NewRoomDialog api={{} as ApiClient} serverName="example.com" origin="https://chat.example.com" currentUserId="@alice:example.com"
+      createGroup={vi.fn()} queueInitialProfile={vi.fn()} onCreated={vi.fn()} onClose={vi.fn()}/>, root);
+
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "扫描联系人二维码")!.click();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("完整用户 ID");
+    expect(document.querySelector("#people-search")).not.toBeNull();
   });
 });

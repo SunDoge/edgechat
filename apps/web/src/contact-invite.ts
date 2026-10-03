@@ -6,6 +6,8 @@ export type ContactInviteTarget =
   | { status: "remote"; userId: UserId }
   | { status: "valid"; userId: UserId };
 
+export type ContactInviteUrlTarget = ContactInviteTarget | { status: "foreign-origin" };
+
 export function contactInviteUrl(origin: string, userId: UserId): string {
   const url = new URL("/", origin);
   url.searchParams.set("contact", userId);
@@ -21,6 +23,16 @@ export function contactInviteTarget(search: string, serverName: string): Contact
   return domain.toLowerCase() === serverName.toLowerCase()
     ? { status: "valid", userId: value }
     : { status: "remote", userId: value };
+}
+
+export function contactInviteTargetFromUrl(value: string, expectedOrigin: string, serverName: string): ContactInviteUrlTarget {
+  if (value.length > 2_048) return { status: "invalid" };
+  let url: URL;
+  try { url = new URL(value.trim()); }
+  catch { return { status: "invalid" }; }
+  if (url.origin !== new URL(expectedOrigin).origin) return { status: "foreign-origin" };
+  if (url.username || url.password || url.pathname !== "/" || url.hash || [...url.searchParams.keys()].some((key) => key !== "contact")) return { status: "invalid" };
+  return contactInviteTarget(url.search, serverName);
 }
 
 export function withoutContactInvite(url: URL): string {

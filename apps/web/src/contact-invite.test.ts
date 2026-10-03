@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UserId } from "@edgechat/protocol";
-import { contactInviteTarget, contactInviteUrl, withoutContactInvite } from "./contact-invite";
+import { contactInviteTarget, contactInviteTargetFromUrl, contactInviteUrl, withoutContactInvite } from "./contact-invite";
 
 describe("contact invites", () => {
   it("creates a same-origin link containing only the namespaced user id", () => {
@@ -21,5 +21,15 @@ describe("contact invites", () => {
 
   it("removes only the consumed contact parameter", () => {
     expect(withoutContactInvite(new URL("https://chat.example.com/?contact=%40alice%3Achat.example.com&share_target=abc#top"))).toBe("/?share_target=abc#top");
+  });
+
+  it("accepts only the minimal same-origin contact URL when scanning", () => {
+    expect(contactInviteTargetFromUrl("https://chat.example.com/?contact=%40alice%3Achat.example.com", "https://chat.example.com", "chat.example.com")).toEqual({ status: "valid", userId: "@alice:chat.example.com" });
+    expect(contactInviteTargetFromUrl("https://evil.example/?contact=%40alice%3Achat.example.com", "https://chat.example.com", "chat.example.com")).toEqual({ status: "foreign-origin" });
+    expect(contactInviteTargetFromUrl("https://chat.example.com/?contact=%40alice%3Aremote.example", "https://chat.example.com", "chat.example.com")).toEqual({ status: "remote", userId: "@alice:remote.example" });
+    expect(contactInviteTargetFromUrl("https://chat.example.com/path?contact=%40alice%3Achat.example.com", "https://chat.example.com", "chat.example.com")).toEqual({ status: "invalid" });
+    expect(contactInviteTargetFromUrl("https://chat.example.com/?contact=%40alice%3Achat.example.com&utm=x", "https://chat.example.com", "chat.example.com")).toEqual({ status: "invalid" });
+    expect(contactInviteTargetFromUrl("https://user@chat.example.com/?contact=%40alice%3Achat.example.com", "https://chat.example.com", "chat.example.com")).toEqual({ status: "invalid" });
+    expect(contactInviteTargetFromUrl(`https://chat.example.com/?contact=${"a".repeat(2_048)}`, "https://chat.example.com", "chat.example.com")).toEqual({ status: "invalid" });
   });
 });

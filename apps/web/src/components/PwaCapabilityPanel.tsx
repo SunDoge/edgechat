@@ -3,7 +3,7 @@ import { IconInfoCircle } from "@tabler/icons-solidjs";
 import type { PushStatus } from "../push-subscription";
 import { useI18n } from "../i18n";
 
-export function PwaCapabilityPanel(props: { pushConfigured: boolean; pushStatus: PushStatus; voiceRecordingAvailable: boolean }) {
+export function PwaCapabilityPanel(props: { pushConfigured: boolean; pushStatus: PushStatus; voiceRecordingAvailable: boolean; qrScanningAvailable: boolean }) {
   const { t } = useI18n();
   const limitations = () => {
     const items = [t("pwaCapabilities.background")];
@@ -11,6 +11,7 @@ export function PwaCapabilityPanel(props: { pushConfigured: boolean; pushStatus:
     else if (props.pushStatus === "unsupported") items.push(t("pwaCapabilities.pushUnsupported"));
     else if (props.pushStatus === "blocked") items.push(t("pwaCapabilities.pushBlocked"));
     if (!props.voiceRecordingAvailable) items.push(t("pwaCapabilities.voiceUnsupported"));
+    if (!props.qrScanningAvailable) items.push(t("pwaCapabilities.qrUnsupported"));
     items.push(t("pwaCapabilities.share"));
     return items;
   };
