@@ -25,7 +25,9 @@ export function operationErrorMessage(cause: unknown, fallback: string, t: Trans
     if (cause.code === "device_link_not_pending" || cause.code === "device_link_claimed") return t("deviceLinkApproval.error.ended");
     if (cause.code === "room_membership_busy") return t("deviceLinkApproval.error.membershipBusy");
     if (cause.status === 429 || cause.code.endsWith("_rate_limited")) return t("operation.error.rateLimited");
-    if (cause.status >= 500 || cause.status === 408 || cause.status === 425) return t("operation.error.server");
+    if (cause.status >= 500 || cause.status === 408 || cause.status === 425) return cause.requestId
+      ? t("operation.error.serverReference", { requestId: cause.requestId })
+      : t("operation.error.server");
   }
   if (cause instanceof ApiTimeoutError || cause instanceof TypeError) return t("operation.error.connection");
   return fallback;

@@ -35,6 +35,15 @@ Alert on a degraded result for two consecutive checks, not on queue count alone.
 The public `/api/v1/health` remains a shallow liveness/protocol endpoint and must
 not expose operational inventory.
 
+Every API response carries a server-generated `x-edgechat-request-id`. Error
+responses repeat the same opaque value as `request_id`; unexpected-failure and
+schema-mismatch logs record it with the HTTP method and path. Ask a user for the
+displayed failure number when investigating a generic server error, then filter
+Workers Logs by `request_id`. The value is correlation metadata only: it must
+never contain or be replaced by a user ID, room ID, bearer token, object key, IP
+address, or arbitrary client-supplied header. Generating and transporting it
+does not read or write D1/R2/S3.
+
 Expired one-time device-session challenges are removed by the normal scheduled
 Worker cleanup. Each device has at most one outstanding row, challenges expire
 after five minutes, and issuing or claiming one never reads or writes object

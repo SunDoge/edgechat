@@ -11,6 +11,7 @@ export const zhHansMessages = {
   "common.yesterday": "昨天",
   "operation.error.connection": "无法连接服务器，请检查网络后重试",
   "operation.error.server": "服务器暂时不可用，请稍后再试",
+  "operation.error.serverReference": "服务器暂时不可用，请稍后再试（故障编号：{requestId}）",
   "operation.error.rateLimited": "操作过于频繁，请稍后再试",
   "operation.error.storageQuota": "云端存储空间或对象数量已达上限，请先清理不再需要的附件",
   "operation.error.clientUpgrade": "需要更新 EdgeChat 后才能继续",

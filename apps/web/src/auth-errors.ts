@@ -31,7 +31,9 @@ export function authErrorMessage(cause: unknown, t: Translator = translate, fall
       case "passkey_not_found": return t("auth.error.passkeyMissing");
       case "password_change_not_supported": return t("auth.error.passwordChangeUnsupported");
     }
-    if (cause.status >= 500) return t("auth.error.serverUnavailable");
+    if (cause.status >= 500) return cause.requestId
+      ? t("operation.error.serverReference", { requestId: cause.requestId })
+      : t("auth.error.serverUnavailable");
     if (cause.status === 429) return t("auth.error.rateLimited");
     return fallback;
   }

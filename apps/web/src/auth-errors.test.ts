@@ -9,6 +9,8 @@ describe("authentication error copy", () => {
     expect(authErrorMessage(new ApiError("Invalid credentials", 401, "invalid_credentials"))).toBe("用户名或密码不正确");
     expect(authErrorMessage(new ApiError("Schema mismatch", 503, "server_upgrade_required"))).toBe("服务器版本过旧，请联系管理员升级");
     expect(authErrorMessage(new ApiError("Internal error", 503, "internal_error"))).toBe("服务器暂时不可用，请稍后再试");
+    expect(authErrorMessage(new ApiError("private server trace", 503, "internal_error", "request_ref_1234")))
+      .toBe("服务器暂时不可用，请稍后再试（故障编号：request_ref_1234）");
     expect(authErrorMessage(new ApiError("raw passkey trace", 401, "invalid_passkey_challenge"))).toBe("通行密钥验证失败或已过期，请重试");
     expect(authErrorMessage(new ApiError("raw provider limit", 409, "passkey_limit_reached"))).toBe("通行密钥数量已达上限，请先删除一个");
   });

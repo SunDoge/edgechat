@@ -3,7 +3,7 @@ import { assertCompatibleServerProtocol, isMlsMembershipCommitEventType, isRoomE
 import { decodeSegmentChunk, decodeSegmentHeader, decodeSegmentIndex, rangesForSequences, SEGMENT_HEADER_BYTES } from "./archive";
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number, public code: string) { super(message); }
+  constructor(message: string, public status: number, public code: string, public requestId: string | null = null) { super(message); }
 }
 
 export const API_CONTROL_TIMEOUT_MS = 30_000;
@@ -531,8 +531,11 @@ export class ApiClient {
     try {
       const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
       if (!response.ok) {
-        const body = await response.json().catch(() => ({ error: "Request failed", code: "request_failed" })) as { error: string; code: string };
-        throw new ApiError(body.error, response.status, body.code);
+        const body = await response.json().catch(() => ({ error: "Request failed", code: "request_failed" })) as { error: string; code: string; request_id?: unknown };
+        const headerRequestId = response.headers.get("x-edgechat-request-id");
+        const candidateRequestId = headerRequestId ?? (typeof body.request_id === "string" ? body.request_id : null);
+        const requestId = candidateRequestId && /^[A-Za-z0-9_-]{8,64}$/.test(candidateRequestId) ? candidateRequestId : null;
+        throw new ApiError(body.error, response.status, body.code, requestId);
       }
       const serverVersion = response.headers.get("x-edgechat-server-protocol");
       const minimumClientVersion = response.headers.get("x-edgechat-min-client-protocol");

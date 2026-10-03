@@ -19,6 +19,8 @@ describe("operation error presentation", () => {
   it("maps transport, quota, rate and rollout failures without exposing raw diagnostics", () => {
     expect(operationErrorMessage(new ApiError("bucket quota internals", 413, "storage_quota_exceeded"), "发送失败")).toContain("云端存储");
     expect(operationErrorMessage(new ApiError("edge trace secret", 503, "internal_error"), "发送失败")).toBe("服务器暂时不可用，请稍后再试");
+    expect(operationErrorMessage(new ApiError("edge trace secret", 503, "internal_error", "request_ref_1234"), "发送失败"))
+      .toBe("服务器暂时不可用，请稍后再试（故障编号：request_ref_1234）");
     expect(operationErrorMessage(new ApiError("limit internals", 429, "account_rate_limited"), "发送失败")).toBe("操作过于频繁，请稍后再试");
     expect(operationErrorMessage(new ApiTimeoutError(30_000), "发送失败")).toContain("检查网络");
     expect(operationErrorMessage(new ApiError("schema internals", 503, "server_upgrade_required"), "发送失败")).toContain("服务器版本过旧");

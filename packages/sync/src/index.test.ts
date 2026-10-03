@@ -988,10 +988,14 @@ describe("ApiClient idempotent JSON reads", () => {
   });
 
   it("does not retry a deterministic missing resource", async () => {
-    const fetchMock = vi.fn(async () => Response.json({ error: "Missing", code: "not_found" }, { status: 404 }));
+    const fetchMock = vi.fn(async () => Response.json({ error: "Missing", code: "not_found", request_id: "body_reference_123" }, {
+      status: 404, headers: { "x-edgechat-request-id": "header_reference_123" },
+    }));
     vi.stubGlobal("fetch", fetchMock);
     try {
-      await expect(new ApiClient("https://edgechat.test").room("!missing-room:example.com")).rejects.toMatchObject({ status: 404 });
+      await expect(new ApiClient("https://edgechat.test").room("!missing-room:example.com")).rejects.toMatchObject({
+        status: 404, requestId: "header_reference_123",
+      });
       expect(fetchMock).toHaveBeenCalledOnce();
     } finally { vi.unstubAllGlobals(); }
   });

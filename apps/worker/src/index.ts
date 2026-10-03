@@ -188,10 +188,11 @@ function sessionCapabilities(env: Env): { archive_compaction_enabled: boolean; p
   return { archive_compaction_enabled: archiveCompactionEnabled(env), protocol: protocolCapabilities(env) };
 }
 
-function protocolResponseHeaders(): HeadersInit {
+function protocolResponseHeaders(requestId?: string): HeadersInit {
   return {
     "x-edgechat-server-protocol": String(PROTOCOL_VERSION),
     "x-edgechat-min-client-protocol": String(MIN_SUPPORTED_PROTOCOL_VERSION),
+    ...(requestId ? { "x-edgechat-request-id": requestId } : {}),
   };
 }
 
@@ -5880,19 +5881,22 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const isApi = new URL(request.url).pathname.startsWith("/api/");
+    const requestId = randomId(12);
+    const responseHeaders = protocolResponseHeaders(requestId);
     try {
       if (isApi) assertClientProtocol(request);
       const response = await route(request, env, ctx);
-      return isApi ? hardenApiResponse(response, protocolResponseHeaders()) : response;
+      return isApi ? hardenApiResponse(response, responseHeaders) : response;
     }
     catch (error) {
-      if (error instanceof HttpError) return hardenApiResponse(json({ error: error.message, code: error.code }, error.status, error.headers), protocolResponseHeaders());
+      if (error instanceof HttpError) return hardenApiResponse(json({ error: error.message, code: error.code, request_id: requestId }, error.status, error.headers), responseHeaders);
       if (isApi && isDatabaseSchemaMismatch(error)) {
-        console.error(JSON.stringify({ message: "database schema upgrade required", path: new URL(request.url).pathname }));
-        return hardenApiResponse(json({ error: "Server database schema must be upgraded", code: "server_upgrade_required" }, 503), protocolResponseHeaders());
+        console.error(JSON.stringify({ message: "database schema upgrade required", request_id: requestId, method: request.method, path: new URL(request.url).pathname }));
+        return hardenApiResponse(json({ error: "Server database schema must be upgraded", code: "server_upgrade_required", request_id: requestId }, 503), responseHeaders);
       }
-      console.error(JSON.stringify({ message: "request failed", path: new URL(request.url).pathname, error: error instanceof Error ? error.message : String(error) }));
-      return hardenApiResponse(json({ error: "Internal server error", code: "internal_error" }, 500), protocolResponseHeaders());
+      console.error(JSON.stringify({ message: "request failed", request_id: requestId, method: request.method,
+        path: new URL(request.url).pathname, error: error instanceof Error ? error.message : String(error) }));
+      return hardenApiResponse(json({ error: "Internal server error", code: "internal_error", request_id: requestId }, 500), responseHeaders);
     }
   },
   async scheduled(_controller, env, ctx): Promise<void> {

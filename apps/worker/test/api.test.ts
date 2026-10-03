@@ -57,6 +57,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
+  expect(legacy.headers.get("x-edgechat-request-id")).toMatch(/^[A-Za-z0-9_-]{16}$/);
   expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "attachments.idempotent-upload.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
@@ -65,7 +66,32 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
 
   const malformed = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "latest" } });
   expect(malformed.status).toBe(400);
-  expect(await malformed.json()).toMatchObject({ code: "invalid_protocol_version" });
+  const malformedBody = await malformed.json() as { code: string; request_id: string };
+  expect(malformedBody).toMatchObject({ code: "invalid_protocol_version" });
+  expect(malformedBody.request_id).toBe(malformed.headers.get("x-edgechat-request-id"));
+});
+
+it("correlates sanitized internal failures with one opaque request ID", async () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const brokenEnv = { ...(env as unknown as Env), DB: {
+    prepare() { throw new Error("private D1 trace must stay server-side"); },
+  } as unknown as D1Database } satisfies Env;
+  const context = createExecutionContext();
+  try {
+    const response = await worker.fetch(new Request("https://edgechat.test/api/v1/rooms", {
+      headers: { authorization: "Bearer opaque-token" },
+    }) as Parameters<typeof worker.fetch>[0], brokenEnv, context);
+    await waitOnExecutionContext(context);
+    expect(response.status).toBe(500);
+    const requestId = response.headers.get("x-edgechat-request-id");
+    expect(requestId).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    const body = await response.json() as { error: string; code: string; request_id: string };
+    expect(body).toEqual({ error: "Internal server error", code: "internal_error", request_id: requestId });
+    expect(JSON.stringify(body)).not.toContain("private D1 trace");
+    const log = consoleError.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(log).toContain(`\"request_id\":\"${requestId}\"`);
+    expect(log).toContain("private D1 trace must stay server-side");
+  } finally { consoleError.mockRestore(); }
 });
 
 it("registers, inspects, renews, and removes a device push subscription without R2", async () => {
