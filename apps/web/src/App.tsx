@@ -76,7 +76,7 @@ import { AttachmentSendCleanupCoordinator } from "./attachment-send-cleanup";
 import { AttachmentCiphertextLoader } from "./attachment-loader";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
 import { createDeviceHistoryBundle } from "./device-history-bundle";
-import { openRoomPeerRecovery, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
+import { openRoomPeerRecovery, RoomPeerRecoveryError, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
 import { historyRecoveryCopy, type HistoryRecoveryViewState } from "./history-recovery-ui";
 import { openComposerDraft, sealComposerDraft } from "./draft-sync";
 import { clearPushConfig, disablePush, reconcilePush, setActivePushProfile, suspendPush, type PushStatus } from "./push-subscription";
@@ -352,6 +352,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   function historyRecoveryError(cause: unknown): string {
     if (!navigator.onLine) return t("workspace.historyRecovery.error.offline");
+    if (cause instanceof RoomPeerRecoveryError) return operationErrorMessage(cause, t("workspace.historyRecovery.error.invalid"), t);
     if (cause instanceof ApiError && cause.code === "peer_recovery_source_unavailable") return t("workspace.historyRecovery.error.noSource");
     if (cause instanceof ApiError && (cause.status === 409 || cause.status === 429)) return t("workspace.historyRecovery.error.busy");
     if (cause instanceof ApiError && cause.status >= 500) return t("workspace.historyRecovery.error.server");

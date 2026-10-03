@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
-import { openRoomPeerRecovery, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
+import { operationErrorMessage } from "./operation-errors";
+import { openRoomPeerRecovery, RoomPeerRecoveryError, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
 
 const roomId = "!peer-recovery:example.com" as RoomId;
 function event(seq: number): RoomEvent {
@@ -28,11 +29,29 @@ describe("room peer recovery bundles", () => {
       targetDeviceId: target.deviceId, afterSeq: 0, throughSeq: 2 };
     const targetKey = await crypto.subtle.exportKey("jwk", target.encryptionPublicKey);
     const sourceKey = await crypto.subtle.exportKey("jwk", source.encryptionPublicKey);
-    await expect(sealRoomPeerRecovery([event(1), event(3)], context, source, targetKey)).rejects.toThrow("顺序错误");
+    await expect(sealRoomPeerRecovery([event(1), event(3)], context, source, targetKey)).rejects.toMatchObject({
+      code: "invalid_source_range",
+      messageKey: "workspace.historyRecovery.error.sourceRange",
+    });
     const bundle = await sealRoomPeerRecovery([event(1), event(2)], context, source, targetKey);
     const bytes = new Uint8Array(await bundle.arrayBuffer()); bytes[bytes.length - 1] ^= 1;
-    await expect(openRoomPeerRecovery(new Blob([bytes]), context, target, sourceKey)).rejects.toThrow("已损坏");
-    await expect(openRoomPeerRecovery(bundle, { ...context, targetDeviceId: wrong.deviceId }, wrong, sourceKey)).rejects.toThrow("请求不匹配");
-    await expect(openRoomPeerRecovery(bundle, context, target, await crypto.subtle.exportKey("jwk", wrong.encryptionPublicKey))).rejects.toThrow("源身份不匹配");
+    await expect(openRoomPeerRecovery(new Blob([bytes]), context, target, sourceKey)).rejects.toMatchObject({ code: "authentication_failed" });
+    await expect(openRoomPeerRecovery(bundle, { ...context, targetDeviceId: wrong.deviceId }, wrong, sourceKey)).rejects.toMatchObject({ code: "wrong_request" });
+    await expect(openRoomPeerRecovery(bundle, context, target, await crypto.subtle.exportKey("jwk", wrong.encryptionPublicKey))).rejects.toMatchObject({
+      code: "source_identity_mismatch",
+    });
+  });
+
+  it("rejects malformed packages with a stable, localized error", async () => {
+    const core = new WebCryptoMessagingCore(); const target = await core.createIdentity(); const source = await core.createIdentity();
+    const context: RoomPeerRecoveryContext = { recoveryId: "recovery-malformed", roomId, sourceDeviceId: source.deviceId,
+      targetDeviceId: target.deviceId, afterSeq: 0, throughSeq: 1 };
+    const sourceKey = await crypto.subtle.exportKey("jwk", source.encryptionPublicKey);
+
+    let error: unknown;
+    try { await openRoomPeerRecovery(new Blob([new Uint8Array(32)]), context, target, sourceKey); } catch (cause) { error = cause; }
+    expect(error).toBeInstanceOf(RoomPeerRecoveryError);
+    expect(error).toMatchObject({ code: "invalid_package", messageKey: "workspace.historyRecovery.error.invalidPackage" });
+    expect(operationErrorMessage(error, "fallback")).toContain("恢复数据格式无效");
   });
 });

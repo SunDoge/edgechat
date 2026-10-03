@@ -53,6 +53,8 @@ describe("local message catalog", () => {
     expect(translate("conversationExport.footer", { count: 12 })).toBe("共导出 12 条本机消息。");
     expect(translate("deviceLink.error.historyDamaged")).toContain("重新发起设备链接");
     expect(translate("deviceLink.error.historyTransferLimit")).toContain("不迁移历史");
+    expect(translate("workspace.historyRecovery.error.damaged")).toContain("完整性验证");
+    expect(translate("workspace.historyRecovery.error.sourceIdentity")).toContain("可信设备");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {
