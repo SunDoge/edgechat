@@ -5,6 +5,7 @@ import { createDatabase } from "./database";
 
 const PASSWORD_ITERATIONS = 120_000;
 const SESSION_MS = 30 * 24 * 60 * 60 * 1_000;
+const AUTH_CLEANUP_BATCH = 500;
 
 export async function passwordHash(password: string, salt: Uint8Array<ArrayBuffer> = crypto.getRandomValues(new Uint8Array(16))): Promise<{ hash: string; salt: string }> {
   if (password.length < 10 || password.length > 256) throw new HttpError(400, "Password must be at least 10 characters", "weak_password");
@@ -29,6 +30,22 @@ export async function createSession(env: Env, userId: string, deviceId: string):
     created_at: now, expires_at: now + SESSION_MS,
   }).execute();
   return token;
+}
+
+/**
+ * Reclaims expired bearer sessions and unconsumed one-minute WebSocket
+ * tickets without turning a daily Cron run into an unbounded D1 mutation.
+ * A later run continues from each expiry index when more rows remain.
+ */
+export async function cleanupExpiredAuthenticationState(env: Env, now = Date.now()): Promise<{ sessions: number; ws_tickets: number }> {
+  const db = createDatabase(env.DB);
+  const expiredSessions = db.selectFrom("sessions").select("token_hash")
+    .where("expires_at", "<=", now).orderBy("expires_at").orderBy("token_hash").limit(AUTH_CLEANUP_BATCH);
+  const sessions = await db.deleteFrom("sessions").where("token_hash", "in", expiredSessions).executeTakeFirst();
+  const expiredTickets = db.selectFrom("ws_tickets").select("ticket_hash")
+    .where("expires_at", "<=", now).orderBy("expires_at").orderBy("ticket_hash").limit(AUTH_CLEANUP_BATCH);
+  const tickets = await db.deleteFrom("ws_tickets").where("ticket_hash", "in", expiredTickets).executeTakeFirst();
+  return { sessions: Number(sessions.numDeletedRows), ws_tickets: Number(tickets.numDeletedRows) };
 }
 
 export async function authenticate(request: Request, env: Env): Promise<AuthContext> {

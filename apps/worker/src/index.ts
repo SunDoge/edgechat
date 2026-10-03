@@ -1,7 +1,7 @@
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DeviceSessionChallenge, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
 import { sql } from "kysely";
-import { authenticate, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
+import { authenticate, cleanupExpiredAuthenticationState, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
 import { createDatabase } from "./database";
 import type { AuthContext, Env } from "./env";
 import { b64url, fromB64url, hardenApiResponse, HttpError, json, randomId, readJson, sha256, stringField } from "./http";
@@ -5628,6 +5628,9 @@ export default {
       }),
       cleanupExpiredDeviceSessionChallenges(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "cleaned expired device session challenges", count }));
+      }),
+      cleanupExpiredAuthenticationState(env).then((count) => {
+        if (count.sessions || count.ws_tickets) console.log(JSON.stringify({ message: "cleaned expired authentication state", ...count }));
       }),
       cleanupExpiredPasskeyChallenges(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "cleaned expired passkey challenges", count }));

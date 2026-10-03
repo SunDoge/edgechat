@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --port 5173",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && node --check scripts/pwa-offline.mjs && node --check scripts/tunnel-smoke.mjs",
     "test": "vitest run --passWithNoTests --exclude 'src/**/*.browser.test.ts'",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "browser:install:firefox": "node node_modules/playwright/cli.js install firefox",

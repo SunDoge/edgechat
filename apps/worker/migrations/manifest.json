@@ -196,6 +196,10 @@
     {
       "file": "0049_profile_avatar_repair.sql",
       "sha256": "ee0906197afff7c4f0a00cd9e0dad74eba4c039cd51b906215446f339a5e618a"
+    },
+    {
+      "file": "0050_authentication_expiry_indexes.sql",
+      "sha256": "06136f14f56a482147d2adffc2e7951c551d0645cbf1fe1ef66446c9bafd5b52"
     }
   ]
 }

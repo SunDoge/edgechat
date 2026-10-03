@@ -4,6 +4,7 @@ const baseUrl = process.env.EDGECHAT_SMOKE_URL;
 if (!baseUrl) throw new Error("EDGECHAT_SMOKE_URL is required");
 const browserUrl = process.env.EDGECHAT_SMOKE_BROWSER_URL ?? baseUrl;
 const attachmentOnly = process.env.EDGECHAT_SMOKE_ATTACHMENT_ONLY === "1";
+const injectAmbiguousRegistration = process.env.EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION === "1";
 
 const suffix = Math.random().toString(36).slice(2, 10);
 const alice = { name: `Alice ${suffix}` };
@@ -13,6 +14,7 @@ const reply = `已收到 ${suffix}`;
 const savedMessage = `给自己的备忘 ${suffix}`;
 const failures = [];
 const optionalModelRequests = [];
+let ambiguousRegistrationWindow = false;
 
 function base64Url(bytes) {
   return Buffer.from(bytes).toString("base64url");
@@ -24,15 +26,60 @@ function observe(page, label) {
   });
   page.on("console", (message) => {
     const text = message.text();
+    if (injectAmbiguousRegistration && label === "alice" && ambiguousRegistrationWindow
+      && message.type() === "error" && text.includes("502 (Bad Gateway)")) return;
     if ((message.type() === "error" || message.type() === "warning") && !text.includes("Service Worker") && !text.includes("service worker registration failed")) failures.push({ label, console: message.type(), text: text.slice(0, 1_000) });
   });
   page.on("response", async (response) => {
+    if (response.headers()["x-edgechat-smoke-injected"] === "ambiguous-registration") return;
     if (response.status() < 400 || !response.url().includes("/api/")) return;
     let body = "";
     try { body = (await response.text()).slice(0, 1_000); } catch { /* response may be gone */ }
     failures.push({ label, status: response.status(), method: response.request().method(), url: response.url(), body });
   });
   page.on("pageerror", (error) => failures.push({ label, pageerror: error.message }));
+}
+
+async function interceptCommittedRegistration(page) {
+  if (!injectAmbiguousRegistration) return async () => undefined;
+  const pattern = "**/api/v1/register/opaque";
+  const bodies = [];
+  let committedUserId;
+  const handler = async (route) => {
+    const requestBody = route.request().postDataBuffer();
+    if (!requestBody) throw new Error("opaque registration request had no body");
+    bodies.push(requestBody);
+    if (bodies.length !== 1) return route.continue();
+
+    // Let the first request commit to the real Worker, then emulate a gateway
+    // losing that successful response. The PWA must replay the byte-identical
+    // body and the Worker must return the existing account without allocating
+    // another user or device.
+    const committed = await route.fetch();
+    if (!committed.ok()) throw new Error(`injected registration did not commit: ${committed.status()}`);
+    const payload = await committed.json();
+    if (typeof payload.user_id !== "string") throw new Error("committed registration did not return a user_id");
+    committedUserId = payload.user_id;
+    ambiguousRegistrationWindow = true;
+    await route.fulfill({
+      status: 502,
+      contentType: "application/json",
+      headers: { "x-edgechat-smoke-injected": "ambiguous-registration" },
+      body: JSON.stringify({ error: "injected_gateway_response_loss" }),
+    });
+  };
+  await page.route(pattern, handler);
+  return async (session) => {
+    await page.unroute(pattern, handler);
+    if (bodies.length !== 2) throw new Error(`expected exactly two opaque registration attempts, saw ${bodies.length}`);
+    if (!bodies[0].equals(bodies[1])) throw new Error("opaque registration retry changed its credential or public-key body");
+    if (session.user_id !== committedUserId) throw new Error("opaque registration retry created or returned a different account");
+    ambiguousRegistrationWindow = false;
+  };
+}
+
+function assertCleanBrowserRun() {
+  if (failures.length) throw new Error(`browser reported ${failures.length} unexpected failure(s)`);
 }
 
 async function register(page, account) {
@@ -49,7 +96,9 @@ async function register(page, account) {
     }
   }
   await displayName.fill(account.name);
-  const registration = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/register/opaque", { timeout: 120_000 });
+  const registration = page.waitForResponse((response) => response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/api/v1/register/opaque"
+    && response.ok(), { timeout: 120_000 });
   await page.getByRole("button", { name: "创建并继续", exact: true }).click();
   const response = await registration;
   if (!response.ok()) throw new Error(`registration failed with ${response.status()}: ${(await response.text()).slice(0, 1_000)}`);
@@ -90,9 +139,11 @@ async function main() {
   const bobPage = await bobContext.newPage();
   observe(alicePage, "alice"); observe(bobPage, "bob");
   try {
+    const verifyAmbiguousRegistration = await interceptCommittedRegistration(alicePage);
     await register(alicePage, alice);
+    await verifyAmbiguousRegistration({ user_id: alice.userId });
     await register(bobPage, bob);
-    console.log(JSON.stringify({ step: "registered", alice: alice.username, bob: bob.username }));
+    console.log(JSON.stringify({ step: "registered", alice: alice.username, bob: bob.username, ambiguousRegistrationVerified: injectAmbiguousRegistration }));
 
     await alicePage.getByLabel("新建对话").click();
     await alicePage.getByLabel("搜索用户").fill(bob.username);
@@ -122,6 +173,7 @@ async function main() {
     await verifyIdempotentAttachment(alice, roomId);
     console.log(JSON.stringify({ step: "idempotent-attachment-upload-and-cleanup" }));
     if (attachmentOnly) {
+      assertCleanBrowserRun();
       console.log(JSON.stringify({ ok: true, suffix, attachmentOnly: true, failures, optionalModelRequests }));
       return;
     }
@@ -162,6 +214,7 @@ async function main() {
     await alicePage.getByText(savedMessage, { exact: true }).waitFor({ timeout: 120_000 });
     await alicePage.getByText(/· 已发送$/).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "saved-message-sent" }));
+    assertCleanBrowserRun();
     console.log(JSON.stringify({ ok: true, suffix, failures, optionalModelRequests }));
   } catch (error) {
     const pages = {};

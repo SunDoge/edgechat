@@ -7,6 +7,7 @@ import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limi
 import type { Env } from "../src/env";
 import { HttpError } from "../src/http";
 import { cleanupExpiredPasskeyChallenges } from "../src/passkeys";
+import { cleanupExpiredAuthenticationState } from "../src/auth";
 
 function b64url(bytes: ArrayBuffer): string {
   let value = ""; for (const byte of new Uint8Array(bytes)) value += String.fromCharCode(byte);
@@ -721,6 +722,26 @@ it("mints a one-time session only for the registered device key and possession c
   await env.DB.prepare("INSERT INTO device_session_challenges (challenge_id, device_id, challenge_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
     .bind("expired-challenge", currentDevice.id, "expired-hash", 1, 2).run();
   expect(await cleanupExpiredDeviceSessionChallenges(env as unknown as Env, 3)).toBe(1);
+  expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+});
+
+it("reclaims only expired sessions and unconsumed WebSocket tickets without object storage", async () => {
+  const currentDevice = await device(`auth-cleanup-${crypto.randomUUID()}`);
+  const account = await register(`auth_cleanup_${crypto.randomUUID().slice(0, 8)}`, currentDevice);
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, device_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+      .bind("expired-session", account.user_id, currentDevice.id, 1, 2),
+    env.DB.prepare("INSERT INTO ws_tickets (ticket_hash, user_id, device_id, expires_at) VALUES (?, ?, ?, ?)")
+      .bind("expired-ticket", account.user_id, currentDevice.id, 2),
+    env.DB.prepare("INSERT INTO ws_tickets (ticket_hash, user_id, device_id, expires_at) VALUES (?, ?, ?, ?)")
+      .bind("future-ticket", account.user_id, currentDevice.id, 4),
+  ]);
+
+  expect(await cleanupExpiredAuthenticationState(env as unknown as Env, 3)).toEqual({ sessions: 1, ws_tickets: 1 });
+  expect(await env.DB.prepare("SELECT token_hash FROM sessions WHERE token_hash = ?").bind("expired-session").first()).toBeNull();
+  expect((await env.DB.prepare("SELECT ticket_hash FROM ws_tickets ORDER BY ticket_hash").all()).results)
+    .toEqual([{ ticket_hash: "future-ticket" }]);
+  expect((await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { authorization: `Bearer ${account.access_token}` } })).status).toBe(200);
   expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 });
 
