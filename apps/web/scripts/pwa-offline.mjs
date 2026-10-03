@@ -2,7 +2,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
-import { chromium } from "playwright";
+import { chromium, firefox, webkit } from "playwright";
 
 const distRoot = resolve("dist");
 const builtServiceWorker = await readFile(resolve(distRoot, "sw.js"), "utf8");
@@ -11,13 +11,21 @@ invariant(activeBuildMatch, "Built Service Worker does not contain a versioned s
 const replacementBuildId = activeBuildMatch[1] === "ffffffffffff" ? "eeeeeeeeeeee" : "ffffffffffff";
 const replacementServiceWorker = `${builtServiceWorker.replace(activeBuildMatch[0], `const CACHE = "edgechat-shell-${replacementBuildId}"`)}\n// pwa-gate replacement ${replacementBuildId}\n`;
 let servedServiceWorker = builtServiceWorker;
+const requestedBrowser = process.env.EDGECHAT_BROWSER ?? "chromium";
+invariant(["chromium", "firefox", "webkit"].includes(requestedBrowser), `Unsupported EDGECHAT_BROWSER: ${requestedBrowser}`);
 const configuredChrome = process.env.EDGECHAT_CHROME_PATH;
-const executablePath = configuredChrome || [
+const systemChrome = configuredChrome || [
   "/usr/bin/google-chrome",
   "/usr/bin/google-chrome-stable",
   "/usr/bin/chromium",
   "/usr/bin/chromium-browser",
 ].find(existsSync);
+const browserType = { chromium, firefox, webkit }[requestedBrowser];
+const executablePath = requestedBrowser === "chromium"
+  ? systemChrome
+  : requestedBrowser === "firefox"
+    ? process.env.EDGECHAT_FIREFOX_PATH
+    : process.env.EDGECHAT_WEBKIT_PATH;
 const mimeTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".data", "application/octet-stream"],
@@ -41,8 +49,13 @@ function probePage(response) {
 
 let apiRequests = 0;
 let serviceWorkerRequests = 0;
+let originOffline = false;
 async function serveStatic(request, response) {
   const url = new URL(request.url ?? "/", "http://localhost");
+  if (originOffline) {
+    response.destroy();
+    return;
+  }
   if (url.pathname === "/__edgechat_pwa_probe__") { probePage(response); return; }
   if (url.pathname === "/sw.js") {
     serviceWorkerRequests += 1;
@@ -94,7 +107,7 @@ invariant(address && typeof address === "object", "Static test server did not bi
 const origin = `http://127.0.0.1:${address.port}`;
 let browser;
 try {
-  browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+  browser = await browserType.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
   const context = await browser.newContext({ serviceWorkers: "allow" });
   const page = await context.newPage();
   await page.goto(`${origin}/__edgechat_pwa_probe__`, { waitUntil: "load" });
@@ -174,7 +187,12 @@ try {
   invariant(cached.paths.some((path) => path.endsWith(".wasm")), "Wasm bundle was not precached");
   invariant(cached.paths.some((path) => path.endsWith(".data")), "PGlite data bundle was not precached");
 
-  await context.setOffline(true);
+  originOffline = true;
+  // WebKit's Playwright offline toggle aborts a service-worker-controlled
+  // navigation before the worker can serve its cached fallback. The origin
+  // disconnect above provides the same deterministic network failure while
+  // still exercising WebKit's production Service Worker fetch path.
+  if (requestedBrowser !== "webkit") await context.setOffline(true);
   const navigation = await page.goto(`${origin}/offline-start`, { waitUntil: "domcontentloaded" });
   invariant(navigation?.status() === 200, `Offline shell navigation returned ${navigation?.status() ?? "no response"}`);
   invariant(await page.title() === "EdgeChat", "Offline navigation did not return the application shell");
@@ -203,7 +221,7 @@ try {
   invariant(serviceWorkerRequests >= 2, `Expected initial and update Service Worker requests, saw ${serviceWorkerRequests}`);
 
   await context.close();
-  console.log(`PWA install/update/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
+  console.log(`PWA ${requestedBrowser} install/update/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
 } finally {
   await browser?.close();
   await new Promise((resolvePromise) => server.close(resolvePromise));
