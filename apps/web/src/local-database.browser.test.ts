@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { LocalDatabase } from "@edgechat/db";
+import { LocalDatabase, PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY, hasPendingLocalDatabaseDestruction, resumePendingLocalDatabaseDestructions } from "@edgechat/db";
 import type { ClientEvent, RoomEvent, RoomId } from "@edgechat/protocol";
 import { OutboxEngine } from "@edgechat/sync/outbox";
 
@@ -75,9 +75,49 @@ function expectedPersistentBackend(): "opfs" | "indexeddb" {
 afterEach(async () => {
   for (const profileId of profiles) await removeProfileStorage(profileId);
   profiles.clear();
+  localStorage.removeItem(PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY);
 });
 
 describe("real browser local database", () => {
+  it("durably schedules physical PGlite destruction before profile metadata can be removed", async () => {
+    const sourceProfileId = crypto.randomUUID();
+    const targetProfileId = crypto.randomUUID();
+    profiles.add(sourceProfileId);
+    profiles.add(targetProfileId);
+    const userId = "@destroy-browser:example.com";
+
+    const source = new LocalDatabase(sourceProfileId);
+    let snapshot: Blob;
+    try {
+      await source.bindAccount(userId, "Restored Secret");
+      snapshot = await source.backupSnapshot();
+    } finally { await source.close(); }
+
+    const target = new LocalDatabase(targetProfileId);
+    await target.bindAccount(userId, "Old Secret");
+    await target.stageRestoreSnapshot(snapshot, userId);
+    expect((await profileStorageNames(targetProfileId)).length).toBeGreaterThan(0);
+    await target.destroy();
+    expect(hasPendingLocalDatabaseDestruction(targetProfileId)).toBe(true);
+  });
+
+  it("finishes a pending physical database deletion before a profile starts", async () => {
+    const profileId = crypto.randomUUID();
+    profiles.add(profileId);
+    const name = `/pglite/edgechat-local-${profileId}`;
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("test");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    localStorage.setItem(PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY, JSON.stringify([{ profile_id: profileId, backend: "indexeddb" }]));
+    await resumePendingLocalDatabaseDestructions();
+    expect(hasPendingLocalDatabaseDestruction(profileId)).toBe(false);
+    expect((await profileStorageNames(profileId)).filter((entry) => entry === `idb:${name}`)).toEqual([]);
+  });
+
   it("removes rejected restore slots after account validation fails", async () => {
     const sourceProfileId = crypto.randomUUID();
     const targetProfileId = crypto.randomUUID();

@@ -8,6 +8,7 @@ import { registerPwaFileHandler } from "./pwa-file-handler";
 import { acquireTabLease, awaitTabHandoff, TAB_CHANNEL, type LockProvider, type TabLease, type TabMessage } from "./tab-coordination";
 import { ensureActiveLocalProfile, listLocalProfiles, localProfileToken } from "./local-profiles";
 import { setActivePushProfile } from "./push-subscription";
+import { resumePendingLocalDatabaseDestructions } from "@edgechat/db";
 import "./styles.css";
 
 initializePwaInstall();
@@ -63,6 +64,7 @@ function showStandby(status: StandbyStatus = "waiting"): void {
 }
 
 async function activate(lease: TabLease): Promise<void> {
+  await resumePendingLocalDatabaseDestructions();
   const profile = await ensureActiveLocalProfile();
   const [token, profiles] = await Promise.all([localProfileToken(profile.profile_id), listLocalProfiles()]);
   await setActivePushProfile(profile.profile_id);

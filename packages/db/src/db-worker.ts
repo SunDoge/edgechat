@@ -15,10 +15,11 @@ type DbRequest = ProfileRequest & (
   | { kind: "purge-expired-messages"; now: number }
   | { kind: "clear-room-history"; roomId: string; throughSeq: number; now: number }
   | { kind: "close" }
+  | { kind: "destroy" }
   | { kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string; restoreId: string }
   | { kind: "verify-restore"; restoreId: string }
 );
-type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
+type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
 
 let storage: "opfs" | "indexeddb" = "opfs";
 const CONFIG_DB = "edgechat-local-config";
@@ -257,6 +258,16 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
       const active = await activeDataDir(request.profileId.toLowerCase());
       await cleanupStaleDataDirs(request.profileId.toLowerCase(), active);
       self.postMessage({ id: request.id, rows: [], storage } satisfies DbResponse);
+      self.close();
+      return;
+    }
+    if (request.kind === "destroy") {
+      if (!PROFILE_ID.test(request.profileId)) throw new Error("Invalid local profile identifier");
+      const configured = await activeDataDir(request.profileId.toLowerCase());
+      const opened = database ? await database.catch(() => null) : null;
+      if (opened && !opened.closed) await opened.close();
+      const destroyStorage = configured?.startsWith("idb://") ? "indexeddb" : configured?.startsWith("opfs-ahp://") ? "opfs" : storage;
+      self.postMessage({ id: request.id, destroyReady: true, storage: destroyStorage } satisfies DbResponse);
       self.close();
       return;
     }

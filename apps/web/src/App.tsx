@@ -2647,7 +2647,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const registration = await navigator.serviceWorker.ready.catch(() => null);
       await registration?.pushManager.getSubscription().then((subscription) => subscription?.unsubscribe()).catch(() => undefined);
       await clearPushConfig().catch(() => undefined);
-      await Promise.all([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId)]);
+      await Promise.all([db.destroy(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId)]);
     } catch { localCleanupFailed = true; }
     semanticRef?.close(); semanticRef = null;
     mlsRef?.destroy(); mlsRef = null; identityRef = null;
@@ -3300,7 +3300,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function removeCurrentLocalProfile(): Promise<void> {
     await prepareProfileChange();
     await disablePush(api).catch(() => clearPushConfig());
-    const cleanup = await Promise.allSettled([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId), clearIdentity(profileId)]);
+    const cleanup = await Promise.allSettled([db.destroy(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId), clearIdentity(profileId)]);
     if (cleanup.some((result) => result.status === "rejected")) throw new Error("未能完全删除该身份的本机数据；身份仍保留，请重试或清除本站数据");
     clearPendingDeviceLink(profileId);
     localStorage.removeItem(profileSessionKey(profileId, "account-appeal-receipt"));

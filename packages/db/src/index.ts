@@ -5,7 +5,134 @@ import { messageExpiryAt } from "./expiry";
 import type { LocalHistoryClearResult } from "./local-history";
 
 type Pending = { resolve: (value: DbResponse) => void; reject: (error: Error) => void };
-type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
+type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
+
+const LOCAL_CONFIG_DB = "edgechat-local-config";
+export const PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY = "edgechat.pending-local-database-destructions.v1";
+
+type PendingLocalDatabaseDestruction = { profile_id: string; backend: "opfs" | "indexeddb" };
+
+function pendingLocalDatabaseDestructions(): PendingLocalDatabaseDestruction[] {
+  const raw = localStorage.getItem(PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY);
+  if (raw === null) return [];
+  let value: unknown;
+  try { value = JSON.parse(raw); }
+  catch (cause) { throw new Error("Pending local database destruction record is corrupt", { cause }); }
+  if (!Array.isArray(value) || value.some((item) => !(item && typeof item === "object"
+    && "profile_id" in item && typeof item.profile_id === "string" && /^[0-9a-f-]{36}$/i.test(item.profile_id)
+    && "backend" in item && (item.backend === "opfs" || item.backend === "indexeddb")))) {
+    throw new Error("Pending local database destruction record is invalid");
+  }
+  return value as PendingLocalDatabaseDestruction[];
+}
+
+function savePendingLocalDatabaseDestructions(items: readonly PendingLocalDatabaseDestruction[]): void {
+  localStorage.setItem(PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY, JSON.stringify(items));
+}
+
+function queueLocalDatabaseDestruction(profileId: string, backend: "opfs" | "indexeddb"): void {
+  const items = pendingLocalDatabaseDestructions().filter((item) => item.profile_id !== profileId);
+  savePendingLocalDatabaseDestructions([...items, { profile_id: profileId, backend }]);
+}
+
+export function hasPendingLocalDatabaseDestruction(profileId: string): boolean {
+  return pendingLocalDatabaseDestructions().some((item) => item.profile_id === profileId);
+}
+
+function localConfigDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(LOCAL_CONFIG_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("settings");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function profileSlotSettings(profileId: string): Promise<{ active: string | null; stale: string[] }> {
+  const config = await localConfigDatabase();
+  const transaction = config.transaction("settings");
+  const settings = transaction.objectStore("settings");
+  const activeRequest = settings.get(`active-data-dir:${profileId}`);
+  const staleRequest = settings.get(`stale-data-dirs:${profileId}`);
+  const [active, stale] = await Promise.all([
+    new Promise<unknown>((resolve, reject) => { activeRequest.onsuccess = () => resolve(activeRequest.result); activeRequest.onerror = () => reject(activeRequest.error); }),
+    new Promise<unknown>((resolve, reject) => { staleRequest.onsuccess = () => resolve(staleRequest.result); staleRequest.onerror = () => reject(staleRequest.error); }),
+  ]);
+  config.close();
+  return {
+    active: typeof active === "string" ? active : null,
+    stale: Array.isArray(stale) ? stale.filter((value): value is string => typeof value === "string") : [],
+  };
+}
+
+async function removeLocalDataDir(dataDir: string): Promise<void> {
+  if (dataDir.startsWith("opfs-ahp://")) {
+    const root = await navigator.storage.getDirectory();
+    const name = dataDir.slice("opfs-ahp://".length);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        await root.removeEntry(name, { recursive: true });
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "NotFoundError") return;
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
+  if (dataDir.startsWith("idb://")) {
+    const name = `/pglite/${dataDir.slice("idb://".length)}`;
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(name);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      // There is no cancellation API for a blocked delete request. Do not
+      // launch competing retries; it completes when the terminated PGlite
+      // Worker releases its final connection.
+      request.onblocked = () => undefined;
+    });
+  }
+}
+
+async function destroyLocalProfileStorage(profileId: string, backend: "opfs" | "indexeddb"): Promise<void> {
+  const prefix = `edgechat-local-${profileId}`;
+  const exactName = new RegExp(`^${prefix}(?:-restore-[0-9a-f-]{36})?$`, "i");
+  const { active, stale } = await profileSlotSettings(profileId);
+  const dataDirs = new Set<string>([backend === "opfs" ? `opfs-ahp://${prefix}` : `idb://${prefix}`, ...stale]);
+  if (active) dataDirs.add(active);
+  const ordered = [...dataDirs].filter((dataDir) => {
+    const name = dataDir.replace(/^(?:opfs-ahp|idb):\/\//, "");
+    return exactName.test(name);
+  }).sort((left, right) => Number(left === active) - Number(right === active));
+  for (const dataDir of ordered) {
+    try { await removeLocalDataDir(dataDir); }
+    catch (cause) {
+      throw new Error(`Unable to erase local database slot ${dataDir}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    }
+  }
+
+  const config = await localConfigDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = config.transaction("settings", "readwrite");
+    const settings = transaction.objectStore("settings");
+    settings.delete(`active-data-dir:${profileId}`);
+    settings.delete(`active-restore-id:${profileId}`);
+    settings.delete(`stale-data-dirs:${profileId}`);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+  config.close();
+}
+
+export async function resumePendingLocalDatabaseDestructions(): Promise<void> {
+  const pending = pendingLocalDatabaseDestructions();
+  for (const item of pending) {
+    await destroyLocalProfileStorage(item.profile_id, item.backend);
+    savePendingLocalDatabaseDestructions(pendingLocalDatabaseDestructions().filter((candidate) => candidate.profile_id !== item.profile_id));
+  }
+}
 
 class LocalDatabaseResponseError extends Error {
   constructor(message: string) {
@@ -318,6 +445,8 @@ export class LocalDatabase {
   private readonly pending = new Map<number, Pending>();
   private requestId = 0;
   private closing: Promise<void> | null = null;
+  private destroyPrepared = false;
+  private destroyBackend: "opfs" | "indexeddb" | null = null;
   private workerFailure: Error | null = null;
   storage: "opfs" | "indexeddb" | "initializing" = "initializing";
 
@@ -1565,6 +1694,31 @@ export class LocalDatabase {
       .then(() => undefined, () => undefined)
       .finally(() => this.worker.terminate());
     return this.closing;
+  }
+
+  destroy(): Promise<void> {
+    if (this.closing) return this.closing;
+    const run = (async () => {
+      if (!this.destroyPrepared) {
+        const response = await this.request({ kind: "destroy" });
+        if (!response.destroyReady || !response.storage) throw new Error("Local database worker was not closed for destruction");
+        this.destroyPrepared = true;
+        this.destroyBackend = response.storage;
+        this.worker.terminate();
+      }
+      if (!this.destroyBackend) throw new Error("Local database storage backend is unknown");
+      // WebKit may retain a terminated PGlite Worker's IndexedDB connection for
+      // the lifetime of the document. Persist the deletion intent before the
+      // caller removes profile metadata; startup completes it before opening
+      // any database Worker in the next document.
+      queueLocalDatabaseDestruction(this.profileId, this.destroyBackend);
+    })();
+    const retryable = run.catch((error) => {
+      this.closing = null;
+      throw error;
+    });
+    this.closing = retryable;
+    return retryable;
   }
 
   private async redactMessage(messageId: string, tombstone: { delete_event_id: string; deleted_by: string; deleted_at: number }): Promise<void> {
