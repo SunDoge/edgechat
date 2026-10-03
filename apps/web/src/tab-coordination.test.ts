@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { acquireTabLease, awaitTabHandoff, DEVICE_STATE_LOCK, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT, type LockProvider } from "./tab-coordination";
+import { acquireTabLease, awaitTabHandoff, DEVICE_STATE_LOCK, persistBeforeTabHandoff, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT, type LockProvider } from "./tab-coordination";
 
 describe("single active tab coordination", () => {
   it("holds the exclusive device-state lock until the lease is released", async () => {
@@ -34,5 +34,19 @@ describe("single active tab coordination", () => {
     window.dispatchEvent(new Event(TAB_HANDOFF_DENIED_EVENT));
     await expect(denied).resolves.toBe("denied");
     vi.useRealTimers();
+  });
+
+  it("allows handoff only after local draft persistence succeeds", async () => {
+    let finish!: () => void;
+    const persistence = new Promise<void>((resolve) => { finish = resolve; });
+    const handoff = persistBeforeTabHandoff(() => persistence);
+    let settled = false;
+    void handoff.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finish();
+    await expect(handoff).resolves.toBe("ready");
+
+    await expect(persistBeforeTabHandoff(async () => { throw new Error("local database unavailable"); })).resolves.toBe("denied");
   });
 });

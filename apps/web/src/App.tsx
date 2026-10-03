@@ -60,10 +60,11 @@ import { enqueueForwardBatch, ForwardBatchError, MAX_FORWARD_SELECTION, selected
 import { deleteStagedShare, loadStagedShare, shareTargetErrorMessage, shareTargetId, type StagedShare } from "./share-target";
 import { syncUnreadAppBadge } from "./app-badge";
 import { applyPwaUpdate, dismissPwaUpdate, subscribePwaUpdates, type PwaUpdateState } from "./pwa-lifecycle";
+import { beginSafePwaUpdate } from "./pwa-update-safety";
 import { requestPwaInstall, subscribePwaInstall, type PwaInstallState } from "./pwa-install";
 import { cachedSessionForDevice, canUseOfflineSession, offlineSessionSnapshot, validCachedRooms } from "./offline-session";
 import { canApplyHistoryNavigation, countIncomingMessagesAfter, shouldMarkIncomingRead } from "./history-navigation";
-import { PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT } from "./tab-coordination";
+import { persistBeforeTabHandoff, PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT } from "./tab-coordination";
 import { localRetentionCoverage } from "./retention-coverage";
 import { AttachmentCiphertextCache } from "./attachment-cache";
 import { AttachmentCiphertextLoader } from "./attachment-loader";
@@ -351,8 +352,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         window.dispatchEvent(new Event(TAB_HANDOFF_DENIED_EVENT));
         return;
       }
-      stopTyping(); flushComposerDraft();
-      void draftWriteTail.finally(() => window.dispatchEvent(new Event(TAB_HANDOFF_READY_EVENT)));
+      stopTyping();
+      void persistBeforeTabHandoff(() => flushComposerDraft()).then((result) => {
+        window.dispatchEvent(new Event(result === "ready" ? TAB_HANDOFF_READY_EVENT : TAB_HANDOFF_DENIED_EVENT));
+      });
     };
     window.addEventListener(PREPARE_TAB_HANDOFF_EVENT, prepareHandoff);
     const manageProfiles = () => { setDevicesOpen(false); setLocalProfilesOpen(true); };
@@ -397,17 +400,19 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     });
   }
 
-  function enqueueComposerDraftWrite(roomId: RoomId, draft: LocalComposerDraft | null): void {
+  function enqueueComposerDraftWrite(roomId: RoomId, draft: LocalComposerDraft | null): Promise<void> {
     const clientUpdatedAt = draft?.updated_at ?? Date.now();
     const write = async () => {
       if (draft) await db.saveComposerDraft(draft); else await db.deleteComposerDraft(roomId);
       await db.enqueueComposerDraftSync(roomId, draft, clientUpdatedAt);
     };
-    draftWriteTail = draftWriteTail.then(write, write).catch((cause) => {
+    const operation = draftWriteTail.then(write, write);
+    draftWriteTail = operation.catch((cause) => {
       console.warn(JSON.stringify({ message: "local composer draft persistence failed", room_id: roomId, error: cause instanceof Error ? cause.message : String(cause) }));
       setNotice("草稿暂时无法保存到这台设备");
     });
     void draftWriteTail.then(() => { if (connectionState() === "online") scheduleDraftSync(); });
+    return operation;
   }
 
   function scheduleComposerDraft(roomId = selectedRef): void {
@@ -421,22 +426,23 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     }, DRAFT_SAVE_DELAY_MS);
   }
 
-  function flushComposerDraft(roomId = selectedRef): void {
-    if (!roomId) return;
+  function flushComposerDraft(roomId = selectedRef): Promise<void> {
+    if (!roomId) return Promise.resolve();
     window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined;
     const draft = composerDraftSnapshot(roomId);
     projectComposerDraft(roomId, draft);
-    enqueueComposerDraftWrite(roomId, draft);
+    return enqueueComposerDraftWrite(roomId, draft);
   }
 
   async function installPwaUpdate(): Promise<void> {
-    if (files().length || voiceRecording()) {
-      setNotice("请先发送或移除当前附件，再更新应用");
-      return;
-    }
-    flushComposerDraft();
-    await draftWriteTail;
-    if (!applyPwaUpdate()) setNotice("新版本暂时无法启用，请稍后重试");
+    const result = await beginSafePwaUpdate({
+      hasUnsafeMedia: Boolean(files().length || voiceRecording()),
+      persistDraft: () => flushComposerDraft(),
+      activate: applyPwaUpdate,
+    });
+    if (result === "unsafe-media") setNotice("请先发送或移除当前附件，再更新应用");
+    else if (result === "draft-failed") setNotice("草稿无法保存，已取消更新以避免内容丢失");
+    else if (result === "unavailable") setNotice("新版本暂时无法启用，请稍后重试");
   }
 
   async function installPwa(): Promise<void> {
@@ -3080,7 +3086,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function prepareProfileChange(): Promise<void> {
     if (profileChangeBlocked()) throw new Error("请先完成发送、录音或账户安全操作，再切换身份");
-    stopTyping(); flushComposerDraft(); await draftWriteTail;
+    stopTyping(); await flushComposerDraft();
     await suspendPush(api).catch(() => undefined);
   }
 

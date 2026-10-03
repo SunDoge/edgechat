@@ -21,6 +21,15 @@ export interface LockProvider {
   ): Promise<void>;
 }
 
+export async function persistBeforeTabHandoff(persistDraft: () => Promise<void>): Promise<"ready" | "denied"> {
+  try {
+    await persistDraft();
+    return "ready";
+  } catch {
+    return "denied";
+  }
+}
+
 export function acquireTabLease(provider: LockProvider, wait: boolean): Promise<TabLease | null> {
   return new Promise<TabLease | null>((resolve, reject) => {
     let resolved = false;
