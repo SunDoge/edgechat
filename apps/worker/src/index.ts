@@ -291,6 +291,7 @@ type PendingR2Write = {
   expected_bytes: number;
   room_id?: string | null;
   content_sha256?: string | null;
+  cancelled_at?: number | null;
 };
 
 async function stageR2Write(env: Env, item: PendingR2Write): Promise<void> {
@@ -314,10 +315,11 @@ function pendingR2WriteMatches(existing: PendingR2Write, expected: PendingR2Writ
 
 async function stageIdempotentR2Write(env: Env, item: PendingR2Write): Promise<boolean> {
   const findExisting = () => createDatabase(env.DB).selectFrom("pending_r2_writes")
-    .select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256"])
+    .select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
     .where("object_key", "=", item.object_key).executeTakeFirst();
   const existing = await findExisting();
   if (existing) {
+    if (existing.cancelled_at !== null) throw new HttpError(409, "Attachment upload was cancelled", "attachment_upload_cancelled");
     if (!pendingR2WriteMatches(existing as PendingR2Write, item)) throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
     return false;
   }
@@ -329,6 +331,7 @@ async function stageIdempotentR2Write(env: Env, item: PendingR2Write): Promise<b
     // reservation insert. stageR2Write has already released the losing quota
     // reservation, so only adopt the winner when every bound field matches.
     const raced = await findExisting();
+    if (raced?.cancelled_at !== null && raced?.cancelled_at !== undefined) throw new HttpError(409, "Attachment upload was cancelled", "attachment_upload_cancelled");
     if (raced && pendingR2WriteMatches(raced as PendingR2Write, item)) return false;
     throw error;
   }
@@ -4284,7 +4287,9 @@ function attachmentRetentionRequirement(
       eb.val(attachmentId).as("attachment_id"),
       "room_id",
       "retention_min_device_copies as minimum_copies",
-    ]).where("room_id", "=", roomId))
+    ]).where("room_id", "=", roomId)
+      .where((inner) => inner.exists(inner.selectFrom("attachments").select("attachment_id")
+        .where("attachment_id", "=", attachmentId))))
     .onConflict((conflict) => conflict.columns(["attachment_id", "room_id"])
       .doUpdateSet({ minimum_copies: sql<number>`excluded.minimum_copies` }));
 }
@@ -4318,6 +4323,7 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
   const pending = { object_key: key, owner_user_id: auth.userId, kind: "attachment" as const, expected_bytes: declaredSize, room_id: roomId, content_sha256: suppliedDigest.text };
   const reservationCreated = await stageIdempotentR2Write(env, pending);
   let objectReady = false;
+  const createdAt = Date.now();
   try {
     const limited = exactLengthUploadStream(request.body, declaredSize);
     const put = objectStore(env).put(key, limited.body, {
@@ -4342,11 +4348,33 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
       }
     }
     objectReady = true;
+    const liveClaim = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+      .where("object_key", "=", key).executeTakeFirst();
+    if (!liveClaim) {
+      const landed = await db.selectFrom("attachments").select(["room_id", "uploader_user_id", "ciphertext_bytes", "ciphertext_sha256", "source_deleted_at"])
+        .where("attachment_id", "=", id).executeTakeFirst();
+      if (landed && matchesUpload(landed)) return json({ attachment_id: id, ciphertext_bytes: declaredSize }, 200);
+      await objectStore(env).delete(key);
+      throw new HttpError(409, "Attachment upload was cancelled", "attachment_upload_cancelled");
+    }
+    if (liveClaim.cancelled_at !== null) {
+      await objectStore(env).delete(key);
+      await finalizePendingR2Cleanup(env, [liveClaim as PendingR2Write]);
+      throw new HttpError(409, "Attachment upload was cancelled", "attachment_upload_cancelled");
+    }
     await batch(env.DB, [
-      db.insertInto("attachments").values({ attachment_id: id, room_id: roomId, uploader_user_id: auth.userId, object_key: key, ciphertext_bytes: declaredSize, ciphertext_sha256: suppliedDigest.text, created_at: Date.now(), committed_event_id: null, committed_at: null, source_deleted_at: null })
+      db.insertInto("attachments")
+        .columns(["attachment_id", "room_id", "uploader_user_id", "object_key", "ciphertext_bytes", "ciphertext_sha256", "created_at", "committed_event_id", "committed_at", "source_deleted_at"])
+        .expression((eb) => eb.selectFrom("pending_r2_writes").select([
+          eb.val(id).as("attachment_id"), eb.val(roomId).as("room_id"), eb.val(auth.userId).as("uploader_user_id"),
+          eb.val(key).as("object_key"), eb.val(declaredSize).as("ciphertext_bytes"), eb.val(suppliedDigest.text).as("ciphertext_sha256"),
+          eb.val(createdAt).as("created_at"), eb.val(null).as("committed_event_id"), eb.val(null).as("committed_at"), eb.val(null).as("source_deleted_at"),
+        ]).where("object_key", "=", key).where("owner_user_id", "=", auth.userId).where("kind", "=", "attachment")
+          .where("room_id", "=", roomId).where("content_sha256", "=", suppliedDigest.text).where("expected_bytes", "=", declaredSize)
+          .where("cancelled_at", "is", null))
         .onConflict((conflict) => conflict.column("attachment_id").doNothing()),
       attachmentRetentionRequirement(db, id, roomId),
-      db.deleteFrom("pending_r2_writes").where("object_key", "=", key),
+      db.deleteFrom("pending_r2_writes").where("object_key", "=", key).where("cancelled_at", "is", null),
     ]);
     const committed = await db.selectFrom("attachments").select(["room_id", "uploader_user_id", "ciphertext_bytes", "ciphertext_sha256", "source_deleted_at"])
       .where("attachment_id", "=", id).executeTakeFirst();
@@ -4369,17 +4397,29 @@ async function abandonAttachments(request: Request, env: Env, auth: AuthContext)
     throw new HttpError(400, "Invalid attachment IDs", "invalid_attachment");
   }
   const db = createDatabase(env.DB);
-  const rows = await db.selectFrom("attachments").select(["attachment_id", "object_key", "ciphertext_bytes"])
-    .where("attachment_id", "in", ids as string[]).where("uploader_user_id", "=", auth.userId).where("committed_event_id", "is", null).execute();
-  if (!rows.length) return json({ abandoned: 0 });
-  await objectStore(env).delete(rows.map((row) => row.object_key));
+  const requestedIds = ids as string[];
+  const requestedKeys = requestedIds.map((id) => `attachments/${id}`);
   const now = Date.now();
-  await batch(env.DB, rows.flatMap((row) => [
-    db.updateTable("user_storage_usage").set({ attachment_bytes: sql<number>`max(0, attachment_bytes - ${row.ciphertext_bytes})`, attachment_objects: sql<number>`max(0, attachment_objects - 1)`, updated_at: now })
-      .where("user_id", "=", auth.userId).where(sql<boolean>`EXISTS (SELECT 1 FROM attachments WHERE attachment_id = ${row.attachment_id} AND committed_event_id IS NULL)`),
-    db.deleteFrom("attachments").where("attachment_id", "=", row.attachment_id).where("uploader_user_id", "=", auth.userId).where("committed_event_id", "is", null),
-  ]));
-  return json({ abandoned: rows.length });
+  await db.updateTable("pending_r2_writes").set({ cancelled_at: now })
+    .where("object_key", "in", requestedKeys).where("owner_user_id", "=", auth.userId).where("kind", "=", "attachment").execute();
+  const rows = await db.selectFrom("attachments").select(["attachment_id", "object_key", "ciphertext_bytes"])
+    .where("attachment_id", "in", requestedIds).where("uploader_user_id", "=", auth.userId).where("committed_event_id", "is", null).execute();
+  const pendingRows = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+    .where("object_key", "in", requestedKeys).where("owner_user_id", "=", auth.userId).where("kind", "=", "attachment").where("cancelled_at", "is not", null).execute();
+  const objectKeys = [...new Set([...rows.map((row) => row.object_key), ...pendingRows.map((row) => row.object_key)])];
+  if (!objectKeys.length) return json({ abandoned: 0 });
+  await objectStore(env).delete(objectKeys);
+  if (rows.length) {
+    await batch(env.DB, rows.flatMap((row) => [
+      db.updateTable("user_storage_usage").set({ attachment_bytes: sql<number>`max(0, attachment_bytes - ${row.ciphertext_bytes})`, attachment_objects: sql<number>`max(0, attachment_objects - 1)`, updated_at: now })
+        .where("user_id", "=", auth.userId).where(sql<boolean>`EXISTS (SELECT 1 FROM attachments WHERE attachment_id = ${row.attachment_id} AND committed_event_id IS NULL)`),
+      db.deleteFrom("attachments").where("attachment_id", "=", row.attachment_id).where("uploader_user_id", "=", auth.userId).where("committed_event_id", "is", null),
+    ]));
+  }
+  await finalizePendingR2Cleanup(env, pendingRows as PendingR2Write[]);
+  const abandonedIds = new Set(rows.map((row) => row.attachment_id));
+  for (const row of pendingRows) abandonedIds.add(row.object_key.slice("attachments/".length));
+  return json({ abandoned: abandonedIds.size });
 }
 
 async function acknowledgeAttachmentRetention(env: Env, auth: AuthContext, id: string): Promise<Response> {

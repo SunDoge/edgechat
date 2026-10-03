@@ -417,6 +417,7 @@ export interface Passkeys {
 
 export interface PendingR2Writes {
   attempts: Generated<number>;
+  cancelled_at: Generated<number | null>;
   content_sha256: Generated<string | null>;
   created_at: number;
   expected_bytes: number;

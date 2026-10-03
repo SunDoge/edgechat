@@ -960,6 +960,27 @@ describe("single-server durable delivery", () => {
       expect(response.status, await response.clone().text()).toBe(201);
       return (await response.json() as { attachment_id: string }).attachment_id;
     };
+    const cancelledId = newAttachmentId(); const cancelledBody = new Uint8Array([41, 42, 43, 44]);
+    let releaseCancelledBody!: () => void; let cancelledBodySent = false;
+    const cancelledBodyGate = new Promise<void>((resolve) => { releaseCancelledBody = resolve; });
+    const delayedBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      async pull(controller) {
+        if (cancelledBodySent) return;
+        cancelledBodySent = true; await cancelledBodyGate; controller.enqueue(cancelledBody); controller.close();
+      },
+    });
+    const lateUpload = SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": cancelledId, "content-length": String(cancelledBody.byteLength), "x-content-sha256": await ciphertextDigest(cancelledBody) }, body: delayedBody });
+    await vi.waitFor(async () => expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(`attachments/${cancelledId}`).first()).toEqual({ object_key: `attachments/${cancelledId}` }));
+    const cancelled = await SELF.fetch("https://edgechat.test/api/v1/attachments/abandon", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ attachment_ids: [cancelledId] }) });
+    expect(await cancelled.json()).toEqual({ abandoned: 1 });
+    releaseCancelledBody();
+    const lateUploadResult = await lateUpload;
+    expect(lateUploadResult.status).toBe(409);
+    expect(await lateUploadResult.json()).toMatchObject({ code: "attachment_upload_cancelled" });
+    expect(await env.DB.prepare("SELECT attachment_id FROM attachments WHERE attachment_id = ?").bind(cancelledId).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(`attachments/${cancelledId}`).first()).toBeNull();
+    expect(await env.ARCHIVE.get(`attachments/${cancelledId}`)).toBeNull();
+    expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(alice.user_id).first()).toEqual({ attachment_bytes: 0, attachment_objects: 0 });
     const crashId = newAttachmentId(); const crashBody = new Uint8Array([99]); const crashDigest = await ciphertextDigest(crashBody);
     await env.DB.batch([
       env.DB.prepare("INSERT INTO user_storage_usage (user_id, attachment_bytes, archive_bytes, attachment_objects, archive_objects, updated_at) VALUES (?, 0, 0, 0, 0, ?) ON CONFLICT(user_id) DO NOTHING").bind(alice.user_id, Date.now()),

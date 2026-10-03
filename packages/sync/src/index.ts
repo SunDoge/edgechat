@@ -332,7 +332,8 @@ export class ApiClient {
     await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "DELETE", headers: { "x-compaction-token": token } });
   }
 
-  async uploadAttachment(roomId: RoomId, ciphertext: ArrayBuffer, attachmentId = base64Url(crypto.getRandomValues(new Uint8Array(24)).buffer)): Promise<{ attachment_id: string }> {
+  async uploadAttachment(roomId: RoomId, ciphertext: ArrayBuffer, attachmentId = createAttachmentId()): Promise<{ attachment_id: string }> {
+    if (!/^[A-Za-z0-9_-]{32}$/.test(attachmentId)) throw new Error("Invalid client attachment ID");
     const digest = base64Url(await crypto.subtle.digest("SHA-256", ciphertext));
     const upload = async () => {
       const result = await this.request<{ attachment_id: string }>("/api/v1/attachments", {
@@ -591,6 +592,10 @@ function base64Url(bytes: ArrayBuffer): string {
   let binary = "";
   for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+export function createAttachmentId(): string {
+  return base64Url(crypto.getRandomValues(new Uint8Array(24)).buffer);
 }
 
 export type AutomaticAttachmentRepairSummary = { jobs: number; repaired: number; unavailable: number; busy: number; failed: number };

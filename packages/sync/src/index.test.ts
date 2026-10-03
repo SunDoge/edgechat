@@ -1006,6 +1006,17 @@ describe("ApiClient attachment uploads", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it("rejects an invalid client attachment ID before using the network", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(new ApiClient("https://edgechat.test", "token").uploadAttachment(
+        "!room-000000000001:example.com", new Uint8Array([1]).buffer, "not-an-opaque-192-bit-id",
+      )).rejects.toThrow("Invalid client attachment ID");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("sends the client-computed archive checksum with a segment upload", async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ segment_id: "segment-1" }));
     vi.stubGlobal("fetch", fetchMock);

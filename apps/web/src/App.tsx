@@ -20,7 +20,7 @@ import {
 import { LocalDatabase, LocalRestoreCommitUnknownError, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomAttachmentCursor, type LocalRoomListActivity, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealAccountCredential, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
 import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type RoomDeviceSigningKey, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
+import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, createAttachmentId, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type RoomDeviceSigningKey, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
 import { AuthScreen } from "./components/AuthScreen";
@@ -1591,8 +1591,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const preparedImage = await prepareImageMetadata(selectedFile, previewBudget);
         if (preparedImage.preview) previewBudget -= embeddedImagePreviewByteLength(preparedImage.preview);
         const encryptedFile = await core.encryptAttachment(await selectedFile.arrayBuffer());
-        const upload = await api.uploadAttachment(room.room_id, encryptedFile.ciphertext);
-        uploadedIds.push(upload.attachment_id);
+        const attachmentId = createAttachmentId();
+        uploadedIds.push(attachmentId);
+        const upload = await api.uploadAttachment(room.room_id, encryptedFile.ciphertext, attachmentId);
         if (await attachmentCache.put(upload.attachment_id, encryptedFile.ciphertext)) {
           await attachmentLoader.acknowledgeCached(upload.attachment_id, encryptedFile.ciphertext);
         }
@@ -1978,7 +1979,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       else if (change.kind === "replace") {
         const plaintext = await change.blob.arrayBuffer();
         const encrypted = await core.encryptAttachment(plaintext);
-        const uploaded = await api.uploadAttachment(roomId, encrypted.ciphertext); uploadedId = uploaded.attachment_id;
+        uploadedId = createAttachmentId();
+        const uploaded = await api.uploadAttachment(roomId, encrypted.ciphertext, uploadedId);
         if (await attachmentCache.put(uploaded.attachment_id, encrypted.ciphertext)) {
           await attachmentLoader.acknowledgeCached(uploaded.attachment_id, encrypted.ciphertext).catch(() => undefined);
         }
