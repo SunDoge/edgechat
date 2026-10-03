@@ -7,6 +7,7 @@ describe("operation error presentation", () => {
     expect(operationErrorMessage(new UserFacingError("请先恢复此对话"), "发送失败")).toBe("请先恢复此对话");
     expect(operationErrorMessage(UserFacingError.localized("backup.error.passwordOrDamage"), "无法恢复备份")).toBe("备份密码错误，或文件已经损坏");
     expect(operationErrorMessage(UserFacingError.localized("avatar.error.invalidDimensions"), "无法处理图片")).toBe("图片尺寸无效");
+    expect(operationErrorMessage(UserFacingError.localized("localProfiles.error.cryptoRecovery"), "无法切换本机身份")).toBe("本机加密记录仍在恢复，完成后才能切换身份");
     if (false) {
       // @ts-expect-error Low-level errors cannot emit a key that needs runtime interpolation.
       UserFacingError.localized("deviceLink.rooms");

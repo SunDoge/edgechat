@@ -3579,13 +3579,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function prepareProfileChange(): Promise<void> {
-    if (profileChangeBlocked()) throw new Error("请先完成发送、录音或账户安全操作，再切换身份");
+    if (profileChangeBlocked()) throw UserFacingError.localized("localProfiles.error.activeOperation");
     stopTyping(); await flushComposerDraft();
-    if (profileChangeBlocked()) throw new Error("请等待本机加密或存储操作完成后再切换身份");
+    if (profileChangeBlocked()) throw UserFacingError.localized("localProfiles.error.localWork");
     const sync = syncRef; const outbox = outboxRef; const archive = archiveRef;
     await Promise.all([sync?.quiesce(), outbox?.quiesce(), archive?.quiesce()]);
     await mlsMutationTail;
-    if (pendingMlsMutations > 0 || mlsProjectionBarrier.isBlocked()) throw new Error("本机还有加密记录正在恢复，暂时不能切换身份");
+    if (pendingMlsMutations > 0 || mlsProjectionBarrier.isBlocked()) throw UserFacingError.localized("localProfiles.error.cryptoRecovery");
     await suspendPush(api).catch(() => undefined);
   }
 
@@ -3607,7 +3607,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     await prepareProfileChange();
     await disablePush(api).catch(() => clearPushConfig());
     const cleanup = await Promise.allSettled([db.destroy(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId), clearIdentity(profileId)]);
-    if (cleanup.some((result) => result.status === "rejected")) throw new Error("未能完全删除该身份的本机数据；身份仍保留，请重试或清除本站数据");
+    if (cleanup.some((result) => result.status === "rejected")) throw UserFacingError.localized("localProfiles.error.removeIncomplete");
     clearPendingDeviceLink(profileId);
     localStorage.removeItem(profileSessionKey(profileId, "account-appeal-receipt"));
     sessionStorage.removeItem(profileSessionKey(profileId, "restore-user-id"));
