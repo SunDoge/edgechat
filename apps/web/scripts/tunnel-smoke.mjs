@@ -150,8 +150,11 @@ async function main() {
     console.log(JSON.stringify({ step: "local-text-search-without-model-download" }));
 
     const savedEntry = alicePage.getByRole("button", { name: /已保存消息.*给自己发消息/ });
-    await savedEntry.click();
-    await savedEntry.waitFor({ state: "hidden", timeout: 120_000 });
+    for (let attempt = 0; attempt < 20 && await savedEntry.isVisible(); attempt += 1) {
+      if (await savedEntry.isEnabled()) await savedEntry.click();
+      await savedEntry.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => undefined);
+    }
+    await savedEntry.waitFor({ state: "hidden", timeout: 30_000 });
     await alicePage.getByText("仅你和你的设备可读", { exact: true }).first().waitFor({ timeout: 120_000 });
     const aliceComposer = alicePage.getByRole("textbox", { name: "消息", exact: true });
     await aliceComposer.fill(savedMessage, { timeout: 120_000 });

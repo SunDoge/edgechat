@@ -90,6 +90,7 @@ import { formatRoomActivityPreview } from "./room-list-preview";
 import { conversationExportFilename, streamConversationTranscript } from "./conversation-export";
 import { commitAcceptedControlEvent } from "./control-event-ack";
 import { MlsProjectionBarrier } from "./mls-projection-barrier";
+import { deliveryReceiptRetryDelay } from "./delivery-receipt-retry";
 import { clearRoomSigningKeyPins, pinRoomSigningKeys, pinnedRoomSigningKey } from "./room-signing-key-pins";
 import { useI18n } from "./i18n";
 
@@ -2170,21 +2171,23 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     });
   }
 
-  function scheduleDeliveryReceipt(roomId: RoomId): void {
+  function scheduleDeliveryReceipt(roomId: RoomId, delayMs = 500, retryAttempt = 0): void {
     const previous = deliveryReceiptTimers.get(roomId);
     if (previous !== undefined) window.clearTimeout(previous);
     deliveryReceiptTimers.set(roomId, window.setTimeout(() => {
       deliveryReceiptTimers.delete(roomId);
       void sendDeliveryReceipt(roomId).catch((error) => {
+        const retryDelay = deliveryReceiptRetryDelay(error, retryAttempt);
+        if (retryDelay !== null) { scheduleDeliveryReceipt(roomId, retryDelay, retryAttempt + 1); return; }
         console.warn(JSON.stringify({ message: "delivery receipt enqueue failed", room_id: roomId, error: error instanceof Error ? error.message : String(error) }));
       });
-    }, 500));
+    }, delayMs));
   }
 
   async function sendDeliveryReceipt(roomId: RoomId): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     const room = rooms().find((candidate) => candidate.room_id === roomId);
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || mlsProjectionBarrier.isBlocked() || !roomAllowsReceipts(room)) return;
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || !roomAllowsReceipts(room)) return;
     const latestSeq = await db.latestIncomingMessageSeq(roomId, currentSession.user_id);
     const [state, queuedSeq] = await Promise.all([db.deliveryState(roomId), db.latestQueuedDeliveryReceiptSeq(roomId)]);
     if (latestSeq < 1 || latestSeq <= Math.max(state.last_receipt_sent_seq, queuedSeq)) return;
