@@ -23,7 +23,7 @@ describe("saved message backlinks", () => {
       sender: "@alice:example.com", device_id: "device", event_type: "message.text", created_at: 1, ciphertext: "cipher",
       plaintext: "remember me", payload, deleted_at: null, deleted_by: null, delete_event_id: null, edited_at: null, edit_event_id: null, expires_at: null } as LocalMessage;
     dispose = render(() => <MessageBubble message={message} currentUserId="@alice:example.com" group={false} retracting={false}
-      downloadAttachment={vi.fn()} decryptAttachment={vi.fn(async () => new ArrayBuffer(0))} indexImage={vi.fn()} retract={vi.fn()}
+      downloadAttachment={vi.fn()} decryptCachedAttachment={vi.fn(async () => null)} decryptAttachment={vi.fn(async () => new ArrayBuffer(0))} indexImage={vi.fn()} retract={vi.fn()}
       reply={vi.fn()} quote={vi.fn()} forward={vi.fn()} save={vi.fn()} canSave={false} saving={false} selecting={false} selected={false}
       select={vi.fn()} edit={vi.fn()} react={vi.fn()} jumpToMessage={vi.fn()} openMessageReference={open} openContact={vi.fn()}
       reactions={[]} readBy={0} deliveredBy={0} displayName={(userId) => userId} linkPreviews={false}/>, root());
@@ -39,7 +39,7 @@ describe("saved message backlinks", () => {
       sender: "@alice:example.com", device_id: "device", event_type: "message.text", created_at: 1, ciphertext: "cipher",
       plaintext: "remember me", payload, deleted_at: null, deleted_by: null, delete_event_id: null, edited_at: null, edit_event_id: null, expires_at: null } as LocalMessage;
     dispose = render(() => <MessageBubble message={message} currentUserId="@alice:example.com" group={false} retracting={false}
-      downloadAttachment={vi.fn()} decryptAttachment={vi.fn(async () => new ArrayBuffer(0))} indexImage={vi.fn()} retract={vi.fn()}
+      downloadAttachment={vi.fn()} decryptCachedAttachment={vi.fn(async () => null)} decryptAttachment={vi.fn(async () => new ArrayBuffer(0))} indexImage={vi.fn()} retract={vi.fn()}
       reply={vi.fn()} quote={vi.fn()} forward={vi.fn()} save={vi.fn()} copyText={copyText} canSave={false} saving={false} selecting={false} selected={false}
       select={vi.fn()} edit={vi.fn()} react={vi.fn()} jumpToMessage={vi.fn()} openMessageReference={vi.fn()} openContact={vi.fn()}
       reactions={[]} readBy={0} deliveredBy={0} displayName={(userId) => userId} linkPreviews={false}/>, root());

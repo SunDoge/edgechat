@@ -19,7 +19,7 @@ describe("MessageBubble attachment presentation", () => {
     };
     const root = document.createElement("div"); document.body.append(root);
     dispose = render(() => <MessageBubble message={message} currentUserId="@bob:example.com" group={false} retracting={false}
-      downloadAttachment={download} decryptAttachment={decrypt} indexImage={index} retract={vi.fn()} reply={vi.fn()} quote={vi.fn()}
+      downloadAttachment={download} decryptCachedAttachment={vi.fn(async () => null)} decryptAttachment={decrypt} indexImage={index} retract={vi.fn()} reply={vi.fn()} quote={vi.fn()}
       forward={vi.fn()} save={vi.fn()} canSave saving={false} selecting={false} selected={false} select={vi.fn()} edit={vi.fn()}
       react={vi.fn()} jumpToMessage={vi.fn()} openMessageReference={vi.fn()} openContact={vi.fn()} reactions={[]} readBy={0} deliveredBy={0}
       displayName={String} linkPreviews={false}/>, root);

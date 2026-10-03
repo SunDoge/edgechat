@@ -24,6 +24,7 @@ export function MessageBubble(props: {
   group: boolean;
   retracting: boolean;
   downloadAttachment: (attachment: AttachmentMetadata) => void;
+  decryptCachedAttachment: (attachment: AttachmentMetadata) => Promise<ArrayBuffer | null>;
   decryptAttachment: (attachment: AttachmentMetadata) => Promise<ArrayBuffer>;
   indexImage: (attachment: AttachmentMetadata, plaintext: ArrayBuffer) => void;
   retract: (message: LocalMessage) => void;
@@ -107,7 +108,7 @@ export function MessageBubble(props: {
       <button type="button" class={`mt-2 flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium ${mine() ? "bg-white/10 text-white" : "bg-neutral-100 text-ink"}`} onClick={() => props.downloadAttachment(attachment())}>
         <IconPaperclip class={`size-4 shrink-0 ${mine() ? "stroke-white" : "stroke-muted"}`}/><span class="max-w-52 truncate">{attachment().name}</span><span class="text-xs opacity-70">{(attachment().size / 1024).toFixed(1)} KB</span>
       </button>
-    }><EncryptedImage compact={compact} attachment={attachment()} load={() => props.decryptAttachment(attachment())} download={() => props.downloadAttachment(attachment())} onDecrypted={(plaintext) => props.indexImage(attachment(), plaintext)}/></Show>}><EncryptedAudio attachment={attachment()} load={() => props.decryptAttachment(attachment())} download={() => props.downloadAttachment(attachment())}/></Show>;
+    }><EncryptedImage compact={compact} attachment={attachment()} loadCached={() => props.decryptCachedAttachment(attachment())} load={() => props.decryptAttachment(attachment())} download={() => props.downloadAttachment(attachment())} onDecrypted={(plaintext) => props.indexImage(attachment(), plaintext)}/></Show>}><EncryptedAudio attachment={attachment()} load={() => props.decryptAttachment(attachment())} download={() => props.downloadAttachment(attachment())}/></Show>;
   }
 
   return <div class={`group relative flex flex-col ${props.selecting ? mine() ? "pr-12" : "pl-12" : ""} ${mine() ? "items-end" : "items-start"}`}>
