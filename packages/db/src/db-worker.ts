@@ -57,15 +57,26 @@ async function committedRestoreId(profileId: string): Promise<string | null> {
   return value;
 }
 
-async function commitRestoredDataDir(profileId: string, value: string, restoreId: string): Promise<void> {
+async function commitRestoredDataDir(profileId: string, value: string, restoreId: string, previousDataDir: string | null): Promise<void> {
   const config = await configDatabase();
   await new Promise<void>((resolve, reject) => {
     const transaction = config.transaction("settings", "readwrite");
     const settings = transaction.objectStore("settings");
-    settings.put(value, `active-data-dir:${profileId}`);
-    settings.put(restoreId, `active-restore-id:${profileId}`);
+    const staleRequest = settings.get(`stale-data-dirs:${profileId}`);
+    staleRequest.onsuccess = () => {
+      const stale = Array.isArray(staleRequest.result)
+        ? staleRequest.result.filter((item): item is string => typeof item === "string" && /^(?:opfs-ahp|idb):\/\/edgechat-local-/.test(item))
+        : [];
+      if (previousDataDir && previousDataDir !== value) stale.push(previousDataDir);
+      if (stale.length) settings.put([...new Set(stale)], `stale-data-dirs:${profileId}`);
+      else settings.delete(`stale-data-dirs:${profileId}`);
+      settings.put(value, `active-data-dir:${profileId}`);
+      settings.put(restoreId, `active-restore-id:${profileId}`);
+    };
+    staleRequest.onerror = () => transaction.abort();
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error("Local restore activation was aborted"));
   });
   config.close();
 }
@@ -90,9 +101,21 @@ async function removeStagedDataDir(dataDir: string): Promise<void> {
   if (dataDir.startsWith("idb://")) {
     await new Promise<void>((resolve, reject) => {
       const request = indexedDB.deleteDatabase(`/pglite/${dataDir.slice("idb://".length)}`);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-      request.onblocked = () => reject(new Error("Staged local database deletion was blocked"));
+      let blockedTimer: ReturnType<typeof setTimeout> | null = null;
+      request.onsuccess = () => {
+        if (blockedTimer) clearTimeout(blockedTimer);
+        resolve();
+      };
+      request.onerror = () => {
+        if (blockedTimer) clearTimeout(blockedTimer);
+        reject(request.error);
+      };
+      // WebKit can report `blocked` briefly after the PGlite-owning Worker has
+      // terminated. Give that exact old database time to release; retain it in
+      // the cleanup ledger if the connection remains blocked.
+      request.onblocked = () => {
+        blockedTimer ??= setTimeout(() => reject(new Error("Staged local database deletion remained blocked")), 1_500);
+      };
     });
   }
 }
@@ -126,9 +149,10 @@ async function rememberStaleDataDir(profileId: string, dataDir: string): Promise
   await saveStaleDataDirs(profileId, [...await staleDataDirs(profileId), dataDir]);
 }
 
-async function cleanupStaleDataDirs(profileId: string): Promise<void> {
+async function cleanupStaleDataDirs(profileId: string, activeDataDir: string | null): Promise<void> {
   const remaining: string[] = [];
   for (const dataDir of await staleDataDirs(profileId)) {
+    if (dataDir === activeDataDir) { remaining.push(dataDir); continue; }
     try { await removeStagedDataDir(dataDir); }
     catch { remaining.push(dataDir); }
   }
@@ -141,8 +165,8 @@ function databaseFor(profileId: string): Promise<PGlite> {
   if (openedProfileId && openedProfileId !== normalized) throw new Error("Database worker cannot cross local profile boundaries");
   openedProfileId = normalized;
   database ??= (async () => {
-    await cleanupStaleDataDirs(normalized);
     const configured = await activeDataDir(normalized);
+    await cleanupStaleDataDirs(normalized, configured);
     if (configured) {
       storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
       const db = new PGlite(configured);
@@ -185,6 +209,10 @@ async function stageRestoredDatabase(request: Extract<DbRequest, { kind: "restor
   if (request.snapshot.size === 0 || request.snapshot.size > 2_147_483_648) throw new Error("Backup database is empty or too large");
   const profileId = request.profileId.toLowerCase();
   const configured = await activeDataDir(profileId);
+  let previousDataDir = configured;
+  if (!previousDataDir && database && await database.catch(() => null)) {
+    previousDataDir = storage === "opfs" ? `opfs-ahp://edgechat-local-${profileId}` : `idb://edgechat-local-${profileId}`;
+  }
   const backends: readonly ("opfs" | "indexeddb")[] = configured
     ? [configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb"]
     : ["opfs", "indexeddb"];
@@ -202,7 +230,7 @@ async function stageRestoredDatabase(request: Extract<DbRequest, { kind: "restor
       if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
       await restored.close();
       restored = null;
-      await commitRestoredDataDir(profileId, dataDir, request.restoreId);
+      await commitRestoredDataDir(profileId, dataDir, request.restoreId, previousDataDir);
       return backend;
     } catch (error) {
       lastError = error;
@@ -223,8 +251,11 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
   const request = event.data;
   try {
     if (request.kind === "close") {
+      if (!PROFILE_ID.test(request.profileId)) throw new Error("Invalid local profile identifier");
       const opened = database ? await database.catch(() => null) : null;
       if (opened) await opened.close();
+      const active = await activeDataDir(request.profileId.toLowerCase());
+      await cleanupStaleDataDirs(request.profileId.toLowerCase(), active);
       self.postMessage({ id: request.id, rows: [], storage } satisfies DbResponse);
       self.close();
       return;

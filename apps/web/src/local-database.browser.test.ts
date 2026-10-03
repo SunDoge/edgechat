@@ -119,20 +119,20 @@ describe("real browser local database", () => {
     const target = new LocalDatabase(targetProfileId);
     let restoreId: string;
     try {
+      await target.bindAccount(userId, "Obsolete Local Slot");
       restoreId = await target.stageRestoreSnapshot(snapshot, userId);
       expect(await target.restoreCommitted(restoreId)).toBe(true);
       expect(await target.restoreCommitted(crypto.randomUUID())).toBe(false);
-      expect(await target.cachedSession()).toBeNull();
-      expect(await target.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1"))
-        .toEqual([{ user_id: userId }]);
     } finally { await target.close(); }
 
     const reopened = new LocalDatabase(targetProfileId);
     try {
       expect(await reopened.restoreCommitted(restoreId)).toBe(true);
-      expect(await reopened.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1"))
-        .toEqual([{ user_id: userId }]);
+      expect(await reopened.query<{ user_id: string; display_name: string }>("SELECT user_id, display_name FROM account_state WHERE id = 1"))
+        .toEqual([{ user_id: userId, display_name: "Restore Browser" }]);
     } finally { await reopened.close(); }
+    const names = await profileStorageNames(targetProfileId);
+    expect(names).toEqual([expect.stringContaining("-restore-")]);
   });
 
   it("persists plaintext history and full-text search across a storage worker restart", async () => {
