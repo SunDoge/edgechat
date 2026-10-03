@@ -2,6 +2,13 @@ import { ApiError, ApiTimeoutError } from "@edgechat/sync";
 import { translate, type Translator } from "./i18n";
 import { UserFacingError } from "./operation-errors";
 
+/** Whether retrying device-possession login can succeed without replacing local identity data. */
+export function isRetryableDeviceContinuationError(cause: unknown): boolean {
+  if (cause instanceof ApiTimeoutError || cause instanceof TypeError) return true;
+  return cause instanceof ApiError
+    && (cause.status === 408 || cause.status === 425 || cause.status === 429 || cause.status >= 500);
+}
+
 export function authErrorMessage(cause: unknown, t: Translator = translate, fallback = t("auth.error.localSecurity")): string {
   if (cause instanceof UserFacingError) return cause.messageKey ? t(cause.messageKey) : cause.message;
   if (cause instanceof ApiError) {

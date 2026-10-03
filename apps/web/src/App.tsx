@@ -393,13 +393,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   function attachmentReferenceMetadata(ids: readonly string[], sourceIds: readonly string[] = []): ClientEvent["metadata"] {
     if (!ids.length) return {};
     const currentSession = session();
-    if (!currentSession) throw new Error("登录会话尚未就绪");
-    if (ids.length > attachmentLimits().max_attachments_per_message) throw new Error(t("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message }));
+    if (!currentSession) throw UserFacingError.localized("send.queueNotReady");
+    if (ids.length > attachmentLimits().max_attachments_per_message) throw new UserFacingError(t("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message }));
     if (sourceIds.length && sourceIds.length !== ids.length) throw new Error("附件转发引用不完整");
     if (serverSupports(currentSession.protocol, "attachments.multi.v1")) {
       return { attachment_ids: [...ids], ...(sourceIds.length ? { forward_source_attachment_ids: [...sourceIds] } : {}) };
     }
-    if (ids.length !== 1) throw new Error("当前服务器版本一次只能发送一个附件");
+    if (ids.length !== 1) throw UserFacingError.localized("workspace.composer.multiAttachmentUnsupported");
     return { attachment_id: ids[0], ...(sourceIds.length ? { forward_source_attachment_id: sourceIds[0] } : {}) };
   }
 
@@ -1542,7 +1542,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (!messages().some((message) => message.message_id === boundary.messageId)) {
           const page = await db.messageWindow(roomId, boundary.seq);
           if (!canApplyHistoryNavigation(selectionRevision, timelineNavigationRevision, roomId, selectedRef)) return;
-          if (!page.messages.some((message) => message.message_id === boundary.messageId)) throw new Error(t("workspace.feedback.firstUnreadUnavailable"));
+          if (!page.messages.some((message) => message.message_id === boundary.messageId)) throw UserFacingError.localized("workspace.feedback.firstUnreadUnavailable");
           setMessages(page.messages);
           setOlderMessagesState(page.hasOlder ? "idle" : "end");
           setHistoryFocus({ roomId, messageId: boundary.messageId, status: "ready", hasNewer: page.hasNewer });

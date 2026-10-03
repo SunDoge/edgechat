@@ -3,7 +3,7 @@ import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { DeviceIdentity, WebCryptoMessagingCore } from "@edgechat/messaging-core";
-import type { ApiClient } from "@edgechat/sync";
+import { ApiError, type ApiClient } from "@edgechat/sync";
 import { clearIdentity, saveIdentity } from "../vault";
 
 vi.mock("@simplewebauthn/browser", () => ({
@@ -23,12 +23,12 @@ afterEach(async () => {
   await clearIdentity(PROFILE_ID);
 });
 
-function renderAuth(accountHint?: string) {
+function renderAuth(accountHint?: string, api: ApiClient = {} as ApiClient) {
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <AuthScreen
     profileId={PROFILE_ID}
     accountHint={accountHint}
-    api={{} as ApiClient}
+    api={api}
     core={{} as WebCryptoMessagingCore}
     db={{} as LocalDatabase}
     onReady={vi.fn()}
@@ -69,6 +69,22 @@ describe("AuthScreen account identity", () => {
     expect(document.querySelector<HTMLInputElement>("#username")?.value).toBe("@alice:example.com");
     expect(document.body.textContent).toContain("或使用登录密码");
     expect(document.body.textContent).toContain("使用通行密钥登录");
+  });
+
+  it("keeps device continuation available after a transient server failure", async () => {
+    await saveIdentity(PROFILE_ID, { deviceId: "device", deviceCredential: "credential", mlsState: new Uint8Array([1]) } as DeviceIdentity);
+    const api = { deviceSessionChallenge: vi.fn(async () => {
+      throw new ApiError("private edge trace", 503, "internal_error");
+    }) } as unknown as ApiClient;
+    renderAuth("@alice:example.com", api);
+
+    await vi.waitFor(() => expect([...document.querySelectorAll("button")]
+      .some((button) => button.textContent === "使用这台设备继续")).toBe(true));
+    [...document.querySelectorAll("button")].find((button) => button.textContent === "使用这台设备继续")?.click();
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("服务器暂时不可用，请稍后再试"));
+    expect([...document.querySelectorAll("button")].some((button) => button.textContent === "使用这台设备继续")).toBe(true);
+    expect(document.body.textContent).not.toContain("private edge trace");
   });
 
   it("does not present passkey login as a replacement for missing local device keys", async () => {

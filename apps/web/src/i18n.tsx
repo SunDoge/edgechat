@@ -115,6 +115,7 @@ export const zhHansMessages = {
   "workspace.composer.voiceFile": "语音 · {seconds} 秒",
   "workspace.composer.fileTooLarge": "每个附件不能超过 {size} MB",
   "workspace.composer.tooManyFiles": "当前服务器每条消息最多支持 {count} 个附件",
+  "workspace.composer.multiAttachmentUnsupported": "当前服务器一次只能发送一个附件，请分开发送",
   "workspace.composer.filesTooLarge": "一条消息的附件总量不能超过 {size} MB",
   "workspace.composer.disabled.localRecovery": "正在恢复本机记录，完成前不能发送",
   "workspace.composer.disabled.leaving": "正在等待安全退出群聊",

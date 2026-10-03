@@ -6,7 +6,7 @@ import { browserSupportsWebAuthn, startAuthentication, type PublicKeyCredentialR
 import type { AccountAppealCategory, AccountAppealStatus, ApiClient, SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { loadIdentity, saveIdentity } from "../vault";
-import { authErrorMessage } from "../auth-errors";
+import { authErrorMessage, isRetryableDeviceContinuationError } from "../auth-errors";
 import { Brand, Input } from "./primitives";
 import { profileSessionKey } from "../local-profiles";
 import { useI18n } from "../i18n";
@@ -59,17 +59,17 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     setDeviceBusy(true); setError("");
     try {
       const identity = await loadIdentity(props.profileId);
-      if (!identity?.deviceCredential || !identity.mlsState) throw new Error(t("auth.deviceContinue.error"));
+      if (!identity?.deviceCredential || !identity.mlsState) throw UserFacingError.localized("auth.deviceContinue.error");
       const { challenge } = await props.api.deviceSessionChallenge(identity.deviceId, identity.deviceCredential);
-      if (challenge.device_id !== identity.deviceId) throw new Error(t("auth.deviceContinue.error"));
+      if (challenge.device_id !== identity.deviceId) throw UserFacingError.localized("auth.deviceContinue.error");
       const signature = await props.core.sign(identity, deviceSessionProofBytes(challenge));
       const result = await props.api.claimDeviceSession(challenge, identity.deviceCredential, signature);
-      if (result.device_id !== identity.deviceId) throw new Error(t("auth.deviceContinue.error"));
+      if (result.device_id !== identity.deviceId) throw UserFacingError.localized("auth.deviceContinue.error");
       const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
       props.onReady(result, identity, result.access_token, mls);
-    } catch {
-      setDeviceContinueAvailable(false);
-      setError(t("auth.deviceContinue.error"));
+    } catch (cause) {
+      if (!isRetryableDeviceContinuationError(cause)) setDeviceContinueAvailable(false);
+      setError(authErrorMessage(cause, t, t("auth.deviceContinue.error")));
     } finally { setDeviceBusy(false); }
   }
 

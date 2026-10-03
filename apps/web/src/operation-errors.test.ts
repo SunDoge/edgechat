@@ -8,6 +8,8 @@ describe("operation error presentation", () => {
     expect(operationErrorMessage(UserFacingError.localized("backup.error.passwordOrDamage"), "无法恢复备份")).toBe("备份密码错误，或文件已经损坏");
     expect(operationErrorMessage(UserFacingError.localized("avatar.error.invalidDimensions"), "无法处理图片")).toBe("图片尺寸无效");
     expect(operationErrorMessage(UserFacingError.localized("localProfiles.error.cryptoRecovery"), "无法切换本机身份")).toBe("本机加密记录仍在恢复，完成后才能切换身份");
+    expect(operationErrorMessage(UserFacingError.localized("workspace.composer.multiAttachmentUnsupported"), "发送失败")).toContain("请分开发送");
+    expect(operationErrorMessage(UserFacingError.localized("workspace.feedback.firstUnreadUnavailable"), "无法打开对话")).toBe("无法打开第一条未读消息");
     if (false) {
       // @ts-expect-error Low-level errors cannot emit a key that needs runtime interpolation.
       UserFacingError.localized("deviceLink.rooms");

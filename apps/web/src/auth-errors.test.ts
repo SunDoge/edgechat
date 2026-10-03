@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError, ApiTimeoutError } from "@edgechat/sync";
-import { authErrorMessage } from "./auth-errors";
+import { authErrorMessage, isRetryableDeviceContinuationError } from "./auth-errors";
 import { UserFacingError } from "./operation-errors";
 
 describe("authentication error copy", () => {
@@ -23,5 +23,14 @@ describe("authentication error copy", () => {
   it("distinguishes connection failures without exposing their detail", () => {
     expect(authErrorMessage(new TypeError("Failed to fetch https://private-origin"))).toBe("无法连接服务器");
     expect(authErrorMessage(new ApiTimeoutError(30_000))).toBe("无法连接服务器");
+  });
+
+  it("keeps device continuation retryable only for transient transport failures", () => {
+    expect(isRetryableDeviceContinuationError(new TypeError("private origin failed"))).toBe(true);
+    expect(isRetryableDeviceContinuationError(new ApiTimeoutError(30_000))).toBe(true);
+    expect(isRetryableDeviceContinuationError(new ApiError("edge trace", 503, "internal_error"))).toBe(true);
+    expect(isRetryableDeviceContinuationError(new ApiError("try later", 429, "unauthenticated_rate_limited"))).toBe(true);
+    expect(isRetryableDeviceContinuationError(new ApiError("invalid", 401, "invalid_device_proof"))).toBe(false);
+    expect(isRetryableDeviceContinuationError(new Error("damaged local key"))).toBe(false);
   });
 });
