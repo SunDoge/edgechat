@@ -1,6 +1,6 @@
 import { Show, createSignal, onMount } from "solid-js";
 import { IconQrcode, IconShieldLock, IconSwitchHorizontal, IconUpload } from "@tabler/icons-solidjs";
-import { OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
+import { encodeBase64Url, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import { deviceSessionProofBytes } from "@edgechat/protocol";
 import { browserSupportsWebAuthn, startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import type { AccountAppealCategory, AccountAppealStatus, ApiClient, SessionIdentity } from "@edgechat/sync";
@@ -113,9 +113,21 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   async function submit(event: SubmitEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      const { stored, mls, device } = await prepareDevice();
+      let { stored, mls, device } = await prepareDevice();
+      let registrationCredential: string | undefined;
+      if (mode() === "register") {
+        const accountCredential = stored.accountCredential ?? encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+        const deviceCredential = stored.deviceCredential ?? encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+        stored = { ...stored, accountCredential, deviceCredential };
+        device = { ...device, device_credential: deviceCredential };
+        registrationCredential = accountCredential;
+        // Persist both factors before the request. If the server commits but
+        // the response is lost, the exact same device can retry without
+        // creating an orphan account or asking the server to retain secrets.
+        await saveIdentity(props.profileId, stored);
+      }
       const result = mode() === "register"
-        ? await props.api.registerOpaque({ display_name: displayName().trim(), device })
+        ? await props.api.registerOpaque({ display_name: displayName().trim(), account_credential: registrationCredential, device })
         : await props.api.login({ user_id: username(), password: localAccountCredential() || stored.accountCredential || password(), device });
       const accountCredential = "account_credential" in result && typeof result.account_credential === "string" ? result.account_credential : undefined;
       const authenticatedIdentity: DeviceIdentity = {

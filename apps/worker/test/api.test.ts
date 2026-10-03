@@ -280,13 +280,52 @@ async function register(localpart: string, currentDevice: Awaited<ReturnType<typ
 }
 
 async function registerOpaque(displayName: string, currentDevice: Awaited<ReturnType<typeof device>>) {
+  const accountCredential = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+  const deviceCredential = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
   const response = await SELF.fetch("https://edgechat.test/api/v1/register/opaque", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ display_name: displayName, device: currentDevice.body }),
+    body: JSON.stringify({ display_name: displayName, account_credential: accountCredential,
+      device: { ...currentDevice.body, device_credential: deviceCredential } }),
   });
   expect(response.status, await response.clone().text()).toBe(201);
   return response.json() as Promise<{ access_token: string; user_id: UserId; device_id: string; device_credential: string; account_credential: string; account_mode: "opaque"; display_name: string }>;
 }
+
+it("replays opaque registration after a lost response without creating another account", async () => {
+  const r2Before = (await env.ARCHIVE.list()).objects.length;
+  const currentDevice = await device(`opaque-register-retry-${crypto.randomUUID()}`);
+  const accountCredential = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+  const deviceCredential = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+  const payload = { display_name: "Retry owner", account_credential: accountCredential,
+    device: { ...currentDevice.body, device_credential: deviceCredential } };
+
+  const first = await SELF.fetch("https://edgechat.test/api/v1/register/opaque", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+  });
+  expect(first.status, await first.clone().text()).toBe(201);
+  const created = await first.json() as { user_id: string; access_token: string; account_credential: string; device_credential: string };
+  const replay = await SELF.fetch("https://edgechat.test/api/v1/register/opaque", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+  });
+  expect(replay.status, await replay.clone().text()).toBe(200);
+  const recovered = await replay.json() as typeof created;
+  expect(recovered).toMatchObject({ user_id: created.user_id, account_credential: accountCredential, device_credential: deviceCredential });
+  expect(recovered.access_token).not.toBe(created.access_token);
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM users WHERE user_id = ?").bind(created.user_id).first()).toEqual({ count: 1 });
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM devices WHERE user_id = ?").bind(created.user_id).first()).toEqual({ count: 1 });
+
+  for (const conflicting of [
+    { ...payload, account_credential: b64url(crypto.getRandomValues(new Uint8Array(32)).buffer) },
+    { ...payload, device: { ...payload.device, device_credential: b64url(crypto.getRandomValues(new Uint8Array(32)).buffer) } },
+  ]) {
+    const response = await SELF.fetch("https://edgechat.test/api/v1/register/opaque", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(conflicting),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "already_exists" });
+  }
+  expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
+});
 
 it("creates an opaque account from a nickname and persists only credential hashes in D1", async () => {
   const r2Before = (await env.ARCHIVE.list()).objects.length;

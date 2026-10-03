@@ -1409,33 +1409,70 @@ async function register(request: Request, env: Env): Promise<Response> {
   return json({ access_token: token, user_id: userId, device_id: deviceId, device_credential: deviceCredential, display_name: displayName, avatar_url: null, server_name: env.SERVER_NAME, ...sessionCapabilities(env) }, 201);
 }
 
+async function replayOpaqueRegistration(env: Env, input: {
+  deviceId: string; signingKey: string; encryptionKey: string; accountCredential: string; deviceCredential: string;
+}): Promise<Response | null> {
+  const db = createDatabase(env.DB);
+  const existing = await db.selectFrom("devices as d").innerJoin("users as u", "u.user_id", "d.user_id")
+    .select(["u.user_id", "u.display_name", "u.account_mode", "u.password_hash", "u.password_salt", "u.avatar_id",
+      "d.signing_key", "d.encryption_key", "d.device_credential_hash", "d.revoked_at"])
+    .where("d.device_id", "=", input.deviceId).where("u.deletion_requested_at", "is", null).where("u.deleted_at", "is", null).executeTakeFirst();
+  if (!existing) return null;
+  const [accountMatches, suppliedDeviceCredentialHash] = await Promise.all([
+    verifyPassword(input.accountCredential, existing.password_hash, existing.password_salt).catch(() => false),
+    sha256(input.deviceCredential),
+  ]);
+  if (existing.account_mode !== "opaque" || existing.revoked_at !== null || !accountMatches
+    || existing.device_credential_hash !== suppliedDeviceCredentialHash
+    || existing.signing_key !== input.signingKey || existing.encryption_key !== input.encryptionKey) {
+    throw new HttpError(409, "Device already exists", "already_exists");
+  }
+  const token = await createSession(env, existing.user_id as UserId, input.deviceId);
+  return json({ access_token: token, user_id: existing.user_id, device_id: input.deviceId, device_credential: input.deviceCredential,
+    account_credential: input.accountCredential, account_mode: "opaque", display_name: existing.display_name,
+    avatar_url: existing.avatar_id ? `/avatars/${existing.avatar_id}` : null,
+    server_name: env.SERVER_NAME, ...sessionCapabilities(env) });
+}
+
 async function registerOpaqueAccount(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   const displayName = normalizedDisplayName(body.display_name);
+  const accountCredential = stringField(body, "account_credential", 128);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(accountCredential)) throw new HttpError(400, "Invalid account credential", "invalid_account_credential");
   const device = body.device as Record<string, unknown> | undefined;
   if (!device || typeof device !== "object" || Array.isArray(device)) throw new HttpError(400, "Device is required", "invalid_device");
   const deviceId = stringField(device, "device_id", 96);
   const deviceName = stringField(device, "display_name", 60);
   const signingKey = stringField(device, "signing_key", 2_000);
   const encryptionKey = stringField(device, "encryption_key", 2_000);
+  const deviceCredential = stringField(device, "device_credential", 128);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(deviceCredential)) throw new HttpError(400, "Invalid device credential", "invalid_device_credential");
   const packages = mlsKeyPackages(device);
   await limitUnauthenticatedRequest(request, env, "register", deviceId);
   await validatePublicKeys(signingKey, encryptionKey);
+  const retryInput = { deviceId, signingKey, encryptionKey, accountCredential, deviceCredential };
+  const replay = await replayOpaqueRegistration(env, retryInput);
+  if (replay) return replay;
+  const db = createDatabase(env.DB);
   const localpart = `u_${randomId(18).toLowerCase()}`;
-  const accountCredential = randomId(32);
   const credential = await passwordHash(accountCredential);
-  const deviceCredential = randomId(32);
   const userId = `@${localpart}:${env.SERVER_NAME}` as UserId;
   const now = Date.now();
   try {
-    const db = createDatabase(env.DB);
     await batch(env.DB, [
       db.insertInto("users").values({ user_id: userId, localpart, display_name: displayName, bio: "", account_mode: "opaque", password_hash: credential.hash, password_salt: credential.salt, created_at: now }),
       db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, device_credential_hash: await sha256(deviceCredential), created_at: now, last_seen_at: now, revoked_at: null }),
       ...(await keyPackageInserts(db, deviceId, packages, now)),
     ]);
   } catch (error) {
-    if (error instanceof Error && error.message.includes("UNIQUE")) throw new HttpError(409, "Device already exists", "already_exists");
+    if (error instanceof Error && error.message.includes("UNIQUE")) {
+      // A concurrent byte-identical retry may have committed between the
+      // lookup and this batch. Re-enter once through the authoritative lookup
+      // path instead of creating another account or losing its credentials.
+      const concurrentReplay = await replayOpaqueRegistration(env, retryInput);
+      if (concurrentReplay) return concurrentReplay;
+      throw new HttpError(409, "Device or KeyPackage already exists", "already_exists");
+    }
     throw error;
   }
   const token = await createSession(env, userId, deviceId);

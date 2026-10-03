@@ -5,10 +5,11 @@ import { messageExpiryAt } from "./expiry";
 import type { LocalHistoryClearResult } from "./local-history";
 
 type Pending = { resolve: (value: DbResponse) => void; reject: (error: Error) => void };
-type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
+type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb"; startup?: "runtime-loading" | "runtime-ready"; startupError?: string };
 
 const LOCAL_CONFIG_DB = "edgechat-local-config";
 export const LOCAL_DATABASE_STARTUP_TIMEOUT_MS = 60_000;
+export const LOCAL_DATABASE_STARTUP_ABSOLUTE_TIMEOUT_MS = 180_000;
 export const PENDING_LOCAL_DATABASE_DESTRUCTIONS_KEY = "edgechat.pending-local-database-destructions.v1";
 
 type PendingLocalDatabaseDestruction = { profile_id: string; backend: "opfs" | "indexeddb" };
@@ -446,13 +447,14 @@ export class LocalRestoreCommitUnknownError extends Error {
 }
 
 export class LocalDatabase {
-  private readonly worker = new Worker(new URL("./db-worker.ts", import.meta.url), { type: "module", name: "edgechat-pglite" });
+  private readonly worker = new Worker(new URL("./db-worker-loader.ts", import.meta.url), { type: "module", name: "edgechat-pglite" });
   private readonly pending = new Map<number, Pending>();
   private requestId = 0;
   private closing: Promise<void> | null = null;
   private destroyPrepared = false;
   private destroyBackend: "opfs" | "indexeddb" | null = null;
   private workerFailure: Error | null = null;
+  private startupProgressAt = Date.now();
   storage: "opfs" | "indexeddb" | "initializing" = "initializing";
 
   get unavailable(): boolean { return this.workerFailure !== null; }
@@ -461,6 +463,11 @@ export class LocalDatabase {
     if (!/^[0-9a-f-]{36}$/i.test(profileId)) throw new Error("Invalid local profile identifier");
     this.worker.onmessage = (event: MessageEvent<DbResponse>) => {
       const response = event.data;
+      if (response.startup) { this.startupProgressAt = Date.now(); return; }
+      if (response.startupError) {
+        this.failWorker(new Error(`Local database runtime failed to load: ${response.startupError}`));
+        return;
+      }
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
@@ -484,11 +491,16 @@ export class LocalDatabase {
 
   async exec(sql: string): Promise<void> { await this.send(sql, [], true); }
 
-  async open(timeoutMs = LOCAL_DATABASE_STARTUP_TIMEOUT_MS): Promise<"opfs" | "indexeddb"> {
+  async open(
+    timeoutMs = LOCAL_DATABASE_STARTUP_TIMEOUT_MS,
+    absoluteTimeoutMs = timeoutMs === LOCAL_DATABASE_STARTUP_TIMEOUT_MS ? LOCAL_DATABASE_STARTUP_ABSOLUTE_TIMEOUT_MS : timeoutMs,
+  ): Promise<"opfs" | "indexeddb"> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) throw new Error("Invalid local database startup timeout");
-    const response = await this.requestWithTimeout(
+    if (!Number.isSafeInteger(absoluteTimeoutMs) || absoluteTimeoutMs < timeoutMs || absoluteTimeoutMs > 300_000) throw new Error("Invalid absolute local database startup timeout");
+    const response = await this.requestWithStartupTimeout(
       { sql: "SELECT 1 AS ready", params: [], exec: false },
       timeoutMs,
+      absoluteTimeoutMs,
       new Error("Local database startup timed out"),
     );
     this.storage = response.storage ?? "indexeddb";
@@ -1907,13 +1919,24 @@ export class LocalDatabase {
     });
   }
 
-  private requestWithTimeout(message: Record<string, unknown>, timeoutMs: number, timeoutError: Error): Promise<DbResponse> {
+  private requestWithStartupTimeout(message: Record<string, unknown>, inactivityTimeoutMs: number, absoluteTimeoutMs: number, timeoutError: Error): Promise<DbResponse> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const startedAt = Date.now();
+      this.startupProgressAt = startedAt;
+      let timer: ReturnType<typeof setTimeout>;
+      const timeout = () => {
         this.worker.terminate();
         this.failWorker(timeoutError);
         reject(timeoutError);
-      }, timeoutMs);
+      };
+      const check = () => {
+        const now = Date.now();
+        const inactivityRemaining = inactivityTimeoutMs - (now - this.startupProgressAt);
+        const absoluteRemaining = absoluteTimeoutMs - (now - startedAt);
+        if (inactivityRemaining <= 0 || absoluteRemaining <= 0) { timeout(); return; }
+        timer = setTimeout(check, Math.min(inactivityRemaining, absoluteRemaining));
+      };
+      timer = setTimeout(check, Math.min(inactivityTimeoutMs, absoluteTimeoutMs));
       void this.request(message).then(
         (response) => { clearTimeout(timer); resolve(response); },
         (error) => { clearTimeout(timer); reject(error); },
