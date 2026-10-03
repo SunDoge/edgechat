@@ -67,9 +67,6 @@ export type DeviceLinkStatus = {
   status: "pending" | "awaiting_packages" | "approved" | "complete" | "claimed" | "cancelled";
   required_packages: number;
   expires_at: number;
-  history_transfer_ready: boolean;
-  history_transfer_bytes: number | null;
-  history_source_device_id: string | null;
   history_transfer: DeviceHistoryTransfer | null;
   account_credential_ready: boolean;
   account_credential?: { envelope: string; source_device_id: string };
@@ -88,10 +85,17 @@ export type DeviceHistoryTransfer = {
   acked_shards: number[];
   ciphertext_bytes: number;
 };
+
+/** Accept only a complete, non-duplicated shard index set from the server. */
+export function deviceHistoryTransferComplete(transfer: DeviceHistoryTransfer | null): boolean {
+  if (!transfer || !Number.isSafeInteger(transfer.shard_count) || transfer.shard_count < 1) return false;
+  const indexes = [...transfer.ready_shards, ...transfer.acked_shards];
+  if (indexes.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= transfer.shard_count)) return false;
+  return new Set(indexes).size === transfer.shard_count;
+}
 export type DeviceLinkPreview = {
   link_id: string; device_id: string; display_name: string; signing_key: JsonWebKey; encryption_key: JsonWebKey;
   status: DeviceLinkStatus["status"]; required_packages: number; expires_at: number;
-  history_transfer_ready: boolean; history_transfer_bytes: number | null; history_source_device_id: string | null;
   history_transfer: DeviceHistoryTransfer | null;
   account_credential_ready: boolean;
   account_mode?: "password" | "opaque";
@@ -198,7 +202,6 @@ export class ApiClient {
   deviceLinkStatus(linkId: string, secret: string) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/status`, { headers: { "x-device-link-secret": secret } }); }
   cancelDeviceLink(linkId: string, secret: string) { return this.request<void>(`/api/v1/device-links/${encodeURIComponent(linkId)}/cancel`, { method: "DELETE", headers: { "x-device-link-secret": secret } }); }
   uploadDeviceLinkPackages(linkId: string, secret: string, packages: string[]) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/key-packages`, { method: "POST", headers: { "x-device-link-secret": secret }, body: JSON.stringify({ mls_key_packages: packages }) }); }
-  uploadDeviceLinkHistory(linkId: string, history: Blob) { return this.request<{ ready: true; bytes: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history" }, body: history }, API_TRANSFER_TIMEOUT_MS); }
   createDeviceLinkHistoryTransfer(linkId: string, manifest: { transfer_id: string; plaintext_bytes: number; shard_plaintext_bytes: number; shard_count: number }) {
     return this.request<{ transfer: DeviceHistoryTransfer }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/manifest`, { method: "PUT", body: JSON.stringify(manifest) });
   }
@@ -224,12 +227,6 @@ export class ApiClient {
   }
   async acknowledgeDeviceLinkHistoryShard(linkId: string, secret: string, index: number): Promise<void> {
     await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "DELETE", headers: { "x-device-link-secret": secret } });
-  }
-  async downloadDeviceLinkHistory(linkId: string, secret: string): Promise<Blob> {
-    return this.withResponse(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { headers: { "x-device-link-secret": secret } }, API_TRANSFER_TIMEOUT_MS, (response) => response.blob());
-  }
-  async acknowledgeDeviceLinkHistory(linkId: string, secret: string): Promise<void> {
-    await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { method: "DELETE", headers: { "x-device-link-secret": secret } });
   }
   deviceLinkPreview(linkId: string) { return this.request<DeviceLinkPreview>(`/api/v1/device-links/${encodeURIComponent(linkId)}`); }
   approveDeviceLink(linkId: string) { return this.request<{ link_id: string; status: DeviceLinkStatus["status"]; required_packages: number; expires_at: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}`, { method: "POST" }); }

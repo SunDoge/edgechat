@@ -39,7 +39,6 @@ const DEVICE_LINK_PENDING_MS = 15 * 60 * 1_000;
 const DEVICE_LINK_APPROVED_MS = 24 * 60 * 60 * 1_000;
 const DEVICE_LINK_SESSION_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEVICE_SESSION_CHALLENGE_MS = 5 * 60 * 1_000;
-const DEVICE_LINK_HISTORY_MAX_BYTES = 64 * 1024 * 1024;
 const DEVICE_LINK_HISTORY_SHARD_MAX_BYTES = 34 * 1024 * 1024;
 const DEVICE_LINK_HISTORY_MAX_SHARDS = 4096;
 const ROOM_PEER_RECOVERY_MAX_EVENTS = 500;
@@ -2103,9 +2102,6 @@ async function deviceLinkStatus(request: Request, env: Env, linkId: string): Pro
   return json({
     link_id: link.link_id, device_id: link.device_id, status: link.status as DeviceLinkStatus,
     required_packages: link.required_packages, expires_at: link.expires_at,
-    history_transfer_ready: transfer ? transfer.ready_shards.length + transfer.acked_shards.length === transfer.shard_count : Boolean(link.history_object_key && link.history_bytes),
-    history_transfer_bytes: transfer?.ciphertext_bytes ?? link.history_bytes ?? null,
-    history_source_device_id: transfer?.source_device_id ?? link.history_source_device_id ?? null,
     history_transfer: transfer,
     account_credential_ready: Boolean(link.account_credential_envelope && link.account_credential_source_device_id),
     account_mode: account?.account_mode,
@@ -2120,7 +2116,7 @@ async function previewDeviceLink(env: Env, auth: AuthContext, linkId: string): P
   requireUser(auth);
   const db = createDatabase(env.DB);
   const link = await db.selectFrom("device_links")
-    .select(["link_id", "device_id", "display_name", "signing_key", "encryption_key", "user_id", "approved_by_device_id", "status", "required_packages", "expires_at", "history_object_key", "history_bytes", "history_source_device_id", "account_credential_envelope"])
+    .select(["link_id", "device_id", "display_name", "signing_key", "encryption_key", "user_id", "approved_by_device_id", "status", "required_packages", "expires_at", "account_credential_envelope"])
     .where("link_id", "=", linkId).executeTakeFirst();
   if (!link || link.status === "cancelled") throw new HttpError(404, "Device link not found", "not_found");
   if (link.user_id && link.user_id !== auth.userId) throw new HttpError(404, "Device link not found", "not_found");
@@ -2138,12 +2134,10 @@ async function previewDeviceLink(env: Env, auth: AuthContext, linkId: string): P
   const rooms = link.user_id ? await db.selectFrom("device_link_rooms as dlr").innerJoin("rooms as r", "r.room_id", "dlr.room_id")
     .select(["dlr.room_id", "dlr.key_package", "dlr.expected_epoch", "dlr.status", "dlr.event_id", "r.name", "r.kind", "r.purpose"])
     .where("dlr.link_id", "=", linkId).orderBy("dlr.room_id").execute() : [];
-  const { history_object_key: historyObjectKey, account_credential_envelope: accountCredentialEnvelope, ...publicLink } = link;
+  const { account_credential_envelope: accountCredentialEnvelope, ...publicLink } = link;
   const transfer = await deviceLinkHistoryTransfer(env, linkId);
   const account = link.user_id ? await db.selectFrom("users").select("account_mode").where("user_id", "=", link.user_id).executeTakeFirst() : null;
   return json({ ...publicLink, account_credential_ready: Boolean(accountCredentialEnvelope), account_mode: account?.account_mode,
-    history_transfer_ready: transfer ? transfer.ready_shards.length + transfer.acked_shards.length === transfer.shard_count : Boolean(historyObjectKey && link.history_bytes),
-    history_transfer_bytes: transfer?.ciphertext_bytes ?? link.history_bytes ?? null, history_source_device_id: transfer?.source_device_id ?? link.history_source_device_id,
     history_transfer: transfer, signing_key: JSON.parse(link.signing_key), encryption_key: JSON.parse(link.encryption_key), rooms });
 }
 
@@ -2187,8 +2181,8 @@ async function createDeviceLinkHistoryTransfer(request: Request, env: Env, auth:
   }
   const db = createDatabase(env.DB);
   const link = await db.selectFrom("device_links").select(["user_id", "device_id", "status", "expires_at"]).where("link_id", "=", linkId).executeTakeFirst();
-  if (!link || link.user_id !== auth.userId || !["approved", "complete", "claimed"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
-  if (link.status !== "claimed" && link.expires_at <= Date.now()) {
+  if (!link || link.user_id !== auth.userId || !["approved", "complete"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.expires_at <= Date.now()) {
     await expireDeviceLink(env, linkId);
     throw new HttpError(410, "Device link expired", "device_link_expired");
   }
@@ -2222,8 +2216,8 @@ async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: Au
   if (!transfer || transfer.user_id !== auth.userId || transfer.source_device_id !== auth.deviceId || !Number.isSafeInteger(shardIndex) || shardIndex < 0 || shardIndex >= transfer.shard_count) {
     throw new HttpError(404, "Device history transfer not found", "not_found");
   }
-  if (transfer.link_status !== "approved" && transfer.link_status !== "complete" && transfer.link_status !== "claimed") throw new HttpError(404, "Device history transfer not found", "not_found");
-  if (transfer.link_status !== "claimed" && transfer.link_expires_at <= Date.now()) {
+  if (transfer.link_status !== "approved" && transfer.link_status !== "complete") throw new HttpError(404, "Device history transfer not found", "not_found");
+  if (transfer.link_expires_at <= Date.now()) {
     await expireDeviceLink(env, linkId);
     throw new HttpError(410, "Device link expired", "device_link_expired");
   }
@@ -2379,49 +2373,6 @@ async function removeDeviceLinkHistoryShards(env: Env, linkId: string, userId: s
   return true;
 }
 
-async function uploadDeviceLinkHistory(request: Request, env: Env, auth: AuthContext, linkId: string): Promise<Response> {
-  requireUser(auth);
-  const declaredSize = Number(request.headers.get("content-length"));
-  if (!request.body || !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > DEVICE_LINK_HISTORY_MAX_BYTES) {
-    throw new HttpError(413, "Device history transfer is too large", "device_history_too_large");
-  }
-  const db = createDatabase(env.DB);
-  let link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
-  if (!link || link.user_id !== auth.userId || !["approved", "complete", "claimed"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
-  if (link.status !== "claimed" && link.expires_at <= Date.now()) {
-    await expireDeviceLink(env, linkId);
-    throw new HttpError(410, "Device link expired", "device_link_expired");
-  }
-  if (link.history_object_key && !(await removeDeviceLinkHistory(env, link))) throw new HttpError(503, "Previous history transfer could not be replaced", "history_cleanup_failed");
-  const objectKey = `device-links/${linkId}/history.bin`;
-  const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
-  await stageR2Write(env, pending);
-  try {
-    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.device-history", metadata: { link_id: linkId, target_device_id: link.device_id } });
-    if (!object || object.size !== declaredSize) throw new Error("Device history transfer length mismatch");
-    await batch(env.DB, [
-      db.updateTable("device_links").set({ history_object_key: objectKey, history_bytes: object.size, history_uploaded_at: Date.now(), history_source_device_id: auth.deviceId, updated_at: Date.now() }).where("link_id", "=", linkId),
-      db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey),
-    ]);
-  } catch (error) { await abandonPendingR2Write(env, pending); throw error; }
-  return json({ ready: true, bytes: declaredSize }, 201);
-}
-
-async function downloadDeviceLinkHistory(request: Request, env: Env, linkId: string): Promise<Response> {
-  const link = await deviceLinkBySecret(request, env, linkId);
-  if ((link.status !== "complete" && link.status !== "claimed") || !link.history_object_key || !link.history_bytes) throw new HttpError(404, "Device history transfer not found", "not_found");
-  const object = await objectStore(env).get(link.history_object_key);
-  if (!object || object.size !== link.history_bytes) throw new HttpError(503, "Device history transfer is temporarily unavailable", "history_transfer_unavailable");
-  return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.device-history", "content-length": String(object.size), "cache-control": "no-store" } });
-}
-
-async function acknowledgeDeviceLinkHistory(request: Request, env: Env, linkId: string): Promise<Response> {
-  const link = await deviceLinkBySecret(request, env, linkId);
-  if (link.status !== "complete" && link.status !== "claimed") throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
-  if (!(await removeDeviceLinkHistory(env, link))) throw new HttpError(503, "Device history cleanup failed", "history_cleanup_failed");
-  return new Response(null, { status: 204 });
-}
-
 async function materializeDeviceLink(env: Env, linkId: string): Promise<void> {
   const db = createDatabase(env.DB);
   const link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirstOrThrow();
@@ -2526,6 +2477,11 @@ async function claimDeviceLink(request: Request, env: Env, linkId: string): Prom
   const link = await deviceLinkBySecret(request, env, linkId);
   if (link.status === "cancelled") throw new HttpError(410, "Device link was cancelled", "device_link_cancelled");
   if (!link.user_id || (link.status !== "complete" && link.status !== "claimed")) throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
+  const historyTransfer = await deviceLinkHistoryTransfer(env, linkId);
+  if (link.status !== "claimed" && historyTransfer
+    && historyTransfer.ready_shards.length + historyTransfer.acked_shards.length !== historyTransfer.shard_count) {
+    throw new HttpError(409, "Device history transfer is not ready", "device_history_not_ready");
+  }
   const body = await readJson(request);
   const accessToken = stringField(body, "access_token", 128);
   const deviceCredential = stringField(body, "device_credential", 64);
@@ -5472,12 +5428,6 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     await limitUnauthenticatedRequest(request, env, "device-link", linkId);
     return cancelDeviceLinkBySecret(request, env, linkId);
   }
-  const publicDeviceLinkHistory = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history$/);
-  if (publicDeviceLinkHistory && (request.method === "GET" || request.method === "DELETE")) {
-    const linkId = decodeURIComponent(publicDeviceLinkHistory[1]);
-    await limitUnauthenticatedRequest(request, env, "device-link", linkId);
-    return request.method === "GET" ? downloadDeviceLinkHistory(request, env, linkId) : acknowledgeDeviceLinkHistory(request, env, linkId);
-  }
   const publicDeviceLinkHistoryShard = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history\/shards\/(\d+)$/);
   if (publicDeviceLinkHistoryShard && (request.method === "GET" || request.method === "DELETE")) {
     const linkId = decodeURIComponent(publicDeviceLinkHistoryShard[1]);
@@ -5585,8 +5535,6 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (deviceLink && request.method === "GET") return previewDeviceLink(env, auth, decodeURIComponent(deviceLink[1]));
   if (deviceLink && request.method === "POST") return approveDeviceLink(env, auth, decodeURIComponent(deviceLink[1]));
   if (deviceLink && request.method === "DELETE") return cancelDeviceLinkForAccount(env, auth, decodeURIComponent(deviceLink[1]));
-  const deviceLinkHistory = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history$/);
-  if (deviceLinkHistory && request.method === "PUT") return uploadDeviceLinkHistory(request, env, auth, decodeURIComponent(deviceLinkHistory[1]));
   const deviceLinkAccountCredential = path.match(/^\/api\/v1\/device-links\/([^/]+)\/account-credential$/);
   if (deviceLinkAccountCredential && request.method === "PUT") return uploadDeviceLinkAccountCredential(request, env, auth, decodeURIComponent(deviceLinkAccountCredential[1]));
   const deviceLinkHistoryManifest = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history\/manifest$/);

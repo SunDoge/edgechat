@@ -1,12 +1,12 @@
 import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { IconCopy, IconDeviceMobile, IconRefresh, IconShieldCheck } from "@tabler/icons-solidjs";
 import { deviceFingerprint, deviceLinkClaimBytes, openAccountCredential, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
-import { ApiError, type ApiClient, type DeviceLinkStatus, type SessionIdentity } from "@edgechat/sync";
+import { ApiError, deviceHistoryTransferComplete, type ApiClient, type DeviceLinkStatus, type SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { renderSVG } from "uqr";
 import { clearIdentity, loadIdentity, saveIdentity } from "../vault";
 import { clearPendingDeviceLink, deviceLinkUrl, loadPendingDeviceLink, randomDeviceLinkToken, savePendingDeviceLink, sha256Base64Url, type PendingDeviceLink } from "../device-linking";
-import { openDeviceHistory, openDeviceHistoryShard, type DeviceHistoryManifest } from "../device-history-transfer";
+import { openDeviceHistoryShard, type DeviceHistoryManifest } from "../device-history-transfer";
 import { deviceHistoryStagingFor } from "../device-history-staging";
 import { AttachmentCiphertextCache } from "../attachment-cache";
 import { ArchiveSegmentCiphertextCache } from "../archive-segment-cache";
@@ -105,7 +105,7 @@ export function DeviceLinkSetup(props: {
       await persistMlsState();
     }
     let historySnapshot: Blob | null = null;
-    if (nextStatus.history_transfer_ready && nextStatus.history_transfer) {
+    if (nextStatus.history_transfer) {
       const transfer = nextStatus.history_transfer;
       const manifest: DeviceHistoryManifest = { transfer_id: transfer.transfer_id, plaintext_bytes: transfer.plaintext_bytes,
         shard_plaintext_bytes: transfer.shard_plaintext_bytes, shard_count: transfer.shard_count };
@@ -126,13 +126,6 @@ export function DeviceLinkSetup(props: {
       }
       historySnapshot = new Blob(plaintextParts, { type: "application/gzip" });
       if (historySnapshot.size !== manifest.plaintext_bytes) throw new UserFacingError(t("deviceLink.error.incompleteHistory"));
-    } else if (nextStatus.history_transfer_ready) {
-      if (!nextStatus.history_source_device_id) throw new UserFacingError(t("deviceLink.error.missingSource"));
-      setStage("joining");
-      const sealed = await props.api.downloadDeviceLinkHistory(current.link_id, current.secret);
-      historySnapshot = await openDeviceHistory(sealed, {
-        linkId: current.link_id, sourceDeviceId: nextStatus.history_source_device_id, targetDeviceId: current.device_id,
-      }, identity);
     }
     const accessToken = current.access_token ?? randomDeviceLinkToken();
     const deviceCredential = current.device_credential ?? randomDeviceLinkToken();
@@ -165,7 +158,6 @@ export function DeviceLinkSetup(props: {
           if (!(error && typeof error === "object" && "status" in error && error.status === 404)) throw error;
         }
       }
-      if (!nextStatus.history_transfer) await props.api.acknowledgeDeviceLinkHistory(current.link_id, current.secret);
       await deviceHistoryStaging.clearLink(current.link_id);
     }
     identity = { ...identity, deviceCredential };
@@ -186,6 +178,8 @@ export function DeviceLinkSetup(props: {
         await replenishPackages(current, next.required_packages); setStage("approved");
       } else if (next.status === "approved") setStage("approved");
       else if ((next.status === "complete" || next.status === "claimed") && next.account_mode === "opaque" && !next.account_credential_ready) setStage("approved");
+      else if ((next.status === "complete" || next.status === "claimed") && next.history_transfer
+        && !deviceHistoryTransferComplete(next.history_transfer)) setStage("approved");
       else if (next.status === "complete" || next.status === "claimed") return await finishLink(loadPendingDeviceLink(props.profileId) ?? current, next);
       else if (next.status === "cancelled") throw new UserFacingError(t("deviceLink.error.cancelled"));
       else setStage("waiting");

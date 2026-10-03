@@ -27,7 +27,6 @@ describe("DeviceLinkApprovalDialog", () => {
       signing_key: { kty: "EC", crv: "P-256", x: "sign-x", y: "sign-y" },
       encryption_key: { kty: "EC", crv: "P-256", x: "encrypt-x", y: "encrypt-y" },
       status: "pending" as const, required_packages: 1, expires_at: Date.now() + 60_000,
-      history_transfer_ready: false, history_transfer_bytes: null, history_source_device_id: null,
       history_transfer: null, account_credential_ready: false, rooms: [],
     })) } as unknown as ApiClient;
     dispose = render(() => <DeviceLinkApprovalDialog api={api} onApprove={onApprove} onCancelLink={onCancelLink} onClose={onClose}/>, root);

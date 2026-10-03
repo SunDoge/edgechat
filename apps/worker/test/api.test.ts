@@ -443,7 +443,7 @@ it("requires a target-device envelope before an opaque account can claim a linke
   expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
 });
 
-it("hard-expires an unclaimed device link, revokes its zero-room device, and deletes temporary R2 history", async () => {
+it("hard-expires an unclaimed device link, revokes its zero-room device, and deletes temporary sharded history", async () => {
   const r2Before = (await env.ARCHIVE.list()).objects.length;
   const source = await device(`expired-link-source-${crypto.randomUUID()}`);
   const target = await device(`expired-link-target-${crypto.randomUUID()}`);
@@ -460,8 +460,13 @@ it("hard-expires an unclaimed device link, revokes its zero-room device, and del
     method: "PUT", headers: sourceHeaders, body: JSON.stringify({ envelope: "E".repeat(128) }),
   })).status).toBe(201);
   const history = new Uint8Array([9, 8, 7, 6]);
-  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
-    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history" }, body: history,
+  const manifest = { transfer_id: "expired_transfer_123456", plaintext_bytes: 4, shard_plaintext_bytes: 1024 * 1024, shard_count: 1 };
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/manifest`, {
+    method: "PUT", headers: sourceHeaders, body: JSON.stringify(manifest),
+  })).status).toBe(201);
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, {
+    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+      "x-content-sha256": await ciphertextDigest(history) }, body: history,
   })).status).toBe(201);
   expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before + 1);
 
@@ -475,8 +480,9 @@ it("hard-expires an unclaimed device link, revokes its zero-room device, and del
     method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" }, body: "{}",
   });
   expect(claim.status).toBe(410);
-  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
-    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history" }, body: history,
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, {
+    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+      "x-content-sha256": await ciphertextDigest(history) }, body: history,
   })).status).toBe(404);
   expect(await env.DB.prepare("SELECT status FROM device_links WHERE link_id = ?").bind(link.link_id).first()).toEqual({ status: "cancelled" });
   expect((await env.DB.prepare("SELECT revoked_at FROM devices WHERE device_id = ?").bind(target.id).first<{ revoked_at: number | null }>())?.revoked_at).not.toBeNull();
@@ -556,9 +562,14 @@ it("lets the account cancel an added unclaimed device and stages MLS removal wit
     method: "POST", headers: authHeaders,
     body: JSON.stringify({ event: { ...unsigned, signature }, encrypted_state: JSON.stringify({ version: 1, welcome: "cancel-welcome", ratchet_tree: "cancel-tree" }) }),
   })).status).toBe(200);
-  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
-    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history" },
-    body: new Uint8Array([1, 3, 5, 7]),
+  const transferManifest = { transfer_id: "cancel_transfer_123456", plaintext_bytes: 4, shard_plaintext_bytes: 1024 * 1024, shard_count: 1 };
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/manifest`, {
+    method: "PUT", headers: authHeaders, body: JSON.stringify(transferManifest),
+  })).status).toBe(201);
+  const transferShard = new Uint8Array([1, 3, 5, 7]);
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, {
+    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+      "x-content-sha256": await ciphertextDigest(transferShard) }, body: transferShard,
   })).status).toBe(201);
   expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before + 1);
 
@@ -2416,14 +2427,7 @@ describe("single-server durable delivery", () => {
     const approved = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "POST", headers: { authorization: `Bearer ${account.access_token}` } });
     expect(approved.status, await approved.clone().text()).toBe(200);
     expect(await approved.json()).toMatchObject({ status: "approved", required_packages: 1 });
-    const historyTransfer = Uint8Array.from({ length: 4096 }, (_, index) => index % 251);
-    const historyUpload = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
-      method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history" }, body: historyTransfer,
-    });
-    expect(historyUpload.status, await historyUpload.clone().text()).toBe(201);
-    expect(await historyUpload.json()).toEqual({ ready: true, bytes: historyTransfer.byteLength });
-    expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before + 1);
-    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, { headers: { "x-device-link-secret": link.secret } })).status).toBe(404);
+    expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
     const noSessionYet = await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { authorization: "Bearer not-issued-for-linked-device" } });
     expect(noSessionYet.status).toBe(401);
 
@@ -2447,10 +2451,7 @@ describe("single-server durable delivery", () => {
     expect(await committedRetry.json()).toMatchObject({ event: { event_id: unsigned.event_id, seq: 1, signature } });
     expect(await env.DB.prepare("SELECT joined_epoch, joined_seq FROM room_devices WHERE room_id = ? AND device_id = ?").bind(roomId, linkedDevice.id).first()).toMatchObject({ joined_epoch: 2, joined_seq: 1 });
     const complete = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
-    expect(await complete.json()).toMatchObject({ status: "complete", user_id: account.user_id, history_transfer_ready: true, history_transfer_bytes: 4096, history_source_device_id: account.device_id, rooms: [{ room_id: roomId, status: "complete" }] });
-    const downloadedHistory = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, { headers: { "x-device-link-secret": link.secret } });
-    expect(downloadedHistory.status).toBe(200);
-    expect(new Uint8Array(await downloadedHistory.arrayBuffer())).toEqual(historyTransfer);
+    expect(await complete.json()).toMatchObject({ status: "complete", user_id: account.user_id, history_transfer: null, rooms: [{ room_id: roomId, status: "complete" }] });
 
     const accessToken = "A".repeat(43); const linkedDeviceCredential = "C".repeat(43);
     const [accessTokenHash, linkedDeviceCredentialHash] = await Promise.all([
@@ -2476,12 +2477,12 @@ describe("single-server durable delivery", () => {
     expect(await me.json()).toMatchObject({ user_id: account.user_id, device_id: linkedDevice.id, archive_compaction_enabled: true });
     const linkedPackages = await SELF.fetch("https://edgechat.test/api/v1/mls/key-packages", { headers: { authorization: `Bearer ${accessToken}` } });
     expect(await linkedPackages.json()).toMatchObject({ available: 1, active: 1 });
-    const historyAck = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, { method: "DELETE", headers: { "x-device-link-secret": link.secret } });
-    expect(historyAck.status).toBe(204);
     expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
-    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
-      method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history" }, body: historyTransfer,
-    })).status).toBe(201);
+    const postClaimTransfer = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/manifest`, {
+      method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ transfer_id: "post_claim_123456789", plaintext_bytes: 1, shard_plaintext_bytes: 1024 * 1024, shard_count: 1 }),
+    });
+    expect(postClaimTransfer.status).toBe(404);
     await env.DB.prepare("UPDATE device_links SET claimed_at = ? WHERE link_id = ?").bind(Date.now() - 8 * 24 * 60 * 60 * 1000, link.link_id).run();
     expect(await cleanupExpiredDeviceLinks(env)).toBeGreaterThanOrEqual(1);
     expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
@@ -2497,10 +2498,34 @@ describe("single-server durable delivery", () => {
       body: JSON.stringify({ ...target.body, mls_key_packages: ["S".repeat(120)] }) });
     const link = await initiated.json() as { link_id: string; secret: string };
     expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "POST", headers: { authorization: `Bearer ${account.access_token}` } })).status).toBe(200);
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
+      method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history" }, body: new Uint8Array([1]),
+    })).status).toBe(404);
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
+      headers: { authorization: `Bearer ${account.access_token}`, "x-device-link-secret": link.secret },
+    })).status).toBe(404);
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
+      method: "DELETE", headers: { authorization: `Bearer ${account.access_token}`, "x-device-link-secret": link.secret },
+    })).status).toBe(404);
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
     const manifest = { transfer_id: "transfer_resume_123456789", plaintext_bytes: 1_048_577, shard_plaintext_bytes: 1_048_576, shard_count: 2 };
     const created = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/manifest`, { method: "PUT",
       headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" }, body: JSON.stringify(manifest) });
     expect(created.status, await created.clone().text()).toBe(201);
+    const prematureAccessToken = "H".repeat(43); const prematureCredential = "I".repeat(43);
+    const [prematureAccessHash, prematureCredentialHash] = await Promise.all([
+      crypto.subtle.digest("SHA-256", new TextEncoder().encode(prematureAccessToken)).then(b64url),
+      crypto.subtle.digest("SHA-256", new TextEncoder().encode(prematureCredential)).then(b64url),
+    ]);
+    const prematureTranscript = new TextEncoder().encode(JSON.stringify({ version: 2, link_id: link.link_id, device_id: target.id,
+      access_token_hash: prematureAccessHash, device_credential_hash: prematureCredentialHash }));
+    const prematureProof = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, target.signing.privateKey, prematureTranscript));
+    const prematureClaim = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
+      method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" },
+      body: JSON.stringify({ access_token: prematureAccessToken, device_credential: prematureCredential, signature: prematureProof }),
+    });
+    expect(prematureClaim.status).toBe(409);
+    expect(await prematureClaim.json()).toMatchObject({ code: "device_history_not_ready" });
     const shards = [new Uint8Array([1, 2, 3, 4, 5]), new Uint8Array([6, 7, 8])];
     const wrongDigest = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { method: "PUT",
       headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
@@ -2551,14 +2576,20 @@ describe("single-server durable delivery", () => {
     expect(conflictingRetry.status).toBe(409);
     expect(await conflictingRetry.json()).toMatchObject({ code: "device_history_shard_conflict" });
     const status = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
-    expect(await status.json()).toMatchObject({ history_transfer_ready: true, history_transfer_bytes: 8,
-      history_transfer: { transfer_id: manifest.transfer_id, ready_shards: [0, 1], acked_shards: [], shard_count: 2 } });
+    expect(await status.json()).toMatchObject({
+      history_transfer: { transfer_id: manifest.transfer_id, ready_shards: [0, 1], acked_shards: [], shard_count: 2, ciphertext_bytes: 8 } });
     const first = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { headers: { "x-device-link-secret": link.secret } });
     expect(new Uint8Array(await first.arrayBuffer())).toEqual(shards[0]);
     expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { method: "DELETE", headers: { "x-device-link-secret": link.secret } })).status).toBe(204);
     const afterAck = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
-    expect(await afterAck.json()).toMatchObject({ history_transfer_ready: true, history_transfer_bytes: 3,
-      history_transfer: { ready_shards: [1], acked_shards: [0] } });
+    expect(await afterAck.json()).toMatchObject({ history_transfer: { ready_shards: [1], acked_shards: [0], ciphertext_bytes: 3 } });
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
+      method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" },
+      body: JSON.stringify({ access_token: prematureAccessToken, device_credential: prematureCredential, signature: prematureProof }),
+    })).status).toBe(200);
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, { method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+        "x-content-sha256": secondDigest }, body: shards[1] })).status).toBe(404);
     const usage = await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${account.access_token}` } });
     expect(await usage.json()).toMatchObject({ archive_bytes: 3, archive_objects: 1 });
   });

@@ -1110,7 +1110,6 @@ export const zhHansMessages = {
   "deviceLink.error.localShardMissing": "本机已清除部分暂存历史，请重新发起设备链接",
   "deviceLink.error.remoteShardMissing": "设备历史分片尚未上传完整",
   "deviceLink.error.incompleteHistory": "设备历史快照不完整",
-  "deviceLink.error.missingSource": "历史传输缺少来源设备信息",
   "deviceLink.error.saveAttachment": "无法将附件历史保存到本机",
   "deviceLink.error.saveSegment": "无法将历史分段保存到本机",
   "deviceLink.error.historyTooLarge": "本机历史过大，无法随此次设备链接迁移",

@@ -2997,7 +2997,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await api.uploadDeviceLinkAccountCredential(linkId, envelope);
         view = { ...view, account_credential_ready: true };
       }
-      if (!view.history_transfer_ready && view.status !== "claimed") {
+      if (!view.history_transfer && view.status !== "claimed") {
         try {
           let snapshot = await deviceHistoryStaging.sourceSnapshot(linkId);
           let manifest = await deviceHistoryStaging.sourceManifest<DeviceHistoryManifest>(linkId);
@@ -3018,8 +3018,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             const uploaded = await api.uploadDeviceLinkHistoryShard(linkId, index, sealed);
             uploadedBytes += uploaded.bytes;
           }
-          view = { ...view, history_transfer_ready: true, history_transfer_bytes: uploadedBytes, history_source_device_id: currentIdentity.deviceId,
-            history_transfer: { ...created.transfer, ready_shards: Array.from({ length: manifest.shard_count }, (_, index) => index), ciphertext_bytes: uploadedBytes } };
+          const acknowledgedIndexes = new Set(created.transfer.acked_shards);
+          view = { ...view,
+            history_transfer: { ...created.transfer,
+              ready_shards: Array.from({ length: manifest.shard_count }, (_, index) => index).filter((index) => !acknowledgedIndexes.has(index)),
+              ciphertext_bytes: uploadedBytes } };
         } catch (cause) {
           if (cause instanceof DeviceHistoryTransferError && cause.code === "transfer_limit") historyTransferSkipped = true;
           else throw cause;

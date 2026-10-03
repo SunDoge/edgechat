@@ -189,6 +189,16 @@ uses one exact-key DELETE; a concurrently finishing PUT rechecks that marker and
 deletes the same key itself. It performs no discovery HEAD/LIST and returns the
 quota reservation exactly once.
 
+Linked-device history uses only a D1 manifest plus temporary, independently
+authenticated 16 MiB plaintext shards; there is no whole-bundle object route.
+Each shard follows the same conditional checksum PUT and exact-key cleanup
+contract. The target acknowledges a shard only after durable local staging,
+which deletes that exact object and returns quota immediately. If a manifest
+exists, the Worker refuses session claim until every distinct shard is ready or
+acknowledged, and refuses new manifests or uploads after claim. Normal request
+cost is therefore one PUT, one GET and one DELETE per shard, with no LIST and no
+unbounded single history object.
+
 For a multi-part message the PWA writes one bounded PGlite cleanup journal with
 all opaque attachment IDs before the first PUT. Crossing the crash-safe outgoing
 MLS staging/outbox boundary removes that journal. After a page crash, startup or
