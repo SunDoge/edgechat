@@ -27,6 +27,8 @@ describe("local message catalog", () => {
     expect(translate("forward.titleMany", { count: 3 })).toBe("转发 3 条消息");
     expect(translate("media.description", { title: "家人" })).toBe("家人 · 仅显示这台设备已索引的内容");
     expect(translate("identity.fingerprintLabel", { value: "ABCD EFGH" })).toBe("设备验证字符 ABCD EFGH");
+    expect(translate("roomPreview.failed", { preview: "照片" })).toBe("发送失败 · 照片");
+    expect(translate("message.reaction.labelMine", { emoji: "👍", count: 2 })).toBe("👍，2 人回应，包括你");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {

@@ -58,4 +58,16 @@ describe("saved message backlinks", () => {
     [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("查看原消息"))?.click();
     expect(open).toHaveBeenCalledWith(reference);
   });
+
+  it("keeps a failed outbox message visibly retryable", () => {
+    const retry = vi.fn();
+    const event = { event_id: payload.message_id, room_id: "!saved-room-12345:example.com", sender: "@alice:example.com", device_id: "device",
+      type: "message.text", created_at: 1, ciphertext: "cipher", metadata: { mls_epoch: 1 }, signature: "signature" } as ClientEvent;
+    const item = { event_id: event.event_id, message_id: payload.message_id, room_id: event.room_id, event, plaintext: "remember me", payload,
+      status: "failed", attempts: 2, next_attempt_at: 0, last_error: "offline", created_at: 1, updated_at: 1 } as OutboxItem;
+    dispose = render(() => <PendingMessageBubble message={item} onRetry={retry} openMessageReference={vi.fn()}/>, root());
+    expect(document.body.textContent).toContain("发送失败");
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "重试")?.click();
+    expect(retry).toHaveBeenCalledOnce();
+  });
 });

@@ -510,7 +510,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   function roomPreview(room: ServerRoom): string {
     const activity = roomListActivities()[room.room_id]; const currentUserId = session()?.user_id ?? "";
     return composerDraftPreview(composerDrafts()[room.room_id])
-      ?? (activity ? formatRoomActivityPreview(activity, currentUserId, room.kind === "group", (userId) => memberName(room, userId)) : null)
+      ?? (activity ? formatRoomActivityPreview(activity, currentUserId, room.kind === "group", (userId) => memberName(room, userId), t) : null)
       ?? (room.purpose === "saved" ? room.current_seq ? "仅你和你的设备可读" : "保存消息、图片和文件" : room.blocked_by_me ? "已屏蔽" : room.kind === "group" ? `${room.members.length} 人群聊` : room.current_seq ? "端到端加密消息" : "还没有消息");
   }
 
