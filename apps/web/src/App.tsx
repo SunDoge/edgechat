@@ -91,6 +91,7 @@ import { activateLocalProfile, bindLocalProfile, clearLocalProfileToken, createL
 import { backupHealth } from "./backup-health";
 import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE, type StartupFailure } from "./startup-recovery";
 import { StartupRecoveryScreen } from "./components/StartupRecoveryScreen";
+import { NoticeToast, type NoticePriority } from "./components/NoticeToast";
 import { inspectLocalStorageHealth, requestPersistentLocalStorage, type LocalStorageHealth, type PersistenceRequestResult } from "./local-storage-health";
 import { clearAccountExportStaging, createAccountExportStaging, createBoundedAccountExportBuffer, createBoundedConversationExportBuffer, createConversationExportStaging, isAccountExportStorageError, type AccountExportStaging, type ConversationExportStaging } from "./account-export-staging";
 import { startsNewMessageDay } from "./message-date";
@@ -192,7 +193,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [newRoom, setNewRoom] = createSignal(false);
   const [newRoomContact, setNewRoomContact] = createSignal<ContactIdentity | null>(null);
   const [contactShareOpen, setContactShareOpen] = createSignal(false);
-  const [notice, setNotice] = createSignal(initialNotice);
+  const [notice, setNoticeState] = createSignal<{ text: string; priority: NoticePriority } | null>(initialNotice ? { text: initialNotice, priority: "status" } : null);
+  const setNotice = (text: string) => setNoticeState(text ? { text, priority: "status" } : null);
+  const setErrorNotice = (text: string) => setNoticeState(text ? { text, priority: "alert" } : null);
   const [pwaUpdateState, setPwaUpdateState] = createSignal<PwaUpdateState>("idle");
   const [pwaInstallState, setPwaInstallState] = createSignal<PwaInstallState>({ status: "unavailable", platform: "browser" });
   const [pushStatus, setPushStatus] = createSignal<PushStatus>("off");
@@ -367,7 +370,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await navigator.clipboard.writeText(text);
       setNotice(t("workspace.feedback.copySuccess"));
     } catch {
-      setNotice(t("workspace.feedback.copyError"));
+      setErrorNotice(t("workspace.feedback.copyError"));
     }
   }
 
@@ -489,7 +492,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const operation = draftWriteTail.then(write, write);
     draftWriteTail = operation.catch((cause) => {
       console.warn(JSON.stringify({ message: "local composer draft persistence failed", room_id: roomId, error: cause instanceof Error ? cause.message : String(cause) }));
-      setNotice(t("workspace.feedback.draftSaveError"));
+      setErrorNotice(t("workspace.feedback.draftSaveError"));
     });
     void draftWriteTail.then(() => { if (connectionState() === "online") scheduleDraftSync(); });
     return operation;
@@ -520,9 +523,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       persistDraft: () => flushComposerDraft(),
       activate: applyPwaUpdate,
     });
-    if (result === "unsafe-media") setNotice(t("workspace.feedback.updateUnsafeMedia"));
-    else if (result === "draft-failed") setNotice(t("workspace.feedback.updateDraftFailed"));
-    else if (result === "unavailable") setNotice(t("workspace.feedback.updateUnavailable"));
+    if (result === "unsafe-media") setErrorNotice(t("workspace.feedback.updateUnsafeMedia"));
+    else if (result === "draft-failed") setErrorNotice(t("workspace.feedback.updateDraftFailed"));
+    else if (result === "unavailable") setErrorNotice(t("workspace.feedback.updateUnavailable"));
   }
 
   async function installPwa(): Promise<void> {
@@ -910,7 +913,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const hasOlder = nextOldest ? await db.hasMessagesBefore(roomId, Number(nextOldest.seq)) : false;
       if (selectedRef === roomId) setOlderMessagesState(hasOlder ? "idle" : "end");
     } catch (cause) {
-      if (selectedRef === roomId) { setOlderMessagesState("error"); setNotice(operationErrorMessage(cause, t("workspace.feedback.olderMessagesError"), t)); }
+      if (selectedRef === roomId) { setOlderMessagesState("error"); setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.olderMessagesError"), t)); }
     }
   }
 
@@ -1300,8 +1303,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (!activeMls) return;
         void resumeDeviceRevocations(activeMls).then(() => {
           const target = String(detail.device_id ?? "");
-          if (target && deviceRevocations()[target]?.status === "failed") setNotice(t("devices.linkExpired.failed"));
-        }).catch(() => setNotice(t("devices.linkExpired.failed")));
+          if (target && deviceRevocations()[target]?.status === "failed") setErrorNotice(t("devices.linkExpired.failed"));
+        }).catch(() => setErrorNotice(t("devices.linkExpired.failed")));
       }
       if (detail?.type === "device.link.history.repair" || detail?.type === "device.link.claimed") {
         const activeMls = mlsRef;
@@ -1319,7 +1322,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (detail.pending) {
         mlsProjectionBarrier.add(detail.eventId);
         setLocalProjectionRecoveries((current) => ({ ...current, [detail.eventId]: detail.roomId }));
-        if (!wasPending) setNotice(t("workspace.feedback.localWritePaused"));
+        if (!wasPending) setErrorNotice(t("workspace.feedback.localWritePaused"));
         return;
       }
       mlsProjectionBarrier.settle(detail.eventId);
@@ -1405,7 +1408,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const detail = (received as CustomEvent<{ event: RoomEvent; error: unknown }>).detail;
       console.warn(JSON.stringify({ message: "encrypted room event quarantined", room_id: detail.event.room_id,
         event_id: detail.event.event_id, error: detail.error instanceof Error ? detail.error.message : String(detail.error) }));
-      setNotice(t("workspace.feedback.eventQuarantined"));
+      setErrorNotice(t("workspace.feedback.eventQuarantined"));
     });
     const resumeVisibleSession = () => {
       if (document.visibilityState !== "visible" || !navigator.onLine || foregroundResumePending) return;
@@ -1471,7 +1474,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!currentMls || !currentSession || connectionState() !== "online") return;
     const run = () => { void replenishKeyPackages(currentMls).catch((error) => {
       console.error(JSON.stringify({ message: "MLS KeyPackage replenishment failed", error: error instanceof Error ? error.message : String(error) }));
-      setNotice(t("workspace.feedback.keyPackagesUnavailable"));
+      setErrorNotice(t("workspace.feedback.keyPackagesUnavailable"));
     }); };
     run();
     const timer = window.setInterval(run, 30 * 60_000);
@@ -1571,7 +1574,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       timelineOpeningRoom = null;
       await markRoomRead(roomId);
-    })().catch((cause) => { if (selectedRef === roomId) timelineOpeningRoom = null; setNotice(operationErrorMessage(cause, t("workspace.feedback.openConversationError"), t)); });
+    })().catch((cause) => { if (selectedRef === roomId) timelineOpeningRoom = null; setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.openConversationError"), t)); });
     void refreshRoomIdentityTrust(roomId);
     void db.coverage(roomId).then((value) => setCoverageComplete(value.history_complete));
     void syncRef?.connectRoom(roomId);
@@ -1589,11 +1592,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     parameters.delete("share_target"); parameters.delete("share_error");
     const cleanUrl = `${location.pathname}${parameters.size ? `?${parameters}` : ""}${location.hash}`;
     history.replaceState(history.state, "", cleanUrl);
-    if (!id) { setNotice(rawShareId ? t("shareTarget.error.invalidReference") : shareTargetErrorMessage("storage", t)); return; }
+    if (!id) { setErrorNotice(rawShareId ? t("shareTarget.error.invalidReference") : shareTargetErrorMessage("storage", t)); return; }
     void loadStagedShare(id).then((share) => {
       if (share) setIncomingShare(share);
-      else setNotice(t("shareTarget.error.expired"));
-    }).catch(() => setNotice(shareTargetErrorMessage("storage", t)));
+      else setErrorNotice(t("shareTarget.error.expired"));
+    }).catch(() => setErrorNotice(shareTargetErrorMessage("storage", t)));
   });
 
   createEffect(() => {
@@ -1616,7 +1619,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     void api.profile(target.userId).then(({ profile: invited }) => {
       if (session()?.user_id !== currentSession.user_id || invited.user_id !== target.userId) return;
       setNewRoomContact({ user_id: invited.user_id, display_name: invited.display_name }); setNewRoom(true);
-    }).catch((cause) => setNotice(operationErrorMessage(cause, t("contactInvite.open.notFound"), t)));
+    }).catch((cause) => setErrorNotice(operationErrorMessage(cause, t("contactInvite.open.notFound"), t)));
   });
 
   createEffect(() => {
@@ -1732,7 +1735,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       stopTyping(room.room_id); composerRevision += 1; setCompose(""); setFiles([]); setVoiceDurationMs(null); setReplyingTo(null); setQuoting(null); clearComposerDraft(room.room_id);
       if (media.unsupportedImages) setNotice(t("send.imageOptimizationFallback", { count: media.unsupportedImages }));
       else if (media.optimizedImages) setNotice(t("send.imageOptimized", { count: media.optimizedImages }));
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("send.error"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("send.error"), t)); }
     finally { setSendBusy(false); }
   }
 
@@ -1740,10 +1743,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const result = appendComposerFiles(files(), selectedFiles, attachmentLimits());
     if (!result.ok) {
       const limits = attachmentLimits();
-      if (result.reason === "invalid_file") setNotice(t("workspace.composer.invalidFile"));
-      else if (result.reason === "file_too_large") setNotice(t("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) }));
-      else if (result.reason === "too_many_files") setNotice(t("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message }));
-      else setNotice(t("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) }));
+      if (result.reason === "invalid_file") setErrorNotice(t("workspace.composer.invalidFile"));
+      else if (result.reason === "file_too_large") setErrorNotice(t("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) }));
+      else if (result.reason === "too_many_files") setErrorNotice(t("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message }));
+      else setErrorNotice(t("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) }));
       return;
     }
     setFiles(result.files); setVoiceDurationMs(null);
@@ -1958,7 +1961,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     try {
       const saved = await ensureSavedRoom();
       setSelectedId(saved.room_id);
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.openSavedError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.openSavedError"), t)); }
   }
 
   async function saveMessage(source: LocalMessage): Promise<void> {
@@ -1969,7 +1972,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await forwardMessage(source, saved.room_id, t("workspace.feedback.messageSaved"), {
         kind: "message", message_id: source.message_id as MessageId, room_id: source.room_id,
       });
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.saveMessageError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.saveMessageError"), t)); }
     finally { setSavingMessageId(null); }
   }
 
@@ -1979,7 +1982,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await db.saveRoomPreference(next);
       setRoomPreferences((value) => ({ ...value, [roomId]: next }));
       if (action === "archive" && next.archived_at !== null && selectedRef === roomId) setSelectedId(null);
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.roomPreferenceError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.roomPreferenceError"), t)); }
   }
 
   async function setRoomMute(roomId: RoomId, mutedUntil: number | null): Promise<void> {
@@ -1993,7 +1996,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         : next.muted_until === Number.MAX_SAFE_INTEGER
           ? t("workspace.feedback.notificationsMutedIndefinitely")
           : t("workspace.feedback.notificationsMutedUntil", { date: new Date(next.muted_until).toLocaleString(locale()) }));
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.muteError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.muteError"), t)); }
   }
 
   async function setRoomReadState(roomId: RoomId, markedUnread: boolean): Promise<void> {
@@ -2011,7 +2014,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await refreshUnreadCounts();
       if (!markedUnread) void sendReadReceipt(roomId, true).catch(() => undefined);
       setNotice(markedUnread ? t("workspace.feedback.markedUnread") : t("workspace.feedback.markedRead"));
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.readStateError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.readStateError"), t)); }
   }
 
   async function updateLocalRetention(roomId: RoomId, days: LocalRetentionDays | null): Promise<number> {
@@ -2130,13 +2133,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function finishCreatedRoom(roomId: RoomId, encryptedName: string | null, profileQueued: boolean): Promise<void> {
     try { await loadRooms(); }
     catch {
-      setNotice(t("workspace.feedback.roomCreatedRefreshError"));
+      setErrorNotice(t("workspace.feedback.roomCreatedRefreshError"));
       return;
     }
     setSelectedId(roomId);
     if (!encryptedName || profileQueued) return;
     try { await updateRoomProfile(roomId, encryptedName); }
-    catch { setNotice(t("workspace.feedback.roomCreatedProfileError")); }
+    catch { setErrorNotice(t("workspace.feedback.roomCreatedProfileError")); }
   }
 
   async function toggleHiddenGroupMember(roomId: RoomId, userId: UserId, hidden: boolean): Promise<void> {
@@ -2171,7 +2174,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
     } catch (cause) {
       if (!room.blocked_by_me) void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-      setNotice(operationErrorMessage(cause, t("workspace.feedback.blockError"), t));
+      setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.blockError"), t));
     }
   }
 
@@ -2182,7 +2185,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (selectedRef === room.room_id) await refreshRoomProjection(room.room_id, true);
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
       setNotice(t("workspace.feedback.requestAccepted"));
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.acceptRequestError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.acceptRequestError"), t)); }
   }
 
   async function rejectMessageRequest(room: ServerRoom): Promise<void> {
@@ -2194,7 +2197,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setNotice(t("workspace.feedback.requestRejected"));
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-      setNotice(operationErrorMessage(cause, t("workspace.feedback.rejectRequestError"), t));
+      setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.rejectRequestError"), t));
     }
   }
 
@@ -2209,7 +2212,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setNotice(t("workspace.feedback.requestReported"));
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-      setNotice(operationErrorMessage(cause, t("workspace.feedback.reportRequestError"), t));
+      setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.reportRequestError"), t));
     }
   }
 
@@ -2340,7 +2343,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const payload: MessageEditPayload = { version: 1, kind: "message.edit", target: { kind: "message", message_id: target.message_id as MessageId, room_id: room.room_id }, text, edited_at: editedAt };
       await enqueueRelationEvent("message.edit", target, payload);
       stopTyping(room.room_id); composerRevision += 1; setEditingMessage(null); setCompose(""); clearComposerDraft(room.room_id); setNotice(t("workspace.feedback.editQueued"));
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.editMessageError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.editMessageError"), t)); }
     finally { setSendBusy(false); }
   }
 
@@ -2350,7 +2353,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const updatedAt = Date.now();
       const payload: MessageReactionPayload = { version: 1, kind: "message.reaction", target: { kind: "message", message_id: target.message_id as MessageId, room_id: room.room_id }, reaction, updated_at: updatedAt };
       await enqueueRelationEvent("message.reaction", target, payload);
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.reactionError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.reactionError"), t)); }
   }
 
   function beginReply(message: LocalMessage) {
@@ -2426,7 +2429,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           payload: payload as unknown as Record<string, unknown>, metadata: { target_event_id: message.event_id } });
       });
       setPendingMessages(await db.outbox(room.room_id));
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.retractError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.retractError"), t)); }
   }
 
   async function retryMessage(eventId: string) {
@@ -2525,7 +2528,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (searchQuery().trim()) void runSearch(searchQuery());
     } catch {
       setSemanticStatus("error");
-      setNotice(t("workspace.feedback.semanticPreferenceError"));
+      setErrorNotice(t("workspace.feedback.semanticPreferenceError"));
     }
   }
   async function disableSemanticSearch(): Promise<void> {
@@ -2542,7 +2545,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (searchQuery().trim()) await runSearch(searchQuery());
       setNotice(t("workspace.feedback.semanticDisabled"));
     } catch {
-      setNotice(t("workspace.feedback.semanticCleanupIncomplete"));
+      setErrorNotice(t("workspace.feedback.semanticCleanupIncomplete"));
     }
   }
   function openSearchResult(roomId: RoomId, messageId: string) {
@@ -2553,7 +2556,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const target = await db.message(roomId, messageId);
         if (!canApplyHistoryNavigation(revision, timelineNavigationRevision, roomId, selectedRef)) return;
         if (!target) {
-          setHistoryFocus(null); setNotice(t("workspace.feedback.historyMessageMissing")); return;
+          setHistoryFocus(null); setErrorNotice(t("workspace.feedback.historyMessageMissing")); return;
         }
         if (messages().some((message) => message.room_id === roomId && message.message_id === messageId)) {
           jumpToMessage(messageId); return;
@@ -2562,7 +2565,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const page = await db.messageWindow(roomId, Number(target.seq));
         if (!canApplyHistoryNavigation(revision, timelineNavigationRevision, roomId, selectedRef)) return;
         if (!page.messages.some((message) => message.message_id === messageId)) {
-          setHistoryFocus(null); setNotice(t("workspace.feedback.historyMessageOpenError")); return;
+          setHistoryFocus(null); setErrorNotice(t("workspace.feedback.historyMessageOpenError")); return;
         }
         setMessages(page.messages);
         setOlderMessagesState(page.hasOlder ? "idle" : "end");
@@ -2571,7 +2574,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       })().catch((cause) => {
         if (!canApplyHistoryNavigation(revision, timelineNavigationRevision, roomId, selectedRef)) return;
         setHistoryFocus(null);
-        setNotice(operationErrorMessage(cause, t("workspace.feedback.openSearchResultError"), t));
+        setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.openSearchResultError"), t));
       });
     }, 0);
   }
@@ -2590,7 +2593,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setHistoryFocus(null);
     setOlderMessagesState("checking");
     try { await refreshRoomProjection(roomId, true); await markRoomRead(roomId); setUnreadBoundary(null); }
-    catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.latestMessagesError"), t)); }
+    catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.latestMessagesError"), t)); }
   }
   async function openDevices() {
     setDevicesOpen(true); setStorage(null); setLocalStorageHealth(null); setInvitationPolicy(null); setProfile(null);
@@ -2599,7 +2602,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const [deviceResult, storageResult, privacyResult, profileResult] = await Promise.all([api.devices(), api.storageUsage(), api.privacy(), api.profile()]);
       setDevices(deviceResult.devices); setStorage(storageResult); setInvitationPolicy(privacyResult.invitation_policy); setProfile(profileResult.profile);
       const current = session(); if (current) setPushStatus(await reconcilePush(api, current.vapid_public_key));
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.accountStateError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.accountStateError"), t)); }
   }
   async function protectLocalStorage(): Promise<PersistenceRequestResult> {
     const result = await requestPersistentLocalStorage();
@@ -2706,7 +2709,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await staging?.abort(cause).catch(() => undefined); staging = null;
       await stagedCleanup?.().catch(() => undefined); stagedCleanup = null;
       if (!(cause instanceof DOMException && cause.name === "AbortError")) {
-        setNotice(isAccountExportStorageError(cause)
+        setErrorNotice(isAccountExportStorageError(cause)
           ? t("workspace.feedback.exportLocalStorageError")
           : operationErrorMessage(cause, t("workspace.feedback.accountExportError"), t));
       }
@@ -2762,7 +2765,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await staging?.abort(cause).catch(() => undefined); staging = null;
       await stagedCleanup?.().catch(() => undefined); stagedCleanup = null;
       if (!(cause instanceof DOMException && cause.name === "AbortError")) {
-        setNotice(isAccountExportStorageError(cause)
+        setErrorNotice(isAccountExportStorageError(cause)
           ? t("workspace.feedback.exportLocalStorageError")
           : operationErrorMessage(cause, t("workspace.feedback.conversationExportError"), t));
       }
@@ -3434,7 +3437,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setNotice(count === 1
         ? t("workspace.feedback.membershipChangeComplete")
         : t("workspace.feedback.membershipChangesComplete", { count }));
-    })().catch((cause) => { setNotice(operationErrorMessage(cause, t("workspace.feedback.membershipChangeError"), t)); })
+    })().catch((cause) => { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.membershipChangeError"), t)); })
       .finally(() => { roomMembershipRun = null; setRoomMembershipBusy(null); });
     roomMembershipRun = run;
     await run;
@@ -3551,7 +3554,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await clearLocalAccount(t("workspace.feedback.accountDisabledElsewhere"));
         return;
       }
-      setNotice(operationErrorMessage(cause, t("workspace.feedback.accountRemovalRetry"), t));
+      setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.accountRemovalRetry"), t));
     }).finally(() => { accountRemovalRun = null; });
     return accountRemovalRun;
   }
@@ -3559,7 +3562,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function revokeDevice(deviceId: string) {
     const existing = deviceRevocations()[deviceId];
     if (!existing && !confirm(t("workspace.feedback.deviceRevocationConfirm"))) return;
-    await executeDeviceRevocation(deviceId).catch((cause) => setNotice(operationErrorMessage(cause, t("workspace.feedback.deviceRevocationError"), t)));
+    await executeDeviceRevocation(deviceId).catch((cause) => setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.deviceRevocationError"), t)));
   }
   async function enablePush() {
     try {
@@ -3568,17 +3571,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (status === "on") setNotice(t("workspace.feedback.pushEnabled"));
       else if (status === "blocked") setNotice(t("workspace.feedback.pushBlocked"));
       else if (status === "unsupported") setNotice(t("workspace.feedback.pushUnsupported"));
-    } catch (cause) { setPushStatus("error"); setNotice(operationErrorMessage(cause, t("workspace.feedback.pushEnableError"), t)); }
+    } catch (cause) { setPushStatus("error"); setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.pushEnableError"), t)); }
   }
   async function turnOffPush() {
     try { setPushStatus("repairing"); await disablePush(api); setPushStatus("off"); setNotice(t("workspace.feedback.pushDisabled")); }
-    catch (cause) { setPushStatus("error"); setNotice(operationErrorMessage(cause, t("workspace.feedback.pushDisableError"), t)); }
+    catch (cause) { setPushStatus("error"); setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.pushDisableError"), t)); }
   }
   async function downloadAttachment(attachment: AttachmentMetadata) {
     try {
       const plaintext = await decryptAttachment(attachment);
       const url = URL.createObjectURL(new Blob([plaintext], { type: attachment.type })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = attachment.name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1_000);
-    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.attachmentDecryptError"), t)); }
+    } catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.attachmentDecryptError"), t)); }
   }
   async function loadAttachmentCiphertext(id: string): Promise<ArrayBuffer> {
     return attachmentLoader.load(id);
@@ -3646,7 +3649,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function logout() {
     if (!confirm(t("workspace.feedback.localProfileDeleteConfirm"))) return;
     try { await removeCurrentLocalProfile(); }
-    catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.localProfileDeleteError"), t)); }
+    catch (cause) { setErrorNotice(operationErrorMessage(cause, t("workspace.feedback.localProfileDeleteError"), t)); }
   }
 
   const Workspace = () => {
@@ -3743,7 +3746,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={passwordChangeOpen()}><PasswordChangeDialog onChange={changeAccountPassword} onClose={() => setPasswordChangeOpen(false)}/></Show>
       <Show when={passkeysOpen()}><Suspense fallback={<DeferredDialog id="passkeys-loading" onClose={() => setPasskeysOpen(false)}/>}><PasskeyDialog api={api} accountCredential={identity()?.accountCredential} onClose={() => setPasskeysOpen(false)}/></Suspense></Show>
       <Show when={accountDeletionOpen()}><AccountDeletionDialog accountCredential={identity()?.accountCredential} onDelete={deleteAccount} onClose={() => setAccountDeletionOpen(false)}/></Show>
-      <Show when={notice()}><div role="status" class={`fixed left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg bg-neutral-900 px-3 py-2 text-sm text-white shadow-lg ${pwaUpdateState() === "idle" ? "bottom-5" : "top-5"}`}><span class="min-w-0">{notice()}</span><button type="button" aria-label={t("workspace.notice.dismiss")} class="grid size-8 shrink-0 place-items-center rounded-md hover:bg-white/10" onClick={() => setNotice("")}><IconX class="size-4 stroke-white"/></button></div></Show>
+      <Show when={notice()}>{(current) => <NoticeToast text={current().text} priority={current().priority} dismissLabel={t("workspace.notice.dismiss")} placement={pwaUpdateState() === "idle" ? "bottom" : "top"} onDismiss={() => setNotice("")}/>}</Show>
     </main>;
   };
 
