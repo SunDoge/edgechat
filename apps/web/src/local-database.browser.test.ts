@@ -14,14 +14,27 @@ async function step<T>(name: string, operation: () => Promise<T>): Promise<T> {
 }
 
 async function removeProfileStorage(profileId: string): Promise<void> {
-  const root = await navigator.storage.getDirectory();
-  for await (const [name] of root.entries()) {
-    if (name.includes(profileId)) await root.removeEntry(name, { recursive: true });
+  if (expectedPersistentBackend() === "opfs") {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) {
+      if (name.includes(profileId)) await root.removeEntry(name, { recursive: true });
+    }
   }
   await new Promise<void>((resolve) => {
     const request = indexedDB.deleteDatabase(`edgechat-local-${profileId}`);
-    request.onsuccess = request.onerror = request.onblocked = () => resolve();
+    request.onsuccess = request.onblocked = () => resolve();
+    request.onerror = (event) => { event.preventDefault(); resolve(); };
   });
+}
+
+function expectedPersistentBackend(): "opfs" | "indexeddb" {
+  // Playwright WebKit currently lacks the synchronous OPFS handle required by
+  // PGlite. Chromium and Firefox exercise OPFS; WebKit must exercise the
+  // persistent IndexedDB fallback instead. Checking the global constructor is
+  // insufficient because Chromium does not expose it before a handle exists.
+  const isWebKit = /AppleWebKit/i.test(navigator.userAgent)
+    && !/(?:Chrome|Chromium|Firefox)/i.test(navigator.userAgent);
+  return isWebKit ? "indexeddb" : "opfs";
 }
 
 afterEach(async () => {
@@ -30,9 +43,10 @@ afterEach(async () => {
 });
 
 describe("real browser local database", () => {
-  it("persists plaintext history and full-text search across an OPFS worker restart", async () => {
+  it("persists plaintext history and full-text search across a storage worker restart", async () => {
     const profileId = crypto.randomUUID();
     profiles.add(profileId);
+    const expectedStorage = expectedPersistentBackend();
     const roomId = "!browser-storage-test:example.com" as RoomId;
     const messageId = "$browser-storage-message:example.com";
     const event = {
@@ -60,7 +74,7 @@ describe("real browser local database", () => {
       await step("bind account", () => first.bindAccount("@alice:example.com", "Alice"));
       await step("save room", () => first.saveRoom({ room_id: roomId, name: null, kind: "direct", current_seq: 1, joined_seq: 0 }));
       await step("save message", () => first.saveDecryptedEvent(event, "durable starfruit search", payload));
-      expect(first.storage).toBe("opfs");
+      expect(first.storage).toBe(expectedStorage);
     } finally {
       await first.close();
     }
@@ -71,7 +85,7 @@ describe("real browser local database", () => {
       expect(await step("reopen search", () => reopened.search("starfruit", roomId))).toEqual([
         expect.objectContaining({ message_id: messageId, room_id: roomId, plaintext: "durable starfruit search" }),
       ]);
-      expect(reopened.storage).toBe("opfs");
+      expect(reopened.storage).toBe(expectedStorage);
     } finally {
       await reopened.close();
     }

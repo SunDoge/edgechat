@@ -12,10 +12,11 @@ const systemChrome = configuredChrome || [
   "/usr/bin/chromium-browser",
 ].find(existsSync);
 const requestedBrowser = process.env.EDGECHAT_BROWSER ?? "chromium";
-if (requestedBrowser !== "chromium" && requestedBrowser !== "firefox") throw new Error(`Unsupported EDGECHAT_BROWSER: ${requestedBrowser}`);
-const browserName: "chromium" | "firefox" = requestedBrowser;
+if (requestedBrowser !== "chromium" && requestedBrowser !== "firefox" && requestedBrowser !== "webkit") throw new Error(`Unsupported EDGECHAT_BROWSER: ${requestedBrowser}`);
+const browserName: "chromium" | "firefox" | "webkit" = requestedBrowser;
 const configuredFirefox = process.env.EDGECHAT_FIREFOX_PATH;
-const executablePath = browserName === "firefox" ? configuredFirefox : systemChrome;
+const configuredWebKit = process.env.EDGECHAT_WEBKIT_PATH;
+const executablePath = browserName === "firefox" ? configuredFirefox : browserName === "webkit" ? configuredWebKit : systemChrome;
 
 export default defineConfig({
   plugins: [tailwindcss(), solid()],

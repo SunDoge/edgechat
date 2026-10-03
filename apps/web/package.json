@@ -10,8 +10,11 @@
     "test": "vitest run --passWithNoTests --exclude 'src/**/*.browser.test.ts'",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "browser:install:firefox": "node node_modules/playwright/cli.js install firefox",
+    "browser:install:webkit": "node node_modules/playwright/cli.js install webkit",
+    "browser:install:matrix": "node node_modules/playwright/cli.js install firefox webkit",
     "test:browser:firefox": "EDGECHAT_BROWSER=firefox vitest run --config vitest.browser.config.ts",
-    "test:browser:matrix": "pnpm run test:browser && pnpm run test:browser:firefox",
+    "test:browser:webkit": "EDGECHAT_BROWSER=webkit vitest run --config vitest.browser.config.ts",
+    "test:browser:matrix": "pnpm run test:browser && pnpm run test:browser:firefox && pnpm run test:browser:webkit",
     "test:pwa": "node scripts/pwa-offline.mjs"
   },
   "dependencies": {
