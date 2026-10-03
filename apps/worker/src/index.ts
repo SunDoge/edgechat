@@ -216,6 +216,19 @@ function assertClientProtocol(request: Request): void {
   }
 }
 
+/** Classifies only structural SQLite failures that an unapplied D1 migration can cause. */
+export function isDatabaseSchemaMismatch(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const message = current instanceof Error ? current.message : typeof current === "string" ? current : "";
+    const databaseError = /(?:\bD1_ERROR\b|\bSQLITE_(?:ERROR|SCHEMA)\b)/iu.test(message);
+    const missingStructure = /(?:\bno such (?:table|column)\b|\bhas no column named\b)/iu.test(message);
+    if (databaseError && missingStructure) return true;
+    current = current instanceof Error ? current.cause : null;
+  }
+  return false;
+}
+
 function requireArchiveCompaction(env: Env): void {
   if (!archiveCompactionEnabled(env)) {
     throw new HttpError(503, "Client archive compaction is disabled on this server", "archive_compaction_disabled");
@@ -5165,6 +5178,10 @@ export default {
     }
     catch (error) {
       if (error instanceof HttpError) return hardenApiResponse(json({ error: error.message, code: error.code }, error.status, error.headers), protocolResponseHeaders());
+      if (isApi && isDatabaseSchemaMismatch(error)) {
+        console.error(JSON.stringify({ message: "database schema upgrade required", path: new URL(request.url).pathname }));
+        return hardenApiResponse(json({ error: "Server database schema must be upgraded", code: "server_upgrade_required" }, 503), protocolResponseHeaders());
+      }
       console.error(JSON.stringify({ message: "request failed", path: new URL(request.url).pathname, error: error instanceof Error ? error.message : String(error) }));
       return hardenApiResponse(json({ error: "Internal server error", code: "internal_error" }, 500), protocolResponseHeaders());
     }

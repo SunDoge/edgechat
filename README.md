@@ -390,11 +390,10 @@ Requirements: Node.js 22+, pnpm 11, Rust with the `wasm32-unknown-unknown` targe
 ```bash
 rustup target add wasm32-unknown-unknown
 pnpm install
-pnpm run db:migrate:local
 pnpm run dev
 ```
 
-The Vite client and Worker dev server run together. `SERVER_NAME` defaults to `localhost`, so local IDs look like `@alice:localhost`.
+The Vite client and Worker dev server run together. Worker startup first applies every pending migration to the local Wrangler D1 store non-interactively, so a newly pulled schema cannot leave authentication behind the hot-reloaded code. `pnpm run db:migrate:local` remains available as an explicit repair/inspection command. `SERVER_NAME` defaults to `localhost`, so local IDs look like `@alice:localhost`.
 
 Useful checks:
 
@@ -405,6 +404,8 @@ pnpm run build
 ```
 
 `pnpm run db:types` rebuilds `apps/worker/src/database.generated.ts` from all D1 migrations through `kysely-codegen`; the full check verifies that the committed type file is current. It also verifies the immutable D1 migration SHA-256 manifest, contiguous numbering, and explicit rollout policy for newly recorded expand/data/contract migrations. Local PGlite databases have their own contiguous, SHA-256-pinned migration history: each pending migration runs in one transaction, a client refuses a database written by a newer schema version, and restored databases pass through the same migration gate before their staging slot becomes active. Published local migration SQL is immutable; add a new entry in `packages/db/src/migrations.ts` instead of editing `LOCAL_SCHEMA` or an earlier entry. These local checks use OPFS/IndexedDB only and create no D1 or R2/S3 traffic. `pnpm run build` compiles the Rust crate for `wasm32`, builds the PWA, and performs a Wrangler deployment dry run.
+
+Production migrations remain an explicit operator step before deployment. If application code reaches a D1 database that is structurally behind, the Worker returns a sanitized `503 server_upgrade_required` response instead of a generic authentication failure or raw SQL detail. This diagnosis uses the failing request itself and performs no extra D1 or R2/S3 operation.
 
 ## Cloudflare deployment
 

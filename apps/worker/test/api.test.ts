@@ -1,7 +1,7 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, deviceSessionProofBytes, type ClientEvent, type DeviceSessionChallenge, type DraftEnvelope, type EventId, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
-import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredDeviceSessionChallenges, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, processPendingAttachmentDeletions, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
+import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredDeviceSessionChallenges, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, isDatabaseSchemaMismatch, processPendingAttachmentDeletions, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
 import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push";
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
 import type { Env } from "../src/env";
@@ -38,6 +38,13 @@ it("enables archive compaction only through an explicit server capability", () =
   expect(archiveCompactionEnabled({ ARCHIVE_COMPACTION_ENABLED: "true" })).toBe(true);
   expect(archiveCompactionEnabled({ ARCHIVE_COMPACTION_ENABLED: "false" })).toBe(false);
   expect(archiveCompactionEnabled({ ARCHIVE_COMPACTION_ENABLED: "TRUE" })).toBe(false);
+});
+
+it("classifies only structural D1 schema failures as an upgrade requirement", () => {
+  expect(isDatabaseSchemaMismatch(new Error("D1_ERROR: table users has no column named account_mode: SQLITE_ERROR"))).toBe(true);
+  expect(isDatabaseSchemaMismatch(new Error("D1 query failed", { cause: new Error("no such table: passkeys: SQLITE_ERROR") }))).toBe(true);
+  expect(isDatabaseSchemaMismatch(new Error("no such column in the user message"))).toBe(false);
+  expect(isDatabaseSchemaMismatch(new Error("D1_ERROR: UNIQUE constraint failed: SQLITE_CONSTRAINT"))).toBe(false);
 });
 
 it("advertises protocol capabilities and rejects impossible version ranges before storage work", async () => {

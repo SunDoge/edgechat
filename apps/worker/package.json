@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "exec env WRANGLER_HIDE_BANNER=true wrangler dev --port 8787",
+    "dev": "env CI=1 WRANGLER_HIDE_BANNER=true wrangler d1 migrations apply edgechat-db --local && exec env WRANGLER_HIDE_BANNER=true wrangler dev --port 8787",
     "build": "exec env WRANGLER_SEND_METRICS=false WRANGLER_HIDE_BANNER=true wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit",
     "test": "node --test scripts/migration-policy.node.mjs && vitest run",

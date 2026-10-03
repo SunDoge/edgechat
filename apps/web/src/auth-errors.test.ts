@@ -6,6 +6,7 @@ describe("authentication error copy", () => {
   it("turns protocol errors into concise recovery guidance", () => {
     expect(authErrorMessage(new ApiError("Too many requests", 429, "authentication_rate_limited"))).toBe("尝试次数过多，请一分钟后再试");
     expect(authErrorMessage(new ApiError("Invalid credentials", 401, "invalid_credentials"))).toBe("用户名或密码不正确");
+    expect(authErrorMessage(new ApiError("Schema mismatch", 503, "server_upgrade_required"))).toBe("服务器版本过旧，请联系管理员升级");
     expect(authErrorMessage(new ApiError("Internal error", 503, "internal_error"))).toBe("服务器暂时不可用，请稍后再试");
   });
 
