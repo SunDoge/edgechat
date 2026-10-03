@@ -1234,6 +1234,49 @@ describe("ArchiveSegmentReader metadata cache", () => {
     expect(segmentRange).toHaveBeenCalledTimes(4); // header + envelope/index once, then one independently authenticated chunk per read
   });
 
+  it("single-flights identical remote ranges and reuses only authenticated chunks", async () => {
+    const roomId = "!archive-single-flight:example.com" as const;
+    const event = { event_id: "$single-flight-1:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "alice-device",
+      type: "message.text" as const, created_at: 1, ciphertext: "cipher", metadata: {}, signature: "signature" } as RoomEvent;
+    const key = crypto.getRandomValues(new Uint8Array(32)); const envelope = new Uint8Array(96).fill(6);
+    const built = await buildSegment(roomId, "archive_single_flight_01", [event], key, envelope, 180);
+    const descriptor = { segment_id: "archive_single_flight_01", start_seq: 1, end_seq: 1, byte_size: built.bytes.length };
+    const segmentRange = vi.fn(async (_room: string, _segment: string, offset: number, length: number) => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return built.bytes.slice(offset, offset + length);
+    });
+    const reader = new ArchiveSegmentReader({ segmentRange } as unknown as ApiClient, async () => key);
+
+    const [first, second] = await Promise.all([reader.read(roomId, descriptor), reader.read(roomId, descriptor)]);
+    expect(first).toEqual([event]); expect(second).toEqual([event]);
+    expect(segmentRange).toHaveBeenCalledTimes(3); // header, envelope/index, and one chunk—not twice for two readers.
+    await expect(reader.read(roomId, descriptor)).resolves.toEqual([event]);
+    expect(segmentRange).toHaveBeenCalledTimes(5); // metadata was not persisted, but the authenticated chunk stayed session-local.
+  });
+
+  it("evicts verified archive ranges within a strict byte budget", async () => {
+    const roomId = "!archive-range-budget:example.com" as const;
+    const events = [1, 2].map((seq) => ({ event_id: `$range-budget-${seq}:example.com`, room_id: roomId, seq,
+      sender: "@alice:example.com", device_id: "alice-device", type: "message.text" as const, created_at: seq,
+      ciphertext: `cipher-${seq}`, metadata: {}, signature: `signature-${seq}` } as RoomEvent));
+    const key = crypto.getRandomValues(new Uint8Array(32)); const envelope = new Uint8Array(96).fill(7);
+    const built = await buildSegment(roomId, "archive_range_budget_01", events, key, envelope, 1);
+    const descriptor = { segment_id: "archive_range_budget_01", start_seq: 1, end_seq: 2, byte_size: built.bytes.length };
+    const segmentRange = vi.fn(async (_room: string, _segment: string, offset: number, length: number) => built.bytes.slice(offset, offset + length));
+    let cached: Awaited<ReturnType<ArchiveMetadataCache["archiveSegmentMetadata"]>> = null;
+    const cache: ArchiveMetadataCache = {
+      archiveSegmentMetadata: async () => cached,
+      saveArchiveSegmentMetadata: async (value) => { cached = value; },
+      removeArchiveSegmentMetadata: async () => { cached = null; },
+    };
+    const reader = new ArchiveSegmentReader({ segmentRange } as unknown as ApiClient, async () => key, cache, undefined,
+      { maxBytes: 1, maxItemBytes: 1 });
+
+    await reader.read(roomId, descriptor, [1]);
+    await reader.read(roomId, descriptor, [1]);
+    expect(segmentRange).toHaveBeenCalledTimes(4); // header + index, then the same oversized-for-budget chunk twice.
+  });
+
   it("uses a linked-device OPFS segment without R2 and evicts a corrupted local copy before retrying", async () => {
     const roomId = "!archive-local-0001:example.com" as const;
     const event = { event_id: "$local-event-1:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "alice-device",

@@ -1306,9 +1306,23 @@ export type ArchiveMetadataCache = {
   removeArchiveSegmentMetadata(segmentId: string): Promise<void>;
 };
 export type ArchiveCiphertextSource = { get(segmentId: string): Promise<ArrayBuffer | null>; remove?(segmentId: string): Promise<void> };
+export type ArchiveRangeCacheLimits = { maxBytes?: number; maxItemBytes?: number };
+export const DEFAULT_ARCHIVE_RANGE_CACHE_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_ARCHIVE_RANGE_CACHE_ITEM_BYTES = 512 * 1024;
 
 export class ArchiveSegmentReader {
-  constructor(private api: ApiClient, private resolveKey: ArchiveKeyResolver, private metadataCache?: ArchiveMetadataCache, private ciphertextSource?: ArchiveCiphertextSource) {}
+  private readonly remoteRangeLoads = new Map<string, Promise<Uint8Array<ArrayBuffer>>>();
+  private readonly verifiedRanges = new Map<string, Uint8Array<ArrayBuffer>>();
+  private verifiedRangeBytes = 0;
+  private readonly maxVerifiedRangeBytes: number;
+  private readonly maxVerifiedRangeItemBytes: number;
+
+  constructor(private api: ApiClient, private resolveKey: ArchiveKeyResolver, private metadataCache?: ArchiveMetadataCache,
+    private ciphertextSource?: ArchiveCiphertextSource, limits: ArchiveRangeCacheLimits = {}) {
+    this.maxVerifiedRangeBytes = finiteByteLimit(limits.maxBytes, DEFAULT_ARCHIVE_RANGE_CACHE_BYTES);
+    this.maxVerifiedRangeItemBytes = Math.min(this.maxVerifiedRangeBytes,
+      finiteByteLimit(limits.maxItemBytes, DEFAULT_ARCHIVE_RANGE_CACHE_ITEM_BYTES));
+  }
 
   private async verifiedMetadata(roomId: RoomId, segment: ArchiveSegmentDescriptor, range: (offset: number, length: number) => Promise<Uint8Array<ArrayBuffer>>) {
     const decode = async (headerBytes: Uint8Array<ArrayBuffer>, envelopeAndIndex: Uint8Array<ArrayBuffer>) => {
@@ -1356,7 +1370,7 @@ export class ArchiveSegmentReader {
 
   private async readFrom(roomId: RoomId, segment: ArchiveSegmentDescriptor, sequences: number[] | undefined, local: Uint8Array<ArrayBuffer> | null): Promise<RoomEvent[]> {
     const readRange = async (offset: number, length: number) => {
-      if (!local) return this.api.segmentRange(roomId, segment.segment_id, offset, length);
+      if (!local) return this.remoteRange(roomId, segment, offset, length);
       if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1 || offset + length > local.length) throw new Error("Cached archive range is invalid");
       return local.slice(offset, offset + length);
     };
@@ -1370,6 +1384,7 @@ export class ArchiveSegmentReader {
       const events = await decodeSegmentChunk(roomId, segment.segment_id, range.chunk, encryptedChunk, segmentKey, index.chunks[range.chunk].uncompressed_length);
       const descriptor = index.chunks[range.chunk];
       if (events.length !== descriptor.last_seq - descriptor.first_seq + 1 || events.some((event, eventIndex) => event.room_id !== roomId || event.seq !== descriptor.first_seq + eventIndex)) throw new Error("Archive chunk event sequence mismatch");
+      if (!local) this.rememberVerifiedRange(this.rangeKey(roomId, segment, range.offset, range.length), encryptedChunk);
       for (const event of events) if (wantedSequences.has(event.seq)) selected.push(event);
     }
     selected.sort((left, right) => left.seq - right.seq);
@@ -1377,6 +1392,46 @@ export class ArchiveSegmentReader {
     if (selected.length !== expected.length || selected.some((event, index) => event.seq !== expected[index])) throw new Error("Archive segment selection is incomplete");
     return selected;
   }
+
+  private rangeKey(roomId: RoomId, segment: ArchiveSegmentDescriptor, offset: number, length: number): string {
+    return `${roomId}|${segment.segment_id}|${segment.byte_size}|${offset}|${length}`;
+  }
+
+  private async remoteRange(roomId: RoomId, segment: ArchiveSegmentDescriptor, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>> {
+    const key = this.rangeKey(roomId, segment, offset, length);
+    const verified = this.takeVerifiedRange(key);
+    if (verified) return verified;
+    const existing = this.remoteRangeLoads.get(key);
+    if (existing) return existing;
+    const pending = this.api.segmentRange(roomId, segment.segment_id, offset, length);
+    this.remoteRangeLoads.set(key, pending);
+    try { return await pending; }
+    finally { if (this.remoteRangeLoads.get(key) === pending) this.remoteRangeLoads.delete(key); }
+  }
+
+  private takeVerifiedRange(key: string): Uint8Array<ArrayBuffer> | null {
+    const bytes = this.verifiedRanges.get(key);
+    if (!bytes) return null;
+    this.verifiedRanges.delete(key); this.verifiedRanges.set(key, bytes);
+    return bytes;
+  }
+
+  private rememberVerifiedRange(key: string, bytes: Uint8Array<ArrayBuffer>): void {
+    if (!bytes.byteLength || bytes.byteLength > this.maxVerifiedRangeItemBytes) return;
+    const previous = this.verifiedRanges.get(key);
+    if (previous) { this.verifiedRanges.delete(key); this.verifiedRangeBytes -= previous.byteLength; }
+    while (this.verifiedRangeBytes + bytes.byteLength > this.maxVerifiedRangeBytes) {
+      const oldest = this.verifiedRanges.entries().next().value as [string, Uint8Array<ArrayBuffer>] | undefined;
+      if (!oldest) break;
+      this.verifiedRanges.delete(oldest[0]); this.verifiedRangeBytes -= oldest[1].byteLength;
+    }
+    if (this.verifiedRangeBytes + bytes.byteLength > this.maxVerifiedRangeBytes) return;
+    this.verifiedRanges.set(key, bytes); this.verifiedRangeBytes += bytes.byteLength;
+  }
+}
+
+function finiteByteLimit(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value! >= 0 ? Math.floor(value!) : fallback;
 }
 
 export class ProgressiveHistoryIndexer {
