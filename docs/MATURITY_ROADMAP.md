@@ -109,6 +109,9 @@ Voice/video calling and an in-chat application platform are later product decisi
 
 R2 is the encrypted blob/archive plane, never the live event database or search index.
 
+- [x] All production object-plane access is behind an exact-key provider-neutral `ObjectStore` contract with no list operation. Native R2 and path-style SigV4 S3/B2 adapters cover metadata, signed SHA-256 rejection, create-if-absent writes, normalized strict Range reads and batch exact-key deletion; D1 remains authoritative and one provider is selected per deployment.
+- [ ] Run and record the object-store contract against a real B2 staging bucket, including conditional PUT and streaming payload-hash behavior, and verify a hidden-version lifecycle policy before advertising B2 as production-ready or physical quota reclamation as immediate.
+
 - Attachments use one opaque object because they have independent authorization and deletion lifecycles. Do not create thumbnail objects by default; derive/cache thumbnails locally.
 - Attachment reads are OPFS-first and single-flight per opaque ID. Concurrent render/save consumers share one cold R2 GET, successful retention acknowledgements are coalesced for the app session, and zero-copy forwarding aliases any available local ciphertext without an object read or write.
 - Profile avatars use one current client-resized WebP object per account, capped at 128 KiB. They are quota-accounted, content-addressed for idempotent retry, addressed publicly only through an opaque active ID, and replaced through an exact-key deletion ledger; no old versions or server thumbnails are retained.
@@ -126,7 +129,7 @@ R2 is the encrypted blob/archive plane, never the live event database or search 
 - Cloudflare is the reliable new-device bootstrap and temporary encrypted snapshot relay. Future native iroh and browser WebRTC paths are optional bulk-transfer optimizations behind one peer-transport boundary; browser iroh is relay-only and must not be advertised as LAN-direct.
 - Temporary/multipart prefixes may use short lifecycle cleanup. Failed single-part uploads are deleted immediately and quota reservations are rolled back.
 - Device linking uses temporary, quota-accounted `device-links/<link>/<transfer>/<index>.bin` objects over one versioned bundle containing the gzip PGlite snapshot and cached attachment ciphertext. Plaintext shards are 16 MiB, encrypted directly from the approving device's ECDH key to the new device, deleted individually after authenticated durable local staging, and cron-reclaimed if the new endpoint disappears. They are never split per room, message, or attachment; a 1 GiB bundle produces about 64 objects.
-- Default deployment budget is 2 GiB and 100,000 objects per user, configurable through `USER_R2_QUOTA_BYTES` and `USER_R2_OBJECT_LIMIT`.
+- Default deployment budget is 2 GiB and 100,000 objects per user, configurable through `USER_OBJECT_QUOTA_BYTES` and `USER_OBJECT_LIMIT`.
 
 ## Evidence required before calling this a Delta Chat alternative
 

@@ -4,6 +4,7 @@ import { createDatabase } from "./database";
 import type { AuthContext, Env } from "./env";
 import { verifyPassword } from "./auth";
 import { HttpError, json, randomId, readJson, stringField } from "./http";
+import { objectStore } from "./object-store";
 
 const DEFAULT_PAGE_SIZE = 200;
 const MAX_PAGE_SIZE = 500;
@@ -507,7 +508,7 @@ export async function processAccountDeletion(env: Env, deletionId: string): Prom
     .where("deletion_id", "=", deletionId).where("status", "=", "pending").orderBy("object_key").limit(100).execute();
   if (objects.length) {
     try {
-      await env.ARCHIVE.delete(objects.map((object) => object.object_key));
+      await objectStore(env).delete(objects.map((object) => object.object_key));
       await env.DB.batch(objects.map((object) => env.DB.prepare(
         "UPDATE account_deletion_objects SET status = 'complete', updated_at = ?, last_error = NULL WHERE deletion_id = ? AND object_key = ?",
       ).bind(Date.now(), deletionId, object.object_key)));

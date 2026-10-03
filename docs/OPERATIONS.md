@@ -147,11 +147,59 @@ history below the authoritative retention floor.
 
 ## R2/S3 posture
 
-R2 already provides the durable ciphertext object plane. EdgeChat does not make
-a second R2/S3 copy by default, does not store plaintext backups, and does not
+R2 currently provides the durable ciphertext object plane through the Worker's
+provider-neutral `ObjectStore` interface. Production code uses only exact-key
+put/get/head/delete operations; the interface intentionally has no list method.
+The R2 adapter normalizes Range, metadata, SHA-256 mismatch and create-if-absent
+semantics. The SigV4 S3/B2 adapter must pass the same contract against the
+selected live provider before that provider is deployable. D1—not ETag or provider metadata—is
+authoritative for keys, sizes, digests, accounting, retention and repair state.
+
+EdgeChat does not make a second R2/S3 copy by default, does not store plaintext backups, and does not
 enable lifecycle deletion on committed `attachments/` or `rooms/` prefixes.
 Routine readiness uses the D1 ledger; periodic integrity audits may list the
 bucket; client repair covers exact missing ciphertext when an acknowledged device
 still has it. Operators who require an independent provider backup may add one as
 an explicit costed policy, but it is outside the default architecture and must
-preserve ciphertext, opaque keys and deletion/retention semantics.
+preserve ciphertext, opaque keys and deletion/retention semantics. A deployment
+must select one primary provider; default dual writes are prohibited because they
+double object operations and create ambiguous partial-failure semantics.
+
+### Selecting an S3-compatible provider
+
+The checked-in Wrangler configuration selects `r2`. To use Backblaze B2 or
+another path-style SigV4 provider, set these non-secret Worker variables in the
+target environment:
+
+```jsonc
+{
+  "OBJECT_STORE_PROVIDER": "s3",
+  "S3_ENDPOINT": "https://s3.<region>.backblazeb2.com",
+  "S3_REGION": "<region>",
+  "S3_BUCKET": "<private-bucket>"
+}
+```
+
+Store `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` as Worker secrets; set the
+optional `S3_SESSION_TOKEN` secret only for temporary credentials. Never commit
+them or expose them to the PWA. For example, run the interactive commands:
+
+```sh
+pnpm --filter @edgechat/worker exec wrangler secret put S3_ACCESS_KEY_ID
+pnpm --filter @edgechat/worker exec wrangler secret put S3_SECRET_ACCESS_KEY
+```
+
+An S3-only environment may remove the unused `ARCHIVE` R2 binding. Regenerate
+Worker types after changing the target Wrangler configuration. The adapter signs
+each request with SigV4, sends one PUT per object, rejects a provider that ignores
+a byte Range, and groups exact-key deletion into batches of at most 1,000 keys.
+It does not perform hidden automatic retries or bucket listing; durable D1 jobs
+own retries and repair.
+
+Before production selection, run the object-store contract against the actual
+provider and verify conditional PUT, signed streaming SHA-256, custom metadata,
+HEAD, exact `206 Content-Range`, and multi-object deletion. B2 buckets retain
+versions: a name-only delete can leave a hidden prior version, so configure a
+reviewed lifecycle rule for hidden/old versions. Until that lifecycle is proven,
+application quota reclamation may precede physical B2 byte reclamation and B2
+must not be presented as immediate physical erasure.

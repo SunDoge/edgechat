@@ -10,6 +10,7 @@ import { accountDeletionStatus, accountExport, accountExportDrafts, accountExpor
 import { eventReceiptKeyStatus, repairReceiptsEnabled, verifyAcceptanceReceipt } from "./receipt";
 import { cleanupLoginFailureState, clearLoginFailures, limitAuthenticatedRequest, limitUnauthenticatedIpRequest, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "./abuse";
 import { logSecurityEvent } from "./security-events";
+import { ObjectStoreChecksumMismatchError, objectStore, type ObjectStoreObject } from "./object-store";
 export { RoomDurableObject } from "./room-do";
 
 // The browser limit is 25 MiB of plaintext; AES-GCM appends a 16-byte tag.
@@ -45,8 +46,8 @@ const MLS_KEY_PACKAGE_TARGET = 24;
 const MLS_KEY_PACKAGE_ACTIVE_LIMIT = 64;
 const ABANDONED_KEY_PACKAGE_TTL_MS = 24 * 60 * 60 * 1_000;
 const CONSUMED_KEY_PACKAGE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
-const DEFAULT_USER_R2_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
-const DEFAULT_USER_R2_OBJECT_LIMIT = 100_000;
+const DEFAULT_USER_OBJECT_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+const DEFAULT_USER_OBJECT_LIMIT = 100_000;
 const MAX_PROFILE_AVATAR_BYTES = 128 * 1024;
 const ACCOUNT_APPEAL_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const RESOLVED_APPEAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -163,10 +164,6 @@ function exactLengthUploadStream(body: ReadableStream<Uint8Array>, expectedBytes
   return { body: fixedLength.readable, completed: body.pipeTo(fixedLength.writable) };
 }
 
-function isR2ChecksumMismatch(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("checksum you specified did not match");
-}
-
 function isFixedLengthMismatch(error: unknown): boolean {
   return error instanceof Error && error.message.includes("FixedLengthStream");
 }
@@ -235,8 +232,8 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 
 function defaultStorageLimits(env: Env): { bytes: number; objects: number } {
   return {
-    bytes: positiveInteger(env.USER_R2_QUOTA_BYTES, DEFAULT_USER_R2_QUOTA_BYTES),
-    objects: positiveInteger(env.USER_R2_OBJECT_LIMIT, DEFAULT_USER_R2_OBJECT_LIMIT),
+    bytes: positiveInteger(env.USER_OBJECT_QUOTA_BYTES, DEFAULT_USER_OBJECT_QUOTA_BYTES),
+    objects: positiveInteger(env.USER_OBJECT_LIMIT, DEFAULT_USER_OBJECT_LIMIT),
   };
 }
 
@@ -304,7 +301,7 @@ async function finalizePendingR2Cleanup(env: Env, items: PendingR2Write[]): Prom
 
 async function abandonPendingR2Write(env: Env, item: PendingR2Write): Promise<boolean> {
   try {
-    await env.ARCHIVE.delete(item.object_key);
+    await objectStore(env).delete(item.object_key);
     await finalizePendingR2Cleanup(env, [item]);
     return true;
   } catch (error) {
@@ -324,7 +321,7 @@ export async function processPendingR2Writes(env: Env, cutoff = Date.now() - PEN
       .where("created_at", "<", cutoff).orderBy("created_at").limit(50).execute();
     if (!pending.length) break;
     try {
-      await env.ARCHIVE.delete(pending.map((item) => item.object_key));
+      await objectStore(env).delete(pending.map((item) => item.object_key));
     } catch (error) {
       const message = (error instanceof Error ? error.message : "R2 cleanup failed").slice(0, 500);
       await batch(env.DB, pending.map((item) => db.updateTable("pending_r2_writes")
@@ -465,6 +462,9 @@ function age(now: number, timestamp: number | null): number | null {
 }
 
 async function operatorReadiness(env: Env): Promise<Response> {
+  // Construction validates provider selection and required bindings/secrets but
+  // performs no object-store request, preserving the D1-only readiness budget.
+  objectStore(env);
   const db = createDatabase(env.DB); const now = Date.now();
   const result = await sql<ReadinessRow>`SELECT
     (SELECT count(*) FROM users WHERE deleted_at IS NULL) AS active_users,
@@ -532,6 +532,7 @@ async function operatorReadiness(env: Env): Promise<Response> {
       pending_appeals: { count: Number(row.pending_appeals), oldest_age_ms: ages.pending_appeals },
     },
     slo_ms: { write_intent: READINESS_WRITE_INTENT_SLO_MS, background_work: READINESS_BACKGROUND_WORK_SLO_MS, pending_appeal: READINESS_APPEAL_SLO_MS },
+    object_store: { provider: env.OBJECT_STORE_PROVIDER ?? "r2", probed: false },
     storage_source: "d1_ledger",
   });
 }
@@ -804,13 +805,6 @@ async function keyPackageInserts(db: ReturnType<typeof createDatabase>, deviceId
   }).onConflict((conflict) => conflict.doNothing()));
 }
 
-function responseRange(range: R2Range | undefined, size: number): { offset: number; length: number } | null {
-  if (!range) return null;
-  if ("suffix" in range) return { offset: Math.max(0, size - range.suffix), length: Math.min(size, range.suffix) };
-  const offset = range.offset ?? 0;
-  return { offset, length: range.length ?? Math.max(0, size - offset) };
-}
-
 async function memberRole(env: Env, roomId: string, userId: string): Promise<"owner" | "member" | null> {
   const row = await createDatabase(env.DB).selectFrom("room_members").select("role")
     .where("room_id", "=", roomId).where("user_id", "=", userId).where("removed_at", "is", null).executeTakeFirst();
@@ -1028,7 +1022,7 @@ export async function processProfileAvatarDeletions(env: Env, objectKey?: string
   const pending = await query.execute();
   if (!pending.length) return 0;
   try {
-    await env.ARCHIVE.delete(pending.map((item) => item.object_key));
+    await objectStore(env).delete(pending.map((item) => item.object_key));
     await db.deleteFrom("profile_avatar_deletions").where("object_key", "in", pending.map((item) => item.object_key)).execute();
     return pending.length;
   } catch (error) {
@@ -1063,7 +1057,9 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
   // This row doubles as a write intent. A crash after the R2 put but before
   // the profile CAS remains recoverable without listing the bucket.
   await stageAvatarDeletion(env, auth.userId, objectKey, bytes.byteLength);
-  await env.ARCHIVE.put(objectKey, buffer, { httpMetadata: { contentType: "image/webp", cacheControl: "public, max-age=31536000, immutable" }, customMetadata: { sha256: digest } });
+  await objectStore(env).put(objectKey, buffer, {
+    expectedSize: bytes.byteLength, contentType: "image/webp", cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
+  });
   const eventId = `profile:${auth.userId}:${now}:${randomId(8)}`;
   const payload = profileUpdatePayload(auth.userId, before.display_name, avatarId);
   const statements = [
@@ -1117,7 +1113,7 @@ async function publicProfileAvatar(env: Env, avatarId: string): Promise<Response
   const row = await createDatabase(env.DB).selectFrom("users").select(["avatar_object_key", "avatar_sha256", "avatar_bytes"])
     .where("avatar_id", "=", avatarId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirst();
   if (!row?.avatar_object_key || !row.avatar_sha256) throw new HttpError(404, "Avatar not found", "not_found");
-  const object = await env.ARCHIVE.get(row.avatar_object_key);
+  const object = await objectStore(env).get(row.avatar_object_key);
   if (!object || object.size !== row.avatar_bytes) throw new HttpError(503, "Avatar is temporarily unavailable", "avatar_unavailable");
   return new Response(object.body, { headers: {
     "content-type": "image/webp", "content-length": String(object.size), etag: `"${row.avatar_sha256}"`,
@@ -1698,8 +1694,8 @@ async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: Au
   const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
   await stageR2Write(env, pending);
   try {
-    const object = await env.ARCHIVE.put(objectKey, request.body, { httpMetadata: { contentType: "application/vnd.edgechat.device-history-shard" },
-      customMetadata: { linkId, transferId: transfer.transfer_id, targetDeviceId: (await db.selectFrom("device_links").select("device_id").where("link_id", "=", linkId).executeTakeFirstOrThrow()).device_id, shardIndex: String(shardIndex) } });
+    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.device-history-shard",
+      metadata: { linkId, transferId: transfer.transfer_id, targetDeviceId: (await db.selectFrom("device_links").select("device_id").where("link_id", "=", linkId).executeTakeFirstOrThrow()).device_id, shardIndex: String(shardIndex) } });
     if (!object || object.size !== declaredSize) throw new Error("Device history shard length mismatch");
     const now = Date.now();
     await batch(env.DB, [
@@ -1717,7 +1713,7 @@ async function downloadDeviceLinkHistoryShard(request: Request, env: Env, linkId
   if (link.status !== "complete" && link.status !== "claimed") throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
   const shard = await createDatabase(env.DB).selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).where("status", "=", "ready").executeTakeFirst();
   if (!shard) throw new HttpError(404, "Device history shard not found", "not_found");
-  const object = await env.ARCHIVE.get(shard.object_key);
+  const object = await objectStore(env).get(shard.object_key);
   if (!object || object.size !== shard.ciphertext_bytes) throw new HttpError(503, "Device history shard is temporarily unavailable", "history_transfer_unavailable");
   return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.device-history-shard", "content-length": String(object.size), "cache-control": "no-store" } });
 }
@@ -1728,7 +1724,7 @@ async function acknowledgeDeviceLinkHistoryShard(request: Request, env: Env, lin
   const db = createDatabase(env.DB);
   const shard = await db.selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
   if (!shard || shard.status === "acked") return new Response(null, { status: 204 });
-  try { await env.ARCHIVE.delete(shard.object_key); } catch { throw new HttpError(503, "Device history shard cleanup failed", "history_cleanup_failed"); }
+  try { await objectStore(env).delete(shard.object_key); } catch { throw new HttpError(503, "Device history shard cleanup failed", "history_cleanup_failed"); }
   const now = Date.now();
   await batch(env.DB, [
     db.updateTable("user_storage_usage").set({ archive_bytes: sql<number>`max(0, archive_bytes - ${shard.ciphertext_bytes})`, archive_objects: sql<number>`max(0, archive_objects - 1)`, updated_at: now })
@@ -1740,7 +1736,7 @@ async function acknowledgeDeviceLinkHistoryShard(request: Request, env: Env, lin
 
 async function removeDeviceLinkHistory(env: Env, link: { link_id: string; user_id: string | null; history_object_key: string | null; history_bytes: number | null }): Promise<boolean> {
   if (!link.user_id || !link.history_object_key || !link.history_bytes) return true;
-  try { await env.ARCHIVE.delete(link.history_object_key); }
+  try { await objectStore(env).delete(link.history_object_key); }
   catch { return false; }
   const db = createDatabase(env.DB);
   await batch(env.DB, [
@@ -1763,7 +1759,7 @@ async function removeDeviceLinkHistoryShards(env: Env, linkId: string, userId: s
     await db.deleteFrom("device_link_history_transfers").where("link_id", "=", linkId).execute();
     return true;
   }
-  try { await env.ARCHIVE.delete(shards.map((shard) => shard.object_key)); } catch { return false; }
+  try { await objectStore(env).delete(shards.map((shard) => shard.object_key)); } catch { return false; }
   const bytes = shards.reduce((total, shard) => total + shard.ciphertext_bytes, 0); const now = Date.now();
   await batch(env.DB, [
     ...(userId ? [db.updateTable("user_storage_usage").set({ archive_bytes: sql<number>`max(0, archive_bytes - ${bytes})`,
@@ -1788,7 +1784,7 @@ async function uploadDeviceLinkHistory(request: Request, env: Env, auth: AuthCon
   const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
   await stageR2Write(env, pending);
   try {
-    const object = await env.ARCHIVE.put(objectKey, request.body, { httpMetadata: { contentType: "application/vnd.edgechat.device-history" }, customMetadata: { linkId, targetDeviceId: link.device_id } });
+    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.device-history", metadata: { linkId, targetDeviceId: link.device_id } });
     if (!object || object.size !== declaredSize) throw new Error("Device history transfer length mismatch");
     await batch(env.DB, [
       db.updateTable("device_links").set({ history_object_key: objectKey, history_bytes: object.size, history_uploaded_at: Date.now(), history_source_device_id: auth.deviceId, updated_at: Date.now() }).where("link_id", "=", linkId),
@@ -1801,7 +1797,7 @@ async function uploadDeviceLinkHistory(request: Request, env: Env, auth: AuthCon
 async function downloadDeviceLinkHistory(request: Request, env: Env, linkId: string): Promise<Response> {
   const link = await deviceLinkBySecret(request, env, linkId);
   if ((link.status !== "complete" && link.status !== "claimed") || !link.history_object_key || !link.history_bytes) throw new HttpError(404, "Device history transfer not found", "not_found");
-  const object = await env.ARCHIVE.get(link.history_object_key);
+  const object = await objectStore(env).get(link.history_object_key);
   if (!object || object.size !== link.history_bytes) throw new HttpError(503, "Device history transfer is temporarily unavailable", "history_transfer_unavailable");
   return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.device-history", "content-length": String(object.size), "cache-control": "no-store" } });
 }
@@ -2506,7 +2502,7 @@ export async function processRetentionObjectDeletions(env: Env): Promise<number>
   const pending = candidates.filter((item) => item.object_type !== "attachment" || !activeProfileAttachments.has(item.object_id));
   if (!pending.length) return 0;
   try {
-    await env.ARCHIVE.delete(pending.map((item) => item.object_key));
+    await objectStore(env).delete(pending.map((item) => item.object_key));
   } catch (error) {
     const message = (error instanceof Error ? error.message : "R2 retention deletion failed").slice(0, 500);
     await batch(env.DB, pending.map((item) => db.updateTable("retention_object_deletions")
@@ -3314,7 +3310,7 @@ export async function processPendingAttachmentDeletions(env: Env, deleteEventId?
   const pending = candidates.filter((item) => !activeProfileAttachments.has(item.attachment_id));
   if (!pending.length) return 0;
   try {
-    await env.ARCHIVE.delete(pending.map((item) => item.object_key));
+    await objectStore(env).delete(pending.map((item) => item.object_key));
   } catch (error) {
     const message = (error instanceof Error ? error.message : "R2 deletion failed").slice(0, 500);
     await batch(env.DB, pending.map((item) => db.updateTable("attachment_deletions")
@@ -3346,7 +3342,7 @@ export async function purgeUncommittedAttachments(env: Env): Promise<number> {
   const expired = await db.selectFrom("attachments").select(["attachment_id", "object_key", "uploader_user_id", "ciphertext_bytes"])
     .where("committed_at", "is", null).where("created_at", "<", Date.now() - UNCOMMITTED_ATTACHMENT_TTL_MS).orderBy("created_at").limit(100).execute();
   if (!expired.length) return 0;
-  await env.ARCHIVE.delete(expired.map((item) => item.object_key));
+  await objectStore(env).delete(expired.map((item) => item.object_key));
   const byUser = new Map<string, { bytes: number; objects: number }>();
   for (const item of expired) {
     const current = byUser.get(item.uploader_user_id) ?? { bytes: 0, objects: 0 };
@@ -3481,8 +3477,8 @@ async function uploadRoomPeerRecovery(request: Request, env: Env, auth: AuthCont
   const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
   await stageR2Write(env, pending);
   try {
-    const object = await env.ARCHIVE.put(objectKey, request.body, { httpMetadata: { contentType: "application/vnd.edgechat.room-recovery" },
-      customMetadata: { recoveryId, roomId: recovery.room_id, sourceDeviceId: auth.deviceId, targetDeviceId: recovery.target_device_id,
+    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.room-recovery",
+      metadata: { recoveryId, roomId: recovery.room_id, sourceDeviceId: auth.deviceId, targetDeviceId: recovery.target_device_id,
         afterSeq: String(recovery.after_seq), throughSeq: String(recovery.through_seq) } });
     if (!object || object.size !== declaredSize) throw new Error("Peer recovery bundle length mismatch");
     const updated = await db.updateTable("room_peer_recoveries").set({ status: "ready", object_key: objectKey, ciphertext_bytes: object.size,
@@ -3503,7 +3499,7 @@ async function downloadRoomPeerRecovery(env: Env, auth: AuthContext, recoveryId:
   const row = await createDatabase(env.DB).selectFrom("room_peer_recoveries").selectAll().where("recovery_id", "=", recoveryId)
     .where("user_id", "=", auth.userId).where("target_device_id", "=", auth.deviceId).where("status", "=", "ready").executeTakeFirst();
   if (!row?.object_key || !row.ciphertext_bytes) throw new HttpError(404, "Peer recovery bundle not found", "not_found");
-  const object = await env.ARCHIVE.get(row.object_key);
+  const object = await objectStore(env).get(row.object_key);
   if (!object || object.size !== row.ciphertext_bytes) throw new HttpError(503, "Peer recovery bundle is temporarily unavailable", "peer_recovery_unavailable");
   return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(object.size), "cache-control": "no-store" } });
 }
@@ -3515,7 +3511,7 @@ async function acknowledgeRoomPeerRecovery(env: Env, auth: AuthContext, recovery
     .where("user_id", "=", auth.userId).where("target_device_id", "=", auth.deviceId).executeTakeFirst();
   if (!row || row.status === "complete") return new Response(null, { status: 204 });
   if (row.status !== "ready" || !row.object_key || !row.ciphertext_bytes) throw new HttpError(409, "Peer recovery is not ready", "peer_recovery_not_ready");
-  try { await env.ARCHIVE.delete(row.object_key); }
+  try { await objectStore(env).delete(row.object_key); }
   catch { throw new HttpError(503, "Peer recovery cleanup failed", "peer_recovery_cleanup_failed"); }
   const now = Date.now();
   await batch(env.DB, [
@@ -3536,7 +3532,7 @@ async function cancelRoomPeerRecovery(env: Env, auth: AuthContext, recoveryId: s
   if (!row) throw new HttpError(404, "Peer recovery not found", "not_found");
   if (row.status === "complete" || row.status === "cancelled") return new Response(null, { status: 204 });
   if (row.status === "ready" && row.object_key && row.ciphertext_bytes) {
-    try { await env.ARCHIVE.delete(row.object_key); }
+    try { await objectStore(env).delete(row.object_key); }
     catch { throw new HttpError(503, "Peer recovery cleanup failed", "peer_recovery_cleanup_failed"); }
     await batch(env.DB, [
       db.updateTable("user_storage_usage").set({ archive_bytes: sql<number>`max(0, archive_bytes - ${row.ciphertext_bytes})`,
@@ -3559,7 +3555,7 @@ export async function cleanupExpiredRoomPeerRecoveries(env: Env, now = Date.now(
   let cleaned = 0;
   for (const row of rows) {
     if (row.status === "ready" && row.object_key && row.ciphertext_bytes) {
-      try { await env.ARCHIVE.delete(row.object_key); } catch { continue; }
+      try { await objectStore(env).delete(row.object_key); } catch { continue; }
       await batch(env.DB, [
         db.updateTable("user_storage_usage").set({ archive_bytes: sql<number>`max(0, archive_bytes - ${row.ciphertext_bytes})`,
           archive_objects: sql<number>`max(0, archive_objects - 1)`, updated_at: now }).where("user_id", "=", row.user_id)
@@ -3922,12 +3918,14 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
   await stageR2Write(env, pending);
   try {
     const limited = exactLengthUploadStream(request.body, declaredSize);
-    const put = env.ARCHIVE.put(key, limited.body, { sha256: suppliedDigest.bytes, httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId, sha256: suppliedDigest.text } });
-    let stored: R2Object | null;
+    const put = objectStore(env).put(key, limited.body, {
+      expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream", metadata: { roomId, sha256: suppliedDigest.text },
+    });
+    let stored: ObjectStoreObject | null;
     try {
       stored = (await Promise.all([put, limited.completed]))[0];
     } catch (error) {
-      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Attachment digest mismatch", "invalid_attachment_digest");
+      if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Attachment digest mismatch", "invalid_attachment_digest");
       if (isFixedLengthMismatch(error)) throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
       throw error;
     }
@@ -3957,7 +3955,7 @@ async function abandonAttachments(request: Request, env: Env, auth: AuthContext)
   const rows = await db.selectFrom("attachments").select(["attachment_id", "object_key", "ciphertext_bytes"])
     .where("attachment_id", "in", ids as string[]).where("uploader_user_id", "=", auth.userId).where("committed_event_id", "is", null).execute();
   if (!rows.length) return json({ abandoned: 0 });
-  await env.ARCHIVE.delete(rows.map((row) => row.object_key));
+  await objectStore(env).delete(rows.map((row) => row.object_key));
   const now = Date.now();
   await batch(env.DB, rows.flatMap((row) => [
     db.updateTable("user_storage_usage").set({ attachment_bytes: sql<number>`max(0, attachment_bytes - ${row.ciphertext_bytes})`, attachment_objects: sql<number>`max(0, attachment_objects - 1)`, updated_at: now })
@@ -4071,30 +4069,30 @@ async function uploadAttachmentRepair(request: Request, env: Env, auth: AuthCont
   const digest = fromB64url(row.ciphertext_sha256);
   if (digest.byteLength !== 32 || b64url(digest) !== row.ciphertext_sha256) throw new Error("Stored attachment digest is invalid");
   try {
-    let stored: R2Object | null;
+    let stored: ObjectStoreObject | null;
     try {
-      stored = await env.ARCHIVE.put(row.object_key, request.body, {
-        onlyIf: { etagDoesNotMatch: "*" }, sha256: digest,
-        httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId: row.room_id, sha256: row.ciphertext_sha256 },
+      stored = await objectStore(env).put(row.object_key, request.body, {
+        ifAbsent: true, expectedSize: declaredSize, checksumSha256: digest,
+        contentType: "application/octet-stream", metadata: { roomId: row.room_id, sha256: row.ciphertext_sha256 },
       });
     } catch (error) {
-      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Attachment ciphertext digest mismatch", "invalid_attachment_digest");
+      if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Attachment ciphertext digest mismatch", "invalid_attachment_digest");
       throw error;
     }
     if (stored && stored.size !== row.ciphertext_bytes) {
-      await env.ARCHIVE.delete(row.object_key);
+      await objectStore(env).delete(row.object_key);
       throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
     }
     if (!stored) {
-      const existing = await env.ARCHIVE.head(row.object_key);
-      if (!existing || existing.size !== row.ciphertext_bytes || existing.customMetadata?.sha256 !== row.ciphertext_sha256) throw new Error("R2 key was recreated with conflicting bytes");
+      const existing = await objectStore(env).head(row.object_key);
+      if (!existing || existing.size !== row.ciphertext_bytes || existing.metadata.sha256 !== row.ciphertext_sha256) throw new Error("Object-store key was recreated with conflicting bytes");
     }
     const completed = await db.deleteFrom("attachment_repair_jobs").where("attachment_id", "=", id).where("lease_device_id", "=", auth.deviceId).where("lease_token_hash", "=", await sha256(token)).executeTakeFirst();
     if (completed.numDeletedRows !== 1n) {
       // Retention/account deletion may have removed the logical attachment
       // while this bounded upload was in flight. Never leave our new R2 write
       // behind as an untracked, quota-free orphan.
-      if (stored) await env.ARCHIVE.delete(row.object_key);
+      if (stored) await objectStore(env).delete(row.object_key);
       throw new HttpError(409, "Attachment was collected while repair was in progress", "invalid_repair_lease");
     }
     return json({ attachment_id: id, restored: true });
@@ -4179,7 +4177,7 @@ async function downloadAttachment(request: Request, env: Env, auth: AuthContext,
   if (row.repair_attachment_id) {
     throw new HttpError(503, "Attachment ciphertext is awaiting device repair", row.ciphertext_sha256 ? "attachment_repair_pending" : "attachment_repair_unverified", { "retry-after": "30" });
   }
-  const object = await env.ARCHIVE.get(row.object_key, { range: request.headers });
+  const object = await objectStore(env).get(row.object_key, { rangeHeader: request.headers.get("range") ?? undefined });
   if (!object?.body) {
     const deletion = await db.selectFrom("attachment_deletions").select("delete_event_id").where("attachment_id", "=", row.attachment_id).executeTakeFirst();
     if (deletion) await processPendingAttachmentDeletions(env, deletion.delete_event_id);
@@ -4187,14 +4185,14 @@ async function downloadAttachment(request: Request, env: Env, auth: AuthContext,
     if (deletion) throw new HttpError(404, "Attachment not found", "not_found");
     throw new HttpError(503, "Attachment ciphertext is temporarily unavailable and queued for device repair", row.ciphertext_sha256 ? "attachment_repair_pending" : "attachment_repair_unverified", { "retry-after": "30" });
   }
-  if (object.size !== row.ciphertext_bytes || (row.ciphertext_sha256 && object.customMetadata?.sha256 !== row.ciphertext_sha256)) {
+  if (object.size !== row.ciphertext_bytes || (row.ciphertext_sha256 && object.metadata.sha256 !== row.ciphertext_sha256)) {
     await object.body.cancel().catch(() => undefined);
-    await env.ARCHIVE.delete(row.object_key);
+    await objectStore(env).delete(row.object_key);
     await markAttachmentRepairNeeded(env, row.attachment_id);
     throw new HttpError(503, "Attachment ciphertext failed integrity metadata validation and is queued for device repair", "attachment_repair_pending", { "retry-after": "30" });
   }
-  const headers = new Headers({ "content-type": "application/octet-stream", etag: object.httpEtag, "accept-ranges": "bytes", "cache-control": "private, max-age=31536000, immutable" });
-  const range = responseRange(object.range, object.size);
+  const headers = new Headers({ "content-type": "application/octet-stream", etag: object.entityTag, "accept-ranges": "bytes", "cache-control": "private, max-age=31536000, immutable" });
+  const range = object.range ?? null;
   if (range) headers.set("content-range", `bytes ${range.offset}-${range.offset + range.length - 1}/${object.size}`);
   headers.set("content-length", String(range?.length ?? object.size));
   return new Response(object.body, { status: range ? 206 : 200, headers });
@@ -4242,14 +4240,14 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
   catch (error) { await prefix.body.cancel().catch(() => undefined); throw error; }
   try {
     const limited = exactLengthUploadStream(prefix.body, declaredSize);
-    let stored: R2Object | null;
+    let stored: ObjectStoreObject | null;
     try {
       stored = (await Promise.all([
-        env.ARCHIVE.put(objectKey, limited.body, { sha256: suppliedDigest.bytes, httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { roomId, start: String(start), end: String(end), sha256: suppliedDigest.text } }),
+        objectStore(env).put(objectKey, limited.body, { expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream", metadata: { roomId, start: String(start), end: String(end), sha256: suppliedDigest.text } }),
         limited.completed,
       ]))[0];
     } catch (error) {
-      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
+      if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
       if (isFixedLengthMismatch(error)) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
       throw error;
     }
@@ -4349,28 +4347,28 @@ async function uploadArchiveRepair(request: Request, env: Env, auth: AuthContext
   const digest = fromB64url(row.ciphertext_sha256);
   if (digest.byteLength !== 32 || b64url(digest) !== row.ciphertext_sha256) throw new Error("Stored archive segment digest is invalid");
   try {
-    let stored: R2Object | null;
+    let stored: ObjectStoreObject | null;
     try {
-      stored = await env.ARCHIVE.put(row.object_key, request.body, {
-        onlyIf: { etagDoesNotMatch: "*" }, sha256: digest, httpMetadata: { contentType: "application/octet-stream" },
-        customMetadata: { roomId: row.room_id, start: String(row.start_seq), end: String(row.end_seq), sha256: row.ciphertext_sha256 },
+      stored = await objectStore(env).put(row.object_key, request.body, {
+        ifAbsent: true, expectedSize: declaredSize, checksumSha256: digest, contentType: "application/octet-stream",
+        metadata: { roomId: row.room_id, start: String(row.start_seq), end: String(row.end_seq), sha256: row.ciphertext_sha256 },
       });
     } catch (error) {
-      if (isR2ChecksumMismatch(error)) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
+      if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
       throw error;
     }
     if (stored && stored.size !== row.byte_size) {
-      await env.ARCHIVE.delete(row.object_key);
+      await objectStore(env).delete(row.object_key);
       throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
     }
     if (!stored) {
-      const existing = await env.ARCHIVE.head(row.object_key);
-      if (!existing || existing.size !== row.byte_size || existing.customMetadata?.sha256 !== row.ciphertext_sha256) throw new Error("R2 archive key was recreated with conflicting bytes");
+      const existing = await objectStore(env).head(row.object_key);
+      if (!existing || existing.size !== row.byte_size || existing.metadata.sha256 !== row.ciphertext_sha256) throw new Error("Object-store archive key was recreated with conflicting bytes");
     }
     const completed = await db.deleteFrom("archive_segment_repair_jobs").where("segment_id", "=", segmentId)
       .where("lease_device_id", "=", auth.deviceId).where("lease_token_hash", "=", await sha256(token)).executeTakeFirst();
     if (completed.numDeletedRows !== 1n) {
-      if (stored) await env.ARCHIVE.delete(row.object_key);
+      if (stored) await objectStore(env).delete(row.object_key);
       throw new HttpError(409, "Archive segment was collected while repair was in progress", "invalid_repair_lease");
     }
     return json({ segment_id: segmentId, restored: true });
@@ -4392,18 +4390,18 @@ async function downloadSegment(request: Request, env: Env, auth: AuthContext, ro
   if (row.repair_segment_id) {
     throw new HttpError(503, "Archive segment is awaiting device repair", row.ciphertext_sha256 ? "archive_repair_pending" : "archive_repair_unverified", { "retry-after": "30" });
   }
-  const object = await env.ARCHIVE.get(row.object_key, { range: request.headers });
+  const object = await objectStore(env).get(row.object_key, { rangeHeader: request.headers.get("range") ?? undefined });
   if (!object?.body) {
     await markArchiveRepairNeeded(env, segmentId, roomId);
     throw new HttpError(503, "Archive segment is temporarily unavailable and queued for device repair", row.ciphertext_sha256 ? "archive_repair_pending" : "archive_repair_unverified", { "retry-after": "30" });
   }
-  if (object.size !== row.byte_size || (row.ciphertext_sha256 && object.customMetadata?.sha256 !== row.ciphertext_sha256)) {
-    await object.body.cancel().catch(() => undefined); await env.ARCHIVE.delete(row.object_key);
+  if (object.size !== row.byte_size || (row.ciphertext_sha256 && object.metadata.sha256 !== row.ciphertext_sha256)) {
+    await object.body.cancel().catch(() => undefined); await objectStore(env).delete(row.object_key);
     await markArchiveRepairNeeded(env, segmentId, roomId);
     throw new HttpError(503, "Archive segment failed integrity metadata validation and is queued for device repair", "archive_repair_pending", { "retry-after": "30" });
   }
-  const headers = new Headers({ "content-type": "application/octet-stream", "accept-ranges": "bytes", etag: object.httpEtag });
-  const range = responseRange(object.range, object.size);
+  const headers = new Headers({ "content-type": "application/octet-stream", "accept-ranges": "bytes", etag: object.entityTag });
+  const range = object.range ?? null;
   if (range) headers.set("content-range", `bytes ${range.offset}-${range.offset + range.length - 1}/${object.size}`);
   headers.set("content-length", String(range?.length ?? object.size));
   return new Response(object.body, { status: range ? 206 : 200, headers });

@@ -6,8 +6,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "SERVER_NAME": "localhost",
-    "USER_R2_QUOTA_BYTES": "2147483648",
-    "USER_R2_OBJECT_LIMIT": "100000",
+    "OBJECT_STORE_PROVIDER": "r2",
+    "USER_OBJECT_QUOTA_BYTES": "2147483648",
+    "USER_OBJECT_LIMIT": "100000",
     "ARCHIVE_COMPACTION_ENABLED": "false",
     "EVENT_RECEIPT_KEY_ID": "v1",
     "VAPID_SUBJECT": "mailto:admin@example.com",

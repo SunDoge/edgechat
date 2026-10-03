@@ -1,0 +1,123 @@
+import { env } from "cloudflare:workers";
+import { describe, expect, it } from "vitest";
+import type { Env } from "../src/env";
+import { ObjectStoreChecksumMismatchError, ObjectStoreRequestError, S3ObjectStore, objectStore } from "../src/object-store";
+
+function store() {
+  return objectStore(env as unknown as Env);
+}
+
+async function bytes(body: ReadableStream): Promise<number[]> {
+  return [...new Uint8Array(await new Response(body).arrayBuffer())];
+}
+
+describe("R2 object-store contract", () => {
+  it("preserves exact-key metadata and normalized byte ranges", async () => {
+    const key = `object-store/${crypto.randomUUID()}.bin`;
+    const value = new Uint8Array([10, 20, 30, 40, 50, 60]);
+    const checksum = await crypto.subtle.digest("SHA-256", value);
+
+    const stored = await store().put(key, value, {
+      contentType: "application/octet-stream",
+      metadata: { sha256: "pinned-digest", purpose: "contract-test" },
+      checksumSha256: checksum,
+    });
+    expect(stored).toMatchObject({ key, size: value.byteLength, metadata: { sha256: "pinned-digest", purpose: "contract-test" } });
+    expect(stored?.entityTag).toMatch(/^".+"$/);
+
+    expect(await store().head(key)).toMatchObject({ key, size: value.byteLength, metadata: { sha256: "pinned-digest" } });
+    const ranged = await store().get(key, { rangeHeader: "bytes=2-4" });
+    expect(ranged).toMatchObject({ key, size: value.byteLength, range: { offset: 2, length: 3 } });
+    expect(await bytes(ranged!.body)).toEqual([30, 40, 50]);
+
+    await store().delete([key, `${key}.already-missing`]);
+    expect(await store().head(key)).toBeNull();
+  });
+
+  it("normalizes create-if-absent and checksum mismatch semantics", async () => {
+    const key = `object-store/${crypto.randomUUID()}.bin`;
+    const original = new Uint8Array([1, 2, 3]);
+    await store().put(key, original);
+
+    expect(await store().put(key, new Uint8Array([9]), { ifAbsent: true })).toBeNull();
+    const unchanged = await store().get(key);
+    expect(await bytes(unchanged!.body)).toEqual([...original]);
+
+    const wrongChecksum = new Uint8Array(32);
+    await expect(store().put(`${key}.bad`, original, { checksumSha256: wrongChecksum }))
+      .rejects.toBeInstanceOf(ObjectStoreChecksumMismatchError);
+    expect(await store().head(`${key}.bad`)).toBeNull();
+    await store().delete(key);
+  });
+});
+
+const s3Config = {
+  endpoint: "https://s3.us-west-004.backblazeb2.com",
+  region: "us-west-004",
+  bucket: "edgechat-test",
+  accessKeyId: "test-key-id",
+  secretAccessKey: "test-secret-key",
+};
+
+describe("SigV4 S3 object-store contract", () => {
+  it("fails closed when deployment provider configuration is incomplete", () => {
+    expect(() => objectStore({ OBJECT_STORE_PROVIDER: "s3" } as Env)).toThrow("S3_ENDPOINT is required");
+    expect(() => objectStore({ OBJECT_STORE_PROVIDER: "r2" } as Env)).toThrow("ARCHIVE binding is required");
+    expect(() => objectStore({ OBJECT_STORE_PROVIDER: "unknown" } as Env)).toThrow("Unsupported OBJECT_STORE_PROVIDER");
+  });
+
+  it("signs exact-key writes, reads, ranges, metadata, and batch deletion", async () => {
+    const requests: Array<{ method: string; url: string; headers: Headers; body: Promise<ArrayBuffer> }> = [];
+    const responses = [
+      new Response(null, { status: 200, headers: { etag: '"put-etag"' } }),
+      new Response(null, { status: 200, headers: { etag: '"head-etag"', "content-length": "6", "x-amz-meta-sha256": "digest" } }),
+      new Response(new Uint8Array([30, 40, 50]), { status: 206, headers: {
+        etag: '"get-etag"', "content-length": "3", "content-range": "bytes 2-4/6", "x-amz-meta-sha256": "digest",
+      } }),
+      new Response("<DeleteResult></DeleteResult>", { status: 200 }),
+    ];
+    const store = new S3ObjectStore(s3Config, async (request) => {
+      requests.push({ method: request.method, url: request.url, headers: new Headers(request.headers), body: request.clone().arrayBuffer() });
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected S3 request");
+      return response;
+    });
+    const value = new Uint8Array([10, 20, 30, 40, 50, 60]);
+    const checksum = await crypto.subtle.digest("SHA-256", value);
+    expect(await store.put("folder/a b&.bin", new Response(value).body!, { expectedSize: 6, checksumSha256: checksum,
+      contentType: "application/octet-stream", metadata: { sha256: "digest" } }))
+      .toEqual({ key: "folder/a b&.bin", size: 6, entityTag: '"put-etag"', metadata: { sha256: "digest" } });
+    expect(await store.head("folder/a b&.bin")).toEqual({ key: "folder/a b&.bin", size: 6, entityTag: '"head-etag"', metadata: { sha256: "digest" } });
+    const ranged = await store.get("folder/a b&.bin", { rangeHeader: "bytes=2-4" });
+    expect(ranged).toMatchObject({ size: 6, entityTag: '"get-etag"', metadata: { sha256: "digest" }, range: { offset: 2, length: 3 } });
+    expect(await bytes(ranged!.body)).toEqual([30, 40, 50]);
+    await store.delete(["folder/a b&.bin", "folder/<second>&.bin"]);
+
+    expect(requests.map((request) => request.method)).toEqual(["PUT", "HEAD", "GET", "POST"]);
+    expect(requests[0].url).toBe("https://s3.us-west-004.backblazeb2.com/edgechat-test/folder/a%20b%26.bin");
+    expect(requests[0].headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
+    expect(requests[0].headers.get("x-amz-content-sha256")).toMatch(/^[a-f0-9]{64}$/);
+    expect([...new Uint8Array(await requests[0].body)]).toEqual([...value]);
+    expect(requests[2].headers.get("range")).toBe("bytes=2-4");
+    expect(requests[3].url).toBe("https://s3.us-west-004.backblazeb2.com/edgechat-test?delete");
+    expect(new TextDecoder().decode(await requests[3].body)).toContain("<Key>folder/&lt;second&gt;&amp;.bin</Key>");
+  });
+
+  it("normalizes conditional conflicts and refuses a full response to a range request", async () => {
+    const conflict = new S3ObjectStore(s3Config, async () => new Response("already exists", { status: 412 }));
+    expect(await conflict.put("existing.bin", new Uint8Array([1]), { ifAbsent: true })).toBeNull();
+
+    const ignoresRange = new S3ObjectStore(s3Config, async () => new Response(new Uint8Array([1, 2, 3]), {
+      status: 200, headers: { etag: '"etag"', "content-length": "3" },
+    }));
+    await expect(ignoresRange.get("range.bin", { rangeHeader: "bytes=0-0" })).rejects.toMatchObject({
+      name: "ObjectStoreRequestError", operation: "get",
+    } satisfies Partial<ObjectStoreRequestError>);
+  });
+
+  it("maps provider digest failures without exposing response bodies", async () => {
+    const store = new S3ObjectStore(s3Config, async () => new Response("<Code>XAmzContentSHA256Mismatch</Code>", { status: 400 }));
+    await expect(store.put("bad.bin", new Uint8Array([1]), { checksumSha256: new Uint8Array(32) }))
+      .rejects.toBeInstanceOf(ObjectStoreChecksumMismatchError);
+  });
+});

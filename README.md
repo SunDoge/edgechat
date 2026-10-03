@@ -22,7 +22,7 @@ Cloudflare Worker
 ├── auth + HTTP API
 ├── SunDoge/kysely-d1 ─────────────── D1
 ├── one-time WebSocket tickets         users, devices, rooms,
-├── R2 authenticated Range reads       membership, sync log,
+├── exact-key ObjectStore boundary     membership, sync log,
 └── room-name routing                  archive metadata
                  │
                  ▼
@@ -34,12 +34,14 @@ Room Durable Object (one per room)
 └── hibernatable WebSocket fanout
                  │
                  ▼
-R2
+R2ObjectStore (default)
 ├── opaque encrypted attachments
 └── chunked encrypted archive segments
 ```
 
 The Durable Object is the serialization authority. It persists an accepted event, mirrors ciphertext into D1's durable per-user sync log, then broadcasts it. WebSocket loss therefore affects latency, not delivery: reconnect always repairs gaps using `/api/v1/sync?cursor=...`.
+
+Worker object-plane code depends on a narrow provider-neutral `ObjectStore` contract: exact-key put/get/head/delete, normalized byte ranges, metadata, SHA-256 verification, and create-if-absent writes. The default adapter uses the native R2 binding; a path-style SigV4 adapter supports deployment against Backblaze B2, AWS S3, or MinIO-compatible endpoints. The contract deliberately exposes no bucket listing, so normal request paths cannot become catalog scans. D1 remains authoritative for object keys, byte/object accounting, digests, retention, and repair jobs. One deployment selects one object provider; mirroring or dual writes are not the default. Live B2 staging validation and hidden-version lifecycle verification remain release gates; see [`docs/OPERATIONS.md`](docs/OPERATIONS.md#selecting-an-s3-compatible-provider).
 
 ## Repository
 
@@ -242,7 +244,7 @@ The encrypted index maps message sequence to chunk, relative data offset, encryp
 
 Compression is deliberately limited to historical archive chunks. Live MLS application messages and encrypted attachments are not compressed by the server: the server never sees their plaintext, and many attachment formats are already compressed. This also avoids mixing attacker-controlled and secret plaintext in an online compression context.
 
-Every committed attachment or archive segment is charged to a D1-backed per-user storage ledger before the R2 write. The default hard limits are 2 GiB and 100,000 objects per user and can be changed with `USER_R2_QUOTA_BYTES` and `USER_R2_OBJECT_LIMIT`; `GET /api/v1/storage` reports the split between attachments and archives. The browser computes the encrypted attachment's SHA-256 and sends it with the fixed-size body. The Worker checks its canonical form, relays the body through a `FixedLengthStream`, and asks R2 to verify the checksum while writing, so a normal attachment upload remains one R2 PUT without buffering the complete ciphertext in Worker memory or adding a discovery HEAD/LIST. The checksum is mandatory because there is no pre-deployment legacy-client contract. Failed R2/D1 writes delete the exact staged key and release their reservation. To limit object and Range-request amplification, low-volume rooms wait for 1 MiB of archive input or 500 events before creating a segment. See [the maturity and storage roadmap](docs/MATURITY_ROADMAP.md).
+Every committed attachment or archive segment is charged to a D1-backed per-user storage ledger before the object-store write. The default hard limits are 2 GiB and 100,000 objects per user and can be changed with `USER_OBJECT_QUOTA_BYTES` and `USER_OBJECT_LIMIT`; `GET /api/v1/storage` reports the split between attachments and archives. The browser computes the encrypted attachment's SHA-256 and sends it with the fixed-size body. The Worker checks its canonical form, relays the body through a `FixedLengthStream`, and requires the selected provider to verify the signed payload digest while writing, so a normal attachment upload remains one object PUT without buffering the complete ciphertext in Worker memory or adding a discovery HEAD/LIST. The checksum is mandatory because there is no pre-deployment legacy-client contract. Failed object-store/D1 writes delete the exact staged key and release their reservation. To limit object and Range-request amplification, low-volume rooms wait for 1 MiB of archive input or 500 events before creating a segment. See [the maturity and storage roadmap](docs/MATURITY_ROADMAP.md).
 
 An attachment upload starts as uncommitted. The signed message envelope exposes only its opaque attachment ID; after the room event is durably ordered, D1 binds the object to that event. A daily Worker cron deletes uncommitted ciphertext older than seven days and atomically returns its bytes/object count to the owner's quota. A valid sender tombstone creates a durable deletion job: the R2 object is deleted first, then D1 removes its metadata and returns bytes/object count in one batch. Failed object deletion remains queued for the cron, and idempotent tombstone retries cannot decrement quota twice. Packed message segments are not rewritten for a single tombstone because that would create substantial R2 read/write amplification; the encrypted original event may remain inside an immutable segment while conforming clients honor the later tombstone.
 
