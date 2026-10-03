@@ -1,4 +1,4 @@
-import { isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, type MessageId, type MessagePartId, type MessageReference, type UserId } from "@edgechat/protocol";
+import { isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES, type MessageId, type MessagePartId, type MessageReference, type UserId } from "@edgechat/protocol";
 
 export const PREVIEWABLE_IMAGE_TYPES = new Set([
   "image/avif",
@@ -10,6 +10,14 @@ export const PREVIEWABLE_IMAGE_TYPES = new Set([
 export const MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024;
 export const MAX_INLINE_IMAGE_PIXELS = 40_000_000;
 export const MAX_INLINE_IMAGE_EDGE = 16_384;
+const MAX_MESSAGE_PARTS = 32;
+const MAX_ATTACHMENT_NAME_LENGTH = 255;
+const MAX_ATTACHMENT_MIME_LENGTH = 128;
+const MAX_ATTACHMENT_SECRET_LENGTH = 512;
+const SAFE_ATTACHMENT_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const SAFE_ATTACHMENT_SECRET = /^[A-Za-z0-9_-]+$/;
+const SAFE_PAYLOAD_MESSAGE_ID = /^\$[A-Za-z0-9_-]{1,256}:[a-z0-9.-]{1,253}$/i;
+const UNSAFE_DISPLAY_TEXT = /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u;
 
 export type AttachmentMetadata = {
   id: string;
@@ -50,9 +58,11 @@ export function createMessagePayload(messageId: MessageId, text: string, attachm
   const parts: MessagePart[] = [];
   if (text) parts.push({ part_id: crypto.randomUUID(), kind: "text", text });
   for (const attachment of attachments ? Array.isArray(attachments) ? attachments : [attachments] : []) {
-    parts.push({ part_id: crypto.randomUUID(), kind: "attachment", attachment });
+    const normalized = normalizeAttachmentMetadata(attachment);
+    if (!normalized) throw new Error("附件元数据无效");
+    parts.push({ part_id: crypto.randomUUID(), kind: "attachment", attachment: normalized });
   }
-  return { version: 2, message_id: messageId, parts, ...(relation ? { relation } : {}) };
+  return normalizeMessagePayload({ version: 2, message_id: messageId, parts, ...(relation ? { relation } : {}) }, messageId);
 }
 
 export function createContactMessagePayload(messageId: MessageId, contact: ContactIdentity): MessagePayload {
@@ -62,12 +72,66 @@ export function createContactMessagePayload(messageId: MessageId, contact: Conta
 }
 
 export function normalizeMessagePayload(payload: MessagePayload | LegacyMessagePayload, fallbackId: string): MessagePayload {
-  if ("version" in payload && payload.version === 2 && Array.isArray(payload.parts)) return payload;
+  if ("version" in payload && payload.version === 2 && Array.isArray(payload.parts)) {
+    if (typeof payload.message_id !== "string" || !SAFE_PAYLOAD_MESSAGE_ID.test(payload.message_id) || payload.parts.length > MAX_MESSAGE_PARTS) throw new Error("消息内容格式无效");
+    const partIds = new Set<string>(); const attachmentIds = new Set<string>(); let attachmentBytes = 0; let attachmentCount = 0; let textBytes = 0;
+    const parts = payload.parts.map((part): MessagePart => {
+      if (!part || typeof part !== "object" || typeof part.part_id !== "string" || !part.part_id || part.part_id.length > 512 || partIds.has(part.part_id)) throw new Error("消息内容格式无效");
+      partIds.add(part.part_id);
+      if (part.kind === "text") {
+        if (typeof part.text !== "string" || part.text.length > 16_000) throw new Error("消息文字无效");
+        textBytes += part.text.length;
+        if (textBytes > 16_000) throw new Error("消息文字过长");
+        return { part_id: part.part_id as MessagePartId, kind: "text", text: part.text };
+      }
+      if (part.kind === "attachment") {
+        const attachment = normalizeAttachmentMetadata(part.attachment);
+        if (!attachment) throw new Error("附件元数据无效");
+        if (attachmentIds.has(attachment.id)) throw new Error("附件引用重复");
+        attachmentIds.add(attachment.id);
+        attachmentCount += 1; attachmentBytes += attachment.size;
+        if (attachmentCount > MAX_MESSAGE_ATTACHMENTS || attachmentBytes > MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES) throw new Error("附件数量或总大小无效");
+        return { part_id: part.part_id as MessagePartId, kind: "attachment", attachment };
+      }
+      if (part.kind === "contact") {
+        const contact = normalizeContact(part.contact);
+        if (!contact) throw new Error("联系人名片无效");
+        return { part_id: part.part_id as MessagePartId, kind: "contact", contact };
+      }
+      throw new Error("未知的消息内容类型");
+    });
+    return { ...payload, message_id: payload.message_id as MessageId, parts };
+  }
   const legacy = payload as LegacyMessagePayload;
   const parts: MessagePart[] = [];
   if (legacy.text?.trim()) parts.push({ part_id: `${fallbackId}:text`, kind: "text", text: legacy.text.trim() });
-  if (legacy.attachment) parts.push({ part_id: `${fallbackId}:attachment`, kind: "attachment", attachment: legacy.attachment });
+  if (legacy.attachment) {
+    const attachment = normalizeAttachmentMetadata(legacy.attachment);
+    if (!attachment) throw new Error("附件元数据无效");
+    parts.push({ part_id: `${fallbackId}:attachment`, kind: "attachment", attachment });
+  }
+  if (!SAFE_PAYLOAD_MESSAGE_ID.test(fallbackId)) throw new Error("消息标识无效");
   return { version: 2, message_id: fallbackId as MessageId, parts };
+}
+
+export function normalizeAttachmentMetadata(value: unknown): AttachmentMetadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const attachment = value as Partial<AttachmentMetadata>;
+  const name = typeof attachment.name === "string" ? attachment.name.trim() : "";
+  const type = typeof attachment.type === "string" ? attachment.type.trim().toLowerCase() : "";
+  if (typeof attachment.id !== "string" || !SAFE_ATTACHMENT_ID.test(attachment.id)
+    || !name || name.length > MAX_ATTACHMENT_NAME_LENGTH || UNSAFE_DISPLAY_TEXT.test(name) || /[\\/]/u.test(name)
+    || !type || type.length > MAX_ATTACHMENT_MIME_LENGTH || !type.includes("/") || /[^\x21-\x7e]/u.test(type)
+    || !Number.isSafeInteger(attachment.size) || Number(attachment.size) < 1 || Number(attachment.size) > MAX_ATTACHMENT_PLAINTEXT_BYTES
+    || typeof attachment.key !== "string" || attachment.key.length < 1 || attachment.key.length > MAX_ATTACHMENT_SECRET_LENGTH || !SAFE_ATTACHMENT_SECRET.test(attachment.key)
+    || typeof attachment.nonce !== "string" || attachment.nonce.length < 1 || attachment.nonce.length > MAX_ATTACHMENT_SECRET_LENGTH || !SAFE_ATTACHMENT_SECRET.test(attachment.nonce)) return null;
+  const hasWidth = attachment.width !== undefined; const hasHeight = attachment.height !== undefined;
+  if (hasWidth !== hasHeight || (hasWidth && (!Number.isSafeInteger(attachment.width) || !Number.isSafeInteger(attachment.height)
+    || Number(attachment.width) < 1 || Number(attachment.height) < 1 || Number(attachment.width) > 65_535 || Number(attachment.height) > 65_535))) return null;
+  if (attachment.duration_ms !== undefined && (!Number.isSafeInteger(attachment.duration_ms) || Number(attachment.duration_ms) < 1 || Number(attachment.duration_ms) > 10 * 60_000)) return null;
+  return { id: attachment.id, name, type, size: Number(attachment.size), key: attachment.key, nonce: attachment.nonce,
+    ...(hasWidth ? { width: Number(attachment.width), height: Number(attachment.height) } : {}),
+    ...(attachment.duration_ms !== undefined ? { duration_ms: Number(attachment.duration_ms) } : {}) };
 }
 
 export function createForwardPayload(messageId: MessageId, source: MessagePayload, attachmentAliases: readonly string[] = [], savedFrom?: MessageReference): MessagePayload {
@@ -91,6 +155,17 @@ export function messageText(payload: MessagePayload): string {
 
 export function messageAttachments(payload: MessagePayload): AttachmentPart[] {
   return payload.parts.filter((part): part is AttachmentPart => part.kind === "attachment");
+}
+
+export function assertMessageAttachmentReferences(payload: MessagePayload, eventType: string, metadata: Record<string, unknown>): void {
+  const multiple = metadata.attachment_ids; const single = metadata.attachment_id;
+  if (multiple !== undefined && single !== undefined) throw new Error("附件引用格式冲突");
+  const declared = multiple === undefined ? single === undefined ? [] : [single] : multiple;
+  if (!Array.isArray(declared) || declared.length > MAX_MESSAGE_ATTACHMENTS || declared.some((id) => typeof id !== "string") || new Set(declared).size !== declared.length) throw new Error("附件引用格式无效");
+  const actual = messageAttachments(payload).map((part) => part.attachment.id);
+  if ((actual.length > 0) !== (eventType === "message.file") || actual.length !== declared.length || actual.some((id, index) => id !== declared[index])) {
+    throw new Error("加密附件内容与服务器引用不一致");
+  }
 }
 
 export function messageContacts(payload: MessagePayload): ContactPart[] {

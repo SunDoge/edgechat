@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attachmentEventType, attachmentEventTypeForFiles, attachmentPresentation, createContactMessagePayload, createForwardPayload, createMessagePayload, isAudioAttachment, isPreviewableImage, MAX_INLINE_IMAGE_BYTES, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
+import { assertMessageAttachmentReferences, attachmentEventType, attachmentEventTypeForFiles, attachmentPresentation, createContactMessagePayload, createForwardPayload, createMessagePayload, isAudioAttachment, isPreviewableImage, MAX_INLINE_IMAGE_BYTES, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
 
 describe("unified attachment presentation", () => {
   it("uses one attachment event and derives bounded previews locally", () => {
@@ -76,12 +76,12 @@ describe("unified attachment presentation", () => {
     expect(forwarded.parts[0]?.part_id).not.toBe(source.parts[0]?.part_id);
   });
 
-  it("drops malformed contact cards at the rendering boundary", () => {
+  it("rejects malformed contact cards at the decrypted payload boundary", () => {
     const malformed = { version: 2, message_id: "$bad-contact:example.com", parts: [
       { part_id: "one", kind: "contact", contact: { user_id: "alice", display_name: "Alice" } },
       { part_id: "two", kind: "contact", contact: { user_id: "@alice:example.com", display_name: "x".repeat(129) } },
     ] } as never;
-    expect(messageContacts(normalizeMessagePayload(malformed, "$fallback:example.com"))).toEqual([]);
+    expect(() => normalizeMessagePayload(malformed, "$fallback:example.com")).toThrow("联系人名片无效");
     expect(() => createContactMessagePayload("$bad:example.com", { user_id: "alice" as never, display_name: "Alice" })).toThrow("联系人名片无效");
   });
 
@@ -107,5 +107,46 @@ describe("unified attachment presentation", () => {
     const source = createMessagePayload("$voice-source:example.com", "", { id: "source-audio", name: "voice.ogg", type: "audio/ogg;codecs=opus", size: 42, key: "key", nonce: "nonce", duration_ms: 4_000 });
     const forwarded = createForwardPayload("$voice-forward:example.com", source, ["voice-alias"]);
     expect(messageAttachments(forwarded)[0]).toMatchObject({ kind: "attachment", attachment: { id: "voice-alias", duration_ms: 4_000 } });
+  });
+
+  it("bounds and normalizes untrusted attachment metadata before local projection", () => {
+    const valid = { id: "attachment_123", name: " photo.JPG ", type: "IMAGE/JPEG", size: 42, key: "key_123", nonce: "nonce_123", width: 800, height: 600 };
+    const payload = normalizeMessagePayload({ version: 2, message_id: "$safe:example.com", parts: [{ part_id: "part", kind: "attachment", attachment: valid }] }, "$safe:example.com");
+    expect(messageAttachments(payload)[0]?.attachment).toMatchObject({ name: "photo.JPG", type: "image/jpeg", width: 800, height: 600 });
+    for (const attachment of [
+      { ...valid, id: "../escape" },
+      { ...valid, name: "folder/photo.jpg" },
+      { ...valid, name: "photo\u202egpj" },
+      { ...valid, type: "image/png\nX-Test: bad" },
+      { ...valid, size: 25 * 1024 * 1024 + 1 },
+      { ...valid, height: undefined },
+      { ...valid, duration_ms: 600_001 },
+      { ...valid, key: "not+base64" },
+    ]) {
+      expect(() => normalizeMessagePayload({ version: 2, message_id: "$bad:example.com", parts: [{ part_id: "part", kind: "attachment", attachment }] } as never, "$bad:example.com")).toThrow("附件元数据无效");
+    }
+  });
+
+  it("rejects duplicate part IDs and attachment amplification", () => {
+    const attachment = (index: number) => ({ id: `attachment_${index}`, name: `${index}.bin`, type: "application/octet-stream", size: 1, key: "key", nonce: "nonce" });
+    expect(() => normalizeMessagePayload({ version: 2, message_id: "$duplicate:example.com", parts: [
+      { part_id: "same", kind: "text", text: "one" }, { part_id: "same", kind: "text", text: "two" },
+    ] }, "$duplicate:example.com")).toThrow("消息内容格式无效");
+    expect(() => normalizeMessagePayload({ version: 2, message_id: "$many:example.com", parts: Array.from({ length: 11 }, (_, index) => ({ part_id: `part-${index}`, kind: "attachment", attachment: attachment(index) })) } as never, "$many:example.com")).toThrow("附件数量或总大小无效");
+    expect(() => normalizeMessagePayload({ version: 2, message_id: "$duplicateattachment:example.com", parts: [
+      { part_id: "first", kind: "attachment", attachment: attachment(1) }, { part_id: "second", kind: "attachment", attachment: attachment(1) },
+    ] } as never, "$duplicateattachment:example.com")).toThrow("附件引用重复");
+  });
+
+  it("binds decrypted attachment IDs and order to the server-authorized references", () => {
+    const payload = createMessagePayload("$binding123:example.com", "", [
+      { id: "attachment_one", name: "one.bin", type: "application/octet-stream", size: 1, key: "key", nonce: "nonce" },
+      { id: "attachment_two", name: "two.bin", type: "application/octet-stream", size: 1, key: "key", nonce: "nonce" },
+    ]);
+    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_one", "attachment_two"] })).not.toThrow();
+    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_two", "attachment_one"] })).toThrow("不一致");
+    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_one", "attachment_one"] })).toThrow("格式无效");
+    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_id: "attachment_one", attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("格式冲突");
+    expect(() => assertMessageAttachmentReferences(payload, "message.text", { attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("不一致");
   });
 });
