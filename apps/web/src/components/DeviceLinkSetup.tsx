@@ -13,7 +13,7 @@ import { ArchiveSegmentCiphertextCache } from "../archive-segment-cache";
 import { openDeviceHistoryBundle } from "../device-history-bundle";
 import { useI18n } from "../i18n";
 
-type Stage = "preparing" | "waiting" | "approved" | "joining" | "error";
+type Stage = "preparing" | "waiting" | "approved" | "joining" | "cancelling" | "error";
 
 export function DeviceLinkSetup(props: {
   profileId: string;
@@ -213,7 +213,15 @@ export function DeviceLinkSetup(props: {
 
   async function cancel() {
     if (status()?.status && status()?.status !== "pending") return;
-    window.clearTimeout(timer); clearPendingDeviceLink(props.profileId); await clearIdentity(props.profileId); props.onCancel();
+    const current = pending(); if (!current) return props.onCancel();
+    window.clearTimeout(timer); setError(""); setStage("cancelling");
+    try {
+      await props.api.cancelDeviceLink(current.link_id, current.secret);
+      await deviceHistoryStaging.clearLink(current.link_id); await clearIdentity(props.profileId);
+      clearPendingDeviceLink(props.profileId); mls?.destroy(); mls = null; identity = null; setPending(null); props.onCancel();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("deviceLink.error.cancel")); setStage("error");
+    }
   }
 
   onMount(() => void begin().catch((cause) => { setError(cause instanceof Error ? cause.message : t("deviceLink.error.create")); setStage("error"); }));
@@ -229,7 +237,7 @@ export function DeviceLinkSetup(props: {
       <div class="rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5"><div class="flex items-center gap-2"><IconShieldCheck class="size-4 stroke-brand"/><strong class="text-sm font-semibold text-ink">{t("deviceLink.compare")}</strong></div><div class="mt-3 grid grid-cols-4 gap-2 font-mono text-xs font-semibold tracking-wide text-ink">{fingerprint().split(" ").map((part) => <span class="rounded-md bg-white px-1 py-2 text-center ring-1 ring-black/8">{part}</span>)}</div></div>
       <div class="flex gap-2"><button type="button" class="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg font-medium text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => void navigator.clipboard.writeText(url()).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1_500); })}><IconCopy class="size-4 stroke-brand"/>{copied() ? t("deviceLink.copied") : t("deviceLink.copy")}</button></div>
     </Show>
-    <div aria-live="polite" class={`flex items-start gap-3 rounded-xl px-4 py-3 text-sm/5 ${stage() === "error" ? "bg-red-50 text-red-700" : "bg-brand-soft text-ink"}`}><IconDeviceMobile class={`mt-0.5 size-4 shrink-0 ${stage() === "error" ? "stroke-red-600" : "stroke-brand"}`}/><div><strong class="font-semibold">{stage() === "waiting" ? t("deviceLink.stage.waiting") : stage() === "approved" ? t("deviceLink.stage.approved") : stage() === "joining" ? t("deviceLink.stage.joining") : stage() === "error" ? t("deviceLink.stage.error") : t("deviceLink.stage.preparing")}</strong><p class="mt-0.5 text-xs/5 opacity-75">{stage() === "approved" ? t("deviceLink.rooms", { count: status()?.room_count ?? status()?.rooms?.length ?? 0 }) : stage() === "error" ? error() : t("deviceLink.keepOpen")}</p></div></div>
+    <div aria-live="polite" class={`flex items-start gap-3 rounded-xl px-4 py-3 text-sm/5 ${stage() === "error" ? "bg-red-50 text-red-700" : "bg-brand-soft text-ink"}`}><IconDeviceMobile class={`mt-0.5 size-4 shrink-0 ${stage() === "error" ? "stroke-red-600" : "stroke-brand"}`}/><div><strong class="font-semibold">{stage() === "waiting" ? t("deviceLink.stage.waiting") : stage() === "approved" ? t("deviceLink.stage.approved") : stage() === "joining" ? t("deviceLink.stage.joining") : stage() === "cancelling" ? t("deviceLink.stage.cancelling") : stage() === "error" ? t("deviceLink.stage.error") : t("deviceLink.stage.preparing")}</strong><p class="mt-0.5 text-xs/5 opacity-75">{stage() === "approved" ? t("deviceLink.rooms", { count: status()?.room_count ?? status()?.rooms?.length ?? 0 }) : stage() === "error" ? error() : t("deviceLink.keepOpen")}</p></div></div>
     <Show when={stage() === "error"}><button type="button" class="flex h-11 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white" onClick={() => void retry()}><IconRefresh class="size-4 stroke-white"/>{t("deviceLink.retry")}</button></Show>
     <Show when={stage() === "preparing" || stage() === "waiting" || (stage() === "error" && (!status()?.status || status()?.status === "pending"))}><button type="button" class="h-10 text-sm font-medium text-muted hover:text-ink" onClick={() => void cancel()}>{t("deviceLink.cancel")}</button></Show>
   </section>;

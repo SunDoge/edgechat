@@ -435,6 +435,142 @@ it("hard-expires an unclaimed device link, revokes its zero-room device, and del
   expect(await usage.json()).toMatchObject({ archive_bytes: 0, archive_objects: 0 });
 });
 
+it("lets the target withdraw an unapproved device-link capability without object storage", async () => {
+  const r2Before = (await env.ARCHIVE.list()).objects.length;
+  const target = await device(`cancel-pending-${crypto.randomUUID()}`);
+  const initiated = await SELF.fetch("https://edgechat.test/api/v1/device-links", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...target.body, mls_key_packages: ["C".repeat(120)] }),
+  });
+  const link = await initiated.json() as { link_id: string; secret: string };
+  const cancel = () => SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/cancel`, {
+    method: "DELETE", headers: { "x-device-link-secret": link.secret },
+  });
+  expect((await cancel()).status).toBe(204);
+  expect((await cancel()).status).toBe(204);
+  const status = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, {
+    headers: { "x-device-link-secret": link.secret },
+  });
+  expect(await status.json()).toMatchObject({ status: "cancelled" });
+  const claim = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
+    method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" }, body: "{}",
+  });
+  expect(claim.status).toBe(410);
+  expect(await claim.json()).toMatchObject({ code: "device_link_cancelled" });
+  expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
+});
+
+it("lets an authenticated approval device cancel when the approval request never reached the server", async () => {
+  const source = await device(`cancel-pre-src-${crypto.randomUUID()}`);
+  const target = await device(`cancel-pre-dst-${crypto.randomUUID()}`);
+  const account = await register(`cancel_pre_${crypto.randomUUID().slice(0, 8)}`, source);
+  const initiated = await SELF.fetch("https://edgechat.test/api/v1/device-links", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(target.body),
+  });
+  const link = await initiated.json() as { link_id: string; secret: string };
+  const cancelled = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, {
+    method: "DELETE", headers: { authorization: `Bearer ${account.access_token}` },
+  });
+  expect(cancelled.status).toBe(204);
+  const status = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, {
+    headers: { "x-device-link-secret": link.secret },
+  });
+  expect(await status.json()).toMatchObject({ status: "cancelled" });
+});
+
+it("lets the account cancel an added unclaimed device and stages MLS removal with exact R2 cleanup", async () => {
+  const r2Before = (await env.ARCHIVE.list()).objects.length;
+  const source = await device(`cancel-added-source-${crypto.randomUUID()}`);
+  const target = await device(`cancel-added-target-${crypto.randomUUID()}`);
+  const account = await register(`cancel_added_${crypto.randomUUID().slice(0, 8)}`, source);
+  const roomId = `!cancel-added-${crypto.randomUUID()}:localhost` as RoomId;
+  expect((await SELF.fetch("https://edgechat.test/api/v1/rooms", {
+    method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" },
+    body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }),
+  })).status).toBe(201);
+  const initiated = await SELF.fetch("https://edgechat.test/api/v1/device-links", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...target.body, mls_key_packages: ["Z".repeat(120)] }),
+  });
+  const link = await initiated.json() as { link_id: string; secret: string };
+  const authHeaders = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "POST", headers: authHeaders })).status).toBe(200);
+  const unsigned: Omit<ClientEvent, "signature"> = {
+    event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+    type: "control.device.add", created_at: Date.now(), ciphertext: "cancelled-device-add",
+    metadata: { mls_epoch: 2, target_device_id: target.id, link_id: link.link_id },
+  };
+  const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, source.signing.privateKey, canonicalEventBytes(unsigned)));
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/rooms/${encodeURIComponent(roomId)}`, {
+    method: "POST", headers: authHeaders,
+    body: JSON.stringify({ event: { ...unsigned, signature }, encrypted_state: JSON.stringify({ version: 1, welcome: "cancel-welcome", ratchet_tree: "cancel-tree" }) }),
+  })).status).toBe(200);
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history`, {
+    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history" },
+    body: new Uint8Array([1, 3, 5, 7]),
+  })).status).toBe(201);
+  expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before + 1);
+
+  const cancel = () => SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "DELETE", headers: authHeaders });
+  expect((await cancel()).status).toBe(204);
+  expect((await cancel()).status).toBe(204);
+  expect(await env.DB.prepare("SELECT status FROM device_links WHERE link_id = ?").bind(link.link_id).first()).toEqual({ status: "cancelled" });
+  const revocation = await env.DB.prepare("SELECT revocation_id, status FROM device_revocations WHERE target_device_id = ?").bind(target.id)
+    .first<{ revocation_id: string; status: string }>();
+  expect(revocation).toMatchObject({ status: "pending" });
+  expect(await env.DB.prepare("SELECT room_id, expected_epoch, status FROM device_revocation_rooms WHERE revocation_id = ?").bind(revocation!.revocation_id).first())
+    .toEqual({ room_id: roomId, expected_epoch: 3, status: "pending" });
+  expect(await env.DB.prepare("SELECT payload FROM sync_log WHERE recipient_user_id = ? AND kind = 'device.event' ORDER BY cursor DESC LIMIT 1").bind(account.user_id).first())
+    .toEqual({ payload: JSON.stringify({ type: "device.link.cancelled", device_id: target.id, revocation_id: revocation!.revocation_id }) });
+  expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
+  const status = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, {
+    headers: { "x-device-link-secret": link.secret },
+  });
+  expect(await status.json()).toMatchObject({ status: "cancelled" });
+  const claim = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
+    method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" }, body: "{}",
+  });
+  expect(claim.status).toBe(410);
+  expect(await claim.json()).toMatchObject({ code: "device_link_cancelled" });
+});
+
+it("heals a device Add that lands after cancellation already finalized a zero-room revocation", async () => {
+  const source = await device(`cancel-race-source-${crypto.randomUUID()}`);
+  const target = await device(`cancel-race-target-${crypto.randomUUID()}`);
+  const account = await register(`cancel_race_${crypto.randomUUID().slice(0, 8)}`, source);
+  const roomId = `!cancel-race-${crypto.randomUUID()}:localhost` as RoomId;
+  expect((await SELF.fetch("https://edgechat.test/api/v1/rooms", {
+    method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" },
+    body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }),
+  })).status).toBe(201);
+  const initiated = await SELF.fetch("https://edgechat.test/api/v1/device-links", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...target.body, mls_key_packages: ["R".repeat(120)] }),
+  });
+  const link = await initiated.json() as { link_id: string };
+  const authHeaders = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
+  expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "POST", headers: authHeaders })).status).toBe(200);
+  const cancel = () => SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "DELETE", headers: authHeaders });
+  expect((await cancel()).status).toBe(204);
+  expect(await env.DB.prepare("SELECT revoked_at FROM devices WHERE device_id = ?").bind(target.id).first<{ revoked_at: number | null }>())
+    .toMatchObject({ revoked_at: expect.any(Number) });
+
+  // Model the narrow interleaving where RoomDO accepted a previously
+  // authorized Add immediately before the cancellation became visible.
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE rooms SET mls_epoch = 2 WHERE room_id = ?").bind(roomId),
+    env.DB.prepare("INSERT INTO room_devices (room_id, device_id, user_id, joined_epoch, joined_seq, removed_epoch, created_at, removed_at) VALUES (?, ?, ?, 2, 1, NULL, ?, NULL)")
+      .bind(roomId, target.id, account.user_id, now),
+  ]);
+  expect((await cancel()).status).toBe(204);
+  const repair = await env.DB.prepare("SELECT revocation_id, status FROM device_revocations WHERE target_device_id = ? AND status != 'complete'")
+    .bind(target.id).first<{ revocation_id: string; status: string }>();
+  expect(repair).toMatchObject({ status: "pending" });
+  expect(await env.DB.prepare("SELECT room_id, expected_epoch, status FROM device_revocation_rooms WHERE revocation_id = ?").bind(repair!.revocation_id).first())
+    .toEqual({ room_id: roomId, expected_epoch: 3, status: "pending" });
+});
+
 it("stages durable MLS removal when an added but unclaimed device link expires", async () => {
   const r2Before = (await env.ARCHIVE.list()).objects.length;
   const source = await device(`expired-room-source-${crypto.randomUUID()}`);

@@ -10,7 +10,7 @@ import { Dialog } from "./primitives";
 type BarcodeDetectorLike = { detect(source: ImageBitmapSource): Promise<Array<{ rawValue: string }>> };
 type BarcodeDetectorConstructor = new (options: { formats: string[] }) => BarcodeDetectorLike;
 
-export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (linkId: string) => Promise<void>; onClose: () => void }) {
+export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (linkId: string) => Promise<void>; onCancelLink: (linkId: string) => Promise<void>; onClose: () => void }) {
   const { t } = useI18n();
   const [input, setInput] = createSignal("");
   const [preview, setPreview] = createSignal<DeviceLinkPreview | null>(null);
@@ -19,6 +19,7 @@ export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (li
   const [busy, setBusy] = createSignal(false);
   const [scanning, setScanning] = createSignal(false);
   const [error, setError] = createSignal("");
+  const [approvalStarted, setApprovalStarted] = createSignal(false);
   let video: HTMLVideoElement | undefined;
   let stream: MediaStream | null = null;
   let scanTimer: number | undefined;
@@ -64,9 +65,16 @@ export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (li
 
   async function approve() {
     const item = preview(); if (!item || !confirmed() || busy()) return;
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setApprovalStarted(true);
     try { await props.onApprove(item.link_id); }
     catch (cause) { setError(cause instanceof Error ? cause.message : t("deviceLinkApproval.error.approve")); setBusy(false); }
+  }
+
+  async function cancelApproved() {
+    const item = preview(); if (!item || busy()) return;
+    setBusy(true); setError("");
+    try { await props.onCancelLink(item.link_id); props.onClose(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : t("deviceLinkApproval.error.cancel")); setBusy(false); }
   }
 
   onCleanup(stopCamera);
@@ -77,7 +85,7 @@ export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (li
         <div class="flex items-center gap-3 rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5"><span class="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft"><IconDeviceMobile class="size-5 stroke-brand"/></span><div class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{preview()!.display_name}</strong><p class="mt-0.5 text-xs text-muted">{t("deviceLinkApproval.request")}</p></div></div>
         <div class="rounded-xl border border-brand/20 bg-brand-soft/50 p-4"><div class="flex items-center gap-2"><IconShieldCheck class="size-4 stroke-brand"/><strong class="text-sm font-semibold text-ink">{t("deviceLinkApproval.compare")}</strong></div><DeviceFingerprint value={fingerprint()} class="mt-3 gap-2"/></div>
         <label class="flex items-start gap-3 rounded-xl p-3 text-sm/6 text-ink ring-1 ring-black/10"><input type="checkbox" class="mt-1 size-4 shrink-0 accent-brand" checked={confirmed()} onChange={(event) => setConfirmed(event.currentTarget.checked)}/><span>{t("deviceLinkApproval.confirm")}</span></label>
-        <div class="flex justify-end gap-2"><button type="button" disabled={busy()} class="h-10 rounded-lg px-4 text-sm font-medium text-ink hover:bg-neutral-100" onClick={() => { setPreview(null); setConfirmed(false); }}>{t("deviceLinkApproval.back")}</button><button type="button" disabled={!confirmed() || busy()} class="h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white disabled:bg-neutral-300" onClick={() => void approve()}>{busy() ? t("deviceLinkApproval.approving") : t("deviceLinkApproval.approve")}</button></div>
+        <div class="flex flex-wrap justify-end gap-2"><Show when={approvalStarted() && error()}><button type="button" disabled={busy()} class="h-10 rounded-lg px-4 text-sm font-semibold text-red-600 hover:bg-red-50" onClick={() => void cancelApproved()}>{t("deviceLinkApproval.cancel")}</button></Show><button type="button" disabled={busy()} class="h-10 rounded-lg px-4 text-sm font-medium text-ink hover:bg-neutral-100" onClick={() => { setPreview(null); setConfirmed(false); setApprovalStarted(false); }}>{t("deviceLinkApproval.back")}</button><button type="button" disabled={!confirmed() || busy()} class="h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white disabled:bg-neutral-300" onClick={() => void approve()}>{busy() ? t("deviceLinkApproval.approving") : t("deviceLinkApproval.approve")}</button></div>
       </>}>
         <Show when={scanning()}><div class="relative aspect-square overflow-hidden rounded-2xl bg-neutral-950"><video ref={video} muted playsinline class="size-full object-cover"/><div class="pointer-events-none absolute inset-[15%] rounded-xl border-2 border-white/80 shadow-[0_0_0_999px_rgb(0_0_0/0.25)]"/><button type="button" class="absolute bottom-3 left-1/2 h-9 -translate-x-1/2 rounded-lg bg-black/60 px-3 text-sm font-medium text-white backdrop-blur" onClick={stopCamera}>{t("deviceLinkApproval.stopScan")}</button></div></Show>
         <Show when={!scanning()}><button type="button" autofocus class="flex h-12 items-center justify-center gap-2 rounded-xl bg-brand text-sm font-semibold text-white hover:bg-brand-strong" onClick={() => void startCamera()}><IconCamera class="size-5 stroke-white"/>{t("deviceLinkApproval.scan")}</button></Show>

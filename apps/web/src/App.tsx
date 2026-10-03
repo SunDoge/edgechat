@@ -1247,8 +1247,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (["profile.updated", "room.leave.requested", "room.leave.updated", "room.leave.cancelled"].includes(String(detail?.type))) {
         void loadRooms(currentMls).catch(() => setConnectionState("offline"));
       }
-      if (detail?.type === "device.link.expired") {
-        setNotice(t("devices.linkExpired.removing"));
+      if (detail?.type === "device.link.expired" || detail?.type === "device.link.cancelled") {
+        setNotice(detail.type === "device.link.cancelled" ? t("devices.linkCancelled.removing") : t("devices.linkExpired.removing"));
         void resumeDeviceRevocations(currentMls).then(() => {
           const target = String(detail.device_id ?? "");
           if (target && deviceRevocations()[target]?.status === "failed") setNotice(t("devices.linkExpired.failed"));
@@ -2794,13 +2794,38 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     throw new Error("新设备尚未准备完成，请保持两台设备联网后重试");
   }
 
+  async function settleCancelledDeviceLink(linkId: string, currentMls: OpenMlsMessagingCore): Promise<OpenMlsMessagingCore> {
+    const queued = (await db.pendingDeviceLinks()).filter((item) => item.link_id === linkId);
+    if (queued.length > 1) throw new Error("设备链接存在多个未确认的本机加密提交，无法安全自动回滚");
+    let activeMls = currentMls;
+    if (queued[0]) {
+      const expectedEpoch = Number(queued[0].event.metadata.mls_epoch);
+      activeMls = await restoreMlsBeforeQueuedCommit(queued[0].room_id, expectedEpoch, queued[0].previous_mls_state, "已撤销的设备链接");
+      await db.removeDeviceLinkOutbox(linkId, queued[0].room_id);
+    }
+    await db.removeDeviceLinkJob(linkId); await deviceHistoryStaging.clearLink(linkId);
+    await syncRef?.catchUp();
+    if (mlsRef) { activeMls = mlsRef; await resumeDeviceRevocations(activeMls); }
+    setDevices((await api.devices()).devices); scheduleDraftSync(0);
+    return activeMls;
+  }
+
+  async function cancelApprovedDeviceLink(linkId: string): Promise<void> {
+    const currentMls = mlsRef;
+    if (!currentMls) throw new Error("本机加密状态尚未就绪");
+    await api.cancelApprovedDeviceLink(linkId);
+    await settleCancelledDeviceLink(linkId, currentMls);
+    setNotice(t("devices.linkCancelled.complete")); setDeviceLinkOpen(false);
+  }
+
   async function executeDeviceLink(linkId: string, currentMls = mlsRef): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session();
     if (!currentMls || !currentIdentity || !currentSession) throw new Error("本机加密状态尚未就绪");
-    let activeMls = currentMls; let historyTransferWarning = "";
-    let view = await api.deviceLinkPreview(linkId);
-    await db.saveDeviceLinkJob(linkId, view.device_id);
+    let activeMls = currentMls; let historyTransferWarning = ""; let viewLoaded = false;
+    let view: DeviceLinkPreview;
     try {
+      view = await api.deviceLinkPreview(linkId); viewLoaded = true;
+      await db.saveDeviceLinkJob(linkId, view.device_id);
       if (view.status === "pending") await api.approveDeviceLink(linkId);
       view = await waitForDeviceLinkReady(linkId);
       if (view.account_mode === "opaque" && !currentIdentity.accountCredential) {
@@ -2925,6 +2950,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             () => api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state),
             () => db.removeDeviceLinkOutbox(linkId, room.room_id));
         } catch (cause) {
+          if (cause instanceof ApiError && (cause.code === "device_link_cancelled" || cause.code === "device_link_expired")) {
+            activeMls = await settleCancelledDeviceLink(linkId, activeMls);
+            setNotice(cause.code === "device_link_cancelled" ? t("devices.linkCancelled.complete") : t("devices.linkExpired.removing"));
+            setDeviceLinkOpen(false); return;
+          }
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
             activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备链接提交");
             await db.removeDeviceLinkOutbox(linkId, room.room_id); await syncRef?.catchUp();
@@ -2938,6 +2968,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await db.removeDeviceLinkJob(linkId); setDevices((await api.devices()).devices); scheduleDraftSync(0);
       setNotice(`新设备已安全加入现有加密对话${historyTransferWarning}`); setDeviceLinkOpen(false);
     } catch (cause) {
+      if (cause instanceof ApiError && (cause.code === "device_link_cancelled" || cause.code === "device_link_expired"
+        || (!viewLoaded && cause.code === "not_found"))) {
+        await settleCancelledDeviceLink(linkId, activeMls);
+        setNotice(cause.code === "device_link_expired" ? t("devices.linkExpired.removing") : t("devices.linkCancelled.complete"));
+        setDeviceLinkOpen(false); return;
+      }
       await db.failDeviceLinkJob(linkId, cause instanceof Error ? cause.message : String(cause)); throw cause;
     }
   }
@@ -3517,7 +3553,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>
       <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} backup={lastBackup()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} voiceRecordingAvailable={supportsVoiceRecording()} passwordChangeSupported={serverSupports(currentSession().protocol, "account.password-change.v1") && !identity()?.accountCredential} passkeysSupported={serverSupports(currentSession().protocol, "passkeys.v1")} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onChangePassword={() => { setDevicesOpen(false); setPasswordChangeOpen(true); }} onManagePasskeys={() => { setDevicesOpen(false); setPasskeysOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
       <Show when={profileOpen() && profile()}>{(currentProfile) => <ProfileDialog profile={currentProfile()} onSave={updateProfile} onClose={() => setProfileOpen(false)}/>}</Show>
-      <Show when={deviceLinkOpen()}><DeviceLinkApprovalDialog api={api} onApprove={(linkId) => executeDeviceLink(linkId)} onClose={() => setDeviceLinkOpen(false)}/></Show>
+      <Show when={deviceLinkOpen()}><DeviceLinkApprovalDialog api={api} onApprove={(linkId) => executeDeviceLink(linkId)} onCancelLink={cancelApprovedDeviceLink} onClose={() => setDeviceLinkOpen(false)}/></Show>
       <Show when={backupOpen()}><BackupDialog onCreate={exportPortableBackup} onClose={() => setBackupOpen(false)}/></Show>
       <Show when={passwordChangeOpen()}><PasswordChangeDialog onChange={changeAccountPassword} onClose={() => setPasswordChangeOpen(false)}/></Show>
       <Show when={passkeysOpen()}><PasskeyDialog api={api} accountCredential={identity()?.accountCredential} onClose={() => setPasskeysOpen(false)}/></Show>

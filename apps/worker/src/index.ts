@@ -1683,14 +1683,14 @@ async function deviceLinkHistoryTransfer(env: Env, linkId: string) {
   };
 }
 
-async function stageExpiredDeviceLinkRevocation(env: Env, link: {
+async function stageAbandonedDeviceLinkRevocation(env: Env, link: {
   link_id: string; user_id: string | null; device_id: string; approved_by_device_id: string | null;
-}, now: number): Promise<void> {
+}, now: number, reason: "expired" | "cancelled"): Promise<void> {
   if (!link.user_id || !link.approved_by_device_id) return;
   const db = createDatabase(env.DB);
   const device = await db.selectFrom("devices").select(["device_id", "revoked_at"])
     .where("device_id", "=", link.device_id).where("user_id", "=", link.user_id).executeTakeFirst();
-  if (!device || device.revoked_at !== null) return;
+  if (!device) return;
   const existing = await db.selectFrom("device_revocations").select("revocation_id")
     .where("target_device_id", "=", link.device_id).where("user_id", "=", link.user_id)
     .where("status", "!=", "complete").executeTakeFirst();
@@ -1699,6 +1699,10 @@ async function stageExpiredDeviceLinkRevocation(env: Env, link: {
     .innerJoin("room_members as rm", (join) => join.onRef("rm.room_id", "=", "rd.room_id").onRef("rm.user_id", "=", "rd.user_id"))
     .select(["rd.room_id", "r.mls_epoch"]).where("rd.device_id", "=", link.device_id).where("rd.user_id", "=", link.user_id)
     .where("rd.removed_at", "is", null).where("rm.removed_at", "is", null).orderBy("rd.room_id").execute();
+  // A cancellation can win immediately before an already-authorized RoomDO
+  // append finishes. The first zero-room revocation then completes, but the
+  // late Add still needs a fresh durable Remove job.
+  if (device.revoked_at !== null && !rooms.length) return;
   const revocationId = randomId(18);
   try {
     await batch(env.DB, [
@@ -1709,7 +1713,7 @@ async function stageExpiredDeviceLinkRevocation(env: Env, link: {
         room_id: room.room_id, expected_epoch: room.mls_epoch + 1, status: "pending", event_id: null, updated_at: now })),
       ...(rooms.length ? [db.insertInto("sync_log").values({ recipient_user_id: link.user_id, kind: "device.event",
         room_id: null, seq: null, event_id: null,
-        payload: JSON.stringify({ type: "device.link.expired", device_id: link.device_id, revocation_id: revocationId }), created_at: now })] : []),
+        payload: JSON.stringify({ type: `device.link.${reason}`, device_id: link.device_id, revocation_id: revocationId }), created_at: now })] : []),
     ]);
   } catch (error) {
     // Another room membership operation may temporarily own one of the room
@@ -1719,28 +1723,57 @@ async function stageExpiredDeviceLinkRevocation(env: Env, link: {
     throw error;
   }
   if (!rooms.length) await finalizeDeviceRevocation(env, revocationId);
-  logSecurityEvent("info", "security.device_link.expired", { rooms: rooms.length });
+  logSecurityEvent("info", `security.device_link.${reason}`, { rooms: rooms.length });
 }
 
-async function expireDeviceLink(env: Env, linkId: string, now = Date.now()): Promise<boolean> {
+async function abandonDeviceLink(env: Env, linkId: string, reason: "expired" | "cancelled", now = Date.now()): Promise<boolean> {
   const db = createDatabase(env.DB);
   let link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
-  if (!link || link.status === "claimed" || link.expires_at > now) return false;
+  if (!link || link.status === "claimed" || (reason === "expired" && link.expires_at > now)) return false;
   let changed = false;
   if (link.status !== "cancelled") {
+    let cancellation = db.updateTable("device_links").set({ status: "cancelled", updated_at: now }).where("link_id", "=", linkId)
+      .where("status", "in", ["pending", "awaiting_packages", "approved", "complete"]);
+    if (reason === "expired") cancellation = cancellation.where("expires_at", "<=", now);
     const [cancelled] = await batch(env.DB, [
-      db.updateTable("device_links").set({ status: "cancelled", updated_at: now }).where("link_id", "=", linkId)
-        .where("status", "in", ["pending", "awaiting_packages", "approved", "complete"]).where("expires_at", "<=", now),
+      cancellation,
       db.deleteFrom("device_link_rooms").where("link_id", "=", linkId).where("status", "=", "pending"),
     ]);
     changed = cancelled.numAffectedRows === 1n;
     link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
     if (!link || link.status === "claimed" || link.status !== "cancelled") return false;
   }
-  await stageExpiredDeviceLinkRevocation(env, link, now);
+  await stageAbandonedDeviceLinkRevocation(env, link, now, reason);
   await removeDeviceLinkHistory(env, link);
   await removeDeviceLinkHistoryShards(env, link.link_id, link.user_id);
   return changed;
+}
+
+async function expireDeviceLink(env: Env, linkId: string, now = Date.now()): Promise<boolean> {
+  return abandonDeviceLink(env, linkId, "expired", now);
+}
+
+async function cancelDeviceLinkBySecret(request: Request, env: Env, linkId: string): Promise<Response> {
+  const db = createDatabase(env.DB);
+  const link = await db.selectFrom("device_links").select(["link_id", "status"])
+    .where("link_id", "=", linkId).where("secret_hash", "=", await sha256(deviceLinkSecret(request))).executeTakeFirst();
+  if (!link) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.status === "claimed") throw new HttpError(409, "Claimed devices must be revoked", "device_link_claimed");
+  await abandonDeviceLink(env, linkId, "cancelled");
+  return new Response(null, { status: 204 });
+}
+
+async function cancelDeviceLinkForAccount(env: Env, auth: AuthContext, linkId: string): Promise<Response> {
+  requireUser(auth);
+  const link = await createDatabase(env.DB).selectFrom("device_links").select(["user_id", "status"])
+    .where("link_id", "=", linkId).executeTakeFirst();
+  // Possession of the unapproved link ID already authorizes approveDeviceLink;
+  // allow the same source-side recovery surface to cancel if approval never
+  // reached the Worker. Once associated, only that account may cancel it.
+  if (!link || (link.user_id !== null && link.user_id !== auth.userId)) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.status === "claimed") throw new HttpError(409, "Claimed devices must be revoked", "device_link_claimed");
+  await abandonDeviceLink(env, linkId, "cancelled");
+  return new Response(null, { status: 204 });
 }
 
 function deviceLinkSecret(request: Request): string {
@@ -2124,6 +2157,7 @@ async function commitDeviceLinkRoom(request: Request, env: Env, auth: AuthContex
   const db = createDatabase(env.DB);
   const link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
   if (!link || link.user_id !== auth.userId) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.status === "cancelled") throw new HttpError(410, "Device link was cancelled", "device_link_cancelled");
   if (link.expires_at <= Date.now() && link.status !== "claimed") {
     await expireDeviceLink(env, linkId);
     throw new HttpError(410, "Device link expired", "device_link_expired");
@@ -2154,15 +2188,25 @@ async function commitDeviceLinkRoom(request: Request, env: Env, auth: AuthContex
     db.updateTable("device_link_rooms").set({ status: "complete", event_id: event.event_id, encrypted_state: encryptedState, updated_at: now }).where("link_id", "=", linkId).where("room_id", "=", roomId),
   ]);
   const pending = await db.selectFrom("device_link_rooms").select("room_id").where("link_id", "=", linkId).where("status", "=", "pending").executeTakeFirst();
-  if (!pending) await batch(env.DB, [
-    db.updateTable("device_links").set({ status: "complete", completed_at: now, updated_at: now }).where("link_id", "=", linkId),
-    db.insertInto("sync_log").values({ recipient_user_id: link.user_id!, kind: "device.event", room_id: null, seq: null, event_id: null, payload: JSON.stringify({ type: "device.added", device_id: link.device_id, link_id: linkId }), created_at: now }),
-  ]);
+  if (!pending) {
+    const completed = await db.updateTable("device_links").set({ status: "complete", completed_at: now, updated_at: now })
+      .where("link_id", "=", linkId).where("status", "=", "approved").executeTakeFirst();
+    if (completed.numUpdatedRows === 1n) {
+      await db.insertInto("sync_log").values({ recipient_user_id: link.user_id!, kind: "device.event", room_id: null, seq: null, event_id: null,
+        payload: JSON.stringify({ type: "device.added", device_id: link.device_id, link_id: linkId }), created_at: now }).execute();
+    }
+  }
+  const finalLink = await db.selectFrom("device_links").select(["status", "approved_by_device_id"])
+    .where("link_id", "=", linkId).executeTakeFirst();
+  if (finalLink?.status === "cancelled") {
+    await stageAbandonedDeviceLinkRevocation(env, { ...link, approved_by_device_id: finalLink.approved_by_device_id }, now, "cancelled");
+  }
   return json({ link_id: linkId, room_id: roomId, status: "complete", event: accepted });
 }
 
 async function claimDeviceLink(request: Request, env: Env, linkId: string): Promise<Response> {
   const link = await deviceLinkBySecret(request, env, linkId);
+  if (link.status === "cancelled") throw new HttpError(410, "Device link was cancelled", "device_link_cancelled");
   if (!link.user_id || (link.status !== "complete" && link.status !== "claimed")) throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
   const body = await readJson(request);
   const accessToken = stringField(body, "access_token", 128);
@@ -4790,6 +4834,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (publicDeviceLink[2] === "key-packages" && request.method === "POST") return uploadDeviceLinkPackages(request, env, linkId);
     if (publicDeviceLink[2] === "claim" && request.method === "POST") return claimDeviceLink(request, env, linkId);
   }
+  const publicDeviceLinkCancel = path.match(/^\/api\/v1\/device-links\/([^/]+)\/cancel$/);
+  if (publicDeviceLinkCancel && request.method === "DELETE") {
+    const linkId = decodeURIComponent(publicDeviceLinkCancel[1]);
+    await limitUnauthenticatedRequest(request, env, "device-link", linkId);
+    return cancelDeviceLinkBySecret(request, env, linkId);
+  }
   const publicDeviceLinkHistory = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history$/);
   if (publicDeviceLinkHistory && (request.method === "GET" || request.method === "DELETE")) {
     const linkId = decodeURIComponent(publicDeviceLinkHistory[1]);
@@ -4902,6 +4952,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   const deviceLink = path.match(/^\/api\/v1\/device-links\/([^/]+)$/);
   if (deviceLink && request.method === "GET") return previewDeviceLink(env, auth, decodeURIComponent(deviceLink[1]));
   if (deviceLink && request.method === "POST") return approveDeviceLink(env, auth, decodeURIComponent(deviceLink[1]));
+  if (deviceLink && request.method === "DELETE") return cancelDeviceLinkForAccount(env, auth, decodeURIComponent(deviceLink[1]));
   const deviceLinkHistory = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history$/);
   if (deviceLinkHistory && request.method === "PUT") return uploadDeviceLinkHistory(request, env, auth, decodeURIComponent(deviceLinkHistory[1]));
   const deviceLinkAccountCredential = path.match(/^\/api\/v1\/device-links\/([^/]+)\/account-credential$/);
