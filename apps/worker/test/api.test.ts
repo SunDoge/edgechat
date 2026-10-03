@@ -1023,7 +1023,7 @@ describe("single-server durable delivery", () => {
     await env.DB.prepare("UPDATE profile_avatar_repair_jobs SET cleanup_pending = 1, updated_at = 1 WHERE user_id = ?").bind(account.user_id).run();
     const blockedRepair = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", { method: "PUT", headers, body: bytes });
     expect(blockedRepair.status).toBe(503);
-    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1 });
+    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1, failed: 0 });
     expect(await env.ARCHIVE.head(stored!.avatar_object_key)).toBeNull();
 
     const repaired = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", { method: "PUT", headers, body: bytes });
@@ -1036,6 +1036,48 @@ describe("single-server durable delivery", () => {
     const usage = await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${account.access_token}` } });
     expect(await usage.json()).toMatchObject({ avatar_bytes: 12, avatar_objects: 1, used_bytes: 12, used_objects: 1 });
     expect((await env.ARCHIVE.list({ prefix: "profiles/avatars/" })).objects).toHaveLength(1);
+  });
+
+  it("fairly drains mixed corrupt-object cleanup queues and isolates one failed exact delete", async () => {
+    const account = await register("repair_cleanup_fairness", await device("repair-cleanup-fairness-device"));
+    const roomId = "!repair-cleanup-fairness:localhost" as RoomId;
+    const headers = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
+    expect((await SELF.fetch("https://edgechat.test/api/v1/rooms", { method: "POST", headers,
+      body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }) })).status).toBe(201);
+
+    await env.DB.prepare(`WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM n WHERE i < 99)
+      INSERT INTO attachments (attachment_id, room_id, uploader_user_id, object_key, ciphertext_bytes, created_at, ciphertext_sha256)
+      SELECT printf('fair-attachment-%03d', i), ?1, ?2, printf('attachments/fair-%03d', i), 1, 1, ?3 FROM n`)
+      .bind(roomId, account.user_id, b64url(new Uint8Array(32).buffer)).run();
+    await env.DB.prepare(`INSERT INTO attachment_repair_jobs
+      (attachment_id, detected_at, updated_at, attempts, cleanup_pending)
+      SELECT attachment_id, 2, 2, 0, 1 FROM attachments WHERE attachment_id LIKE 'fair-attachment-%'`).run();
+    await env.DB.prepare(`UPDATE users SET avatar_id = ?1, avatar_object_key = ?2, avatar_sha256 = ?3, avatar_bytes = 1 WHERE user_id = ?4`)
+      .bind("fair-avatar-id-000000000", "profiles/avatars/fair.webp", b64url(new Uint8Array(32).buffer), account.user_id).run();
+    await env.DB.prepare(`INSERT INTO profile_avatar_repair_jobs
+      (user_id, object_key, avatar_sha256, byte_size, detected_at, updated_at, attempts, cleanup_pending)
+      VALUES (?1, 'profiles/avatars/fair.webp', ?2, 1, 1, 1, 0, 1)`)
+      .bind(account.user_id, b64url(new Uint8Array(32).buffer)).run();
+
+    const failedKey = "attachments/fair-000";
+    const failingArchive = new Proxy(env.ARCHIVE, {
+      get(target, property) {
+        const value = Reflect.get(target, property);
+        if (property !== "delete") return typeof value === "function" ? value.bind(target) : value;
+        return async (key: string | string[]) => {
+          if (key === failedKey || (Array.isArray(key) && key.includes(failedKey))) throw new Error("injected exact delete failure");
+          return target.delete(key);
+        };
+      },
+    }) as R2Bucket;
+    const result = await processPendingRepairObjectCleanups({ ...(env as unknown as Env), ARCHIVE: failingArchive }, 5 * 60 * 1_000 + 2);
+    expect(result).toEqual({ attempted: 100, completed: 99, failed: 1 });
+    expect(await env.DB.prepare("SELECT cleanup_pending FROM profile_avatar_repair_jobs WHERE user_id = ?").bind(account.user_id).first())
+      .toEqual({ cleanup_pending: 0 });
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM attachment_repair_jobs WHERE cleanup_pending = 1").first())
+      .toEqual({ count: 2 });
+    expect(await env.DB.prepare("SELECT attempts, cleanup_pending FROM attachment_repair_jobs WHERE attachment_id = 'fair-attachment-000'").first())
+      .toEqual({ attempts: 1, cleanup_pending: 1 });
   });
 
   it("does not let routine avatar GC race a fresh write intent or delete the active avatar", async () => {
@@ -2010,7 +2052,7 @@ describe("single-server durable delivery", () => {
     const hiddenJobs = await SELF.fetch("https://edgechat.test/api/v1/attachment-repair/jobs", { headers });
     expect(await hiddenJobs.json()).toMatchObject({ jobs: [] });
     expect((await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}/repair/lease`, { method: "POST", headers })).status).toBe(404);
-    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1 });
+    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1, failed: 0 });
     expect(await env.ARCHIVE.head(attachment!.object_key)).toBeNull();
 
     const jobs = await SELF.fetch("https://edgechat.test/api/v1/attachment-repair/jobs", { headers });
@@ -2259,7 +2301,7 @@ describe("single-server durable delivery", () => {
     const hiddenJobs = await SELF.fetch("https://edgechat.test/api/v1/archive-repair/jobs", { headers });
     expect(await hiddenJobs.json()).toMatchObject({ jobs: [] });
     expect((await SELF.fetch(`https://edgechat.test/api/v1/archive-segments/${segmentId}/repair/lease`, { method: "POST", headers })).status).toBe(404);
-    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1 });
+    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1, failed: 0 });
     expect(await env.ARCHIVE.head(segment!.object_key)).toBeNull();
 
     const jobs = await SELF.fetch("https://edgechat.test/api/v1/archive-repair/jobs", { headers });

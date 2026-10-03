@@ -4938,6 +4938,15 @@ async function notifyAttachmentRepairAvailable(env: Env, attachmentId: string): 
   await Promise.all(rooms.map((roomId) => env.ROOMS.getByName(roomId).notifyAttachmentRepairAvailable(attachmentId)));
 }
 
+async function bestEffortRepairNotification(kind: "attachment" | "archive", notify: () => Promise<void>): Promise<void> {
+  try { await notify(); }
+  catch {
+    // The D1 job is the durable source of truth and is polled after every sync.
+    // A socket hint must not turn successful object cleanup into a failed job.
+    console.error(JSON.stringify({ message: "repair availability notification failed", kind }));
+  }
+}
+
 async function finishAttachmentRepairCleanup(env: Env, attachmentId: string, objectKey: string): Promise<boolean> {
   const db = createDatabase(env.DB);
   try { await objectStore(env).delete(objectKey); }
@@ -4950,7 +4959,7 @@ async function finishAttachmentRepairCleanup(env: Env, attachmentId: string, obj
   const cleared = await db.updateTable("attachment_repair_jobs").set({ cleanup_pending: 0, last_error: null, updated_at: Date.now() })
     .where("attachment_id", "=", attachmentId).where("cleanup_pending", "=", 1).returning("attachment_id").executeTakeFirst();
   if (!cleared) return false;
-  await notifyAttachmentRepairAvailable(env, attachmentId);
+  await bestEffortRepairNotification("attachment", () => notifyAttachmentRepairAvailable(env, attachmentId));
   return true;
 }
 
@@ -4964,7 +4973,7 @@ async function markAttachmentRepairNeeded(env: Env, attachmentId: string, expect
     .bind(attachmentId, now, expectedGeneration, corruptObjectKey ? 1 : 0).first<{ attachment_id: string }>();
   if (!inserted) return;
   if (corruptObjectKey) await finishAttachmentRepairCleanup(env, attachmentId, corruptObjectKey);
-  else await notifyAttachmentRepairAvailable(env, attachmentId);
+  else await bestEffortRepairNotification("attachment", () => notifyAttachmentRepairAvailable(env, attachmentId));
 }
 
 function attachmentRepairAccess(db: ReturnType<typeof createDatabase>, auth: AuthContext, attachmentId: string) {
@@ -5407,7 +5416,7 @@ async function finishArchiveRepairCleanup(env: Env, segmentId: string, roomId: R
   const cleared = await db.updateTable("archive_segment_repair_jobs").set({ cleanup_pending: 0, last_error: null, updated_at: Date.now() })
     .where("segment_id", "=", segmentId).where("cleanup_pending", "=", 1).returning("segment_id").executeTakeFirst();
   if (!cleared) return false;
-  await env.ROOMS.getByName(roomId).notifyArchiveRepairAvailable(segmentId);
+  await bestEffortRepairNotification("archive", () => env.ROOMS.getByName(roomId).notifyArchiveRepairAvailable(segmentId));
   return true;
 }
 
@@ -5420,7 +5429,7 @@ async function markArchiveRepairNeeded(env: Env, segmentId: string, roomId: Room
     .bind(segmentId, now, expectedGeneration, corruptObjectKey ? 1 : 0).first<{ segment_id: string }>();
   if (!inserted) return;
   if (corruptObjectKey) await finishArchiveRepairCleanup(env, segmentId, roomId, corruptObjectKey);
-  else await env.ROOMS.getByName(roomId).notifyArchiveRepairAvailable(segmentId);
+  else await bestEffortRepairNotification("archive", () => env.ROOMS.getByName(roomId).notifyArchiveRepairAvailable(segmentId));
 }
 
 function archiveRepairAccess(db: ReturnType<typeof createDatabase>, auth: AuthContext, segmentId: string) {
@@ -5556,16 +5565,16 @@ async function downloadSegment(request: Request, env: Env, auth: AuthContext, ro
   return new Response(object.body, { status: range ? 206 : 200, headers });
 }
 
-export async function processPendingRepairObjectCleanups(env: Env, now = Date.now()): Promise<{ attempted: number; completed: number }> {
+export async function processPendingRepairObjectCleanups(env: Env, now = Date.now()): Promise<{ attempted: number; completed: number; failed: number }> {
   const db = createDatabase(env.DB); const cutoff = now - REPAIR_OBJECT_CLEANUP_RETRY_MS;
   const [attachments, archives, avatars] = await Promise.all([
     db.selectFrom("attachment_repair_jobs as job").innerJoin("attachments as a", "a.attachment_id", "job.attachment_id")
-      .select(["job.attachment_id as id", "a.object_key"]).where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
+      .select(["job.attachment_id as id", "a.object_key", "job.updated_at"]).where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
       .orderBy("job.updated_at").orderBy("job.attachment_id").limit(REPAIR_OBJECT_CLEANUP_BATCH).execute(),
     db.selectFrom("archive_segment_repair_jobs as job").innerJoin("archive_segments as s", "s.segment_id", "job.segment_id")
-      .select(["job.segment_id as id", "s.object_key", "s.room_id"]).where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
+      .select(["job.segment_id as id", "s.object_key", "s.room_id", "job.updated_at"]).where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
       .orderBy("job.updated_at").orderBy("job.segment_id").limit(REPAIR_OBJECT_CLEANUP_BATCH).execute(),
-    db.selectFrom("profile_avatar_repair_jobs as job").select(["job.user_id as id", "job.object_key"])
+    db.selectFrom("profile_avatar_repair_jobs as job").select(["job.user_id as id", "job.object_key", "job.updated_at"])
       .where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
       .orderBy("job.updated_at").orderBy("job.user_id").limit(REPAIR_OBJECT_CLEANUP_BATCH).execute(),
   ]);
@@ -5573,8 +5582,9 @@ export async function processPendingRepairObjectCleanups(env: Env, now = Date.no
     ...attachments.map((row) => ({ kind: "attachment" as const, ...row })),
     ...archives.map((row) => ({ kind: "archive" as const, ...row })),
     ...avatars.map((row) => ({ kind: "avatar" as const, ...row })),
-  ].slice(0, REPAIR_OBJECT_CLEANUP_BATCH);
-  let attempted = 0; let completed = 0;
+  ].sort((left, right) => left.updated_at - right.updated_at || left.id.localeCompare(right.id))
+    .slice(0, REPAIR_OBJECT_CLEANUP_BATCH);
+  let attempted = 0; let completed = 0; let failed = 0;
   for (const job of jobs) {
     const table = job.kind === "attachment" ? "attachment_repair_jobs" : job.kind === "archive" ? "archive_segment_repair_jobs" : "profile_avatar_repair_jobs";
     const idColumn = job.kind === "attachment" ? "attachment_id" : job.kind === "archive" ? "segment_id" : "user_id";
@@ -5585,14 +5595,19 @@ export async function processPendingRepairObjectCleanups(env: Env, now = Date.no
     const claimed = await (job.kind === "avatar" ? claim.bind(now, job.id, cutoff, job.object_key) : claim.bind(now, job.id, cutoff)).first<{ id: string }>();
     if (!claimed) continue;
     attempted += 1;
-    const done = job.kind === "attachment"
-      ? await finishAttachmentRepairCleanup(env, job.id, job.object_key)
-      : job.kind === "archive"
-        ? await finishArchiveRepairCleanup(env, job.id, job.room_id as RoomId, job.object_key)
-        : await finishProfileAvatarRepairCleanup(env, job.id as UserId, job.object_key);
-    if (done) completed += 1;
+    try {
+      const done = job.kind === "attachment"
+        ? await finishAttachmentRepairCleanup(env, job.id, job.object_key)
+        : job.kind === "archive"
+          ? await finishArchiveRepairCleanup(env, job.id, job.room_id as RoomId, job.object_key)
+          : await finishProfileAvatarRepairCleanup(env, job.id as UserId, job.object_key);
+      if (done) completed += 1; else failed += 1;
+    } catch {
+      failed += 1;
+      console.error(JSON.stringify({ message: "corrupt repair object cleanup failed", kind: job.kind }));
+    }
   }
-  return { attempted, completed };
+  return { attempted, completed, failed };
 }
 
 async function pushSubscribe(request: Request, env: Env, auth: AuthContext): Promise<Response> {

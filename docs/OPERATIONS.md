@@ -256,7 +256,11 @@ repair generation observed by that GET, then issues one exact-key DELETE. Repair
 leases and uploads remain unavailable until the DELETE succeeds. A failed or
 crash-interrupted deletion stays visible in the D1 repair queue; scheduled work
 claims at most 100 entries that have cooled for five minutes, retries only their
-recorded exact keys, and clears the barrier after success. Successful replacement
+recorded exact keys, and clears the barrier after success. Candidates from all
+three object classes are globally ordered by their oldest D1 update, so a full or
+failing attachment queue cannot starve archive or avatar cleanup. One failed
+exact DELETE is recorded and isolated without aborting later entries in the same
+batch. Successful replacement
 atomically advances the source row's repair generation and removes its job, so a
 stale concurrent GET cannot recreate the old job or delete the replacement.
 Healthy object reads incur no extra request, and cleanup adds no LIST, discovery
