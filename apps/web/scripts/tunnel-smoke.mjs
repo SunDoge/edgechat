@@ -4,9 +4,8 @@ const baseUrl = process.env.EDGECHAT_SMOKE_URL;
 if (!baseUrl) throw new Error("EDGECHAT_SMOKE_URL is required");
 
 const suffix = Math.random().toString(36).slice(2, 10);
-const password = `Smoke-${suffix}-pass`;
-const alice = { username: `sma${suffix}`, name: `Alice ${suffix}` };
-const bob = { username: `smb${suffix}`, name: `Bob ${suffix}` };
+const alice = { name: `Alice ${suffix}` };
+const bob = { name: `Bob ${suffix}` };
 const firstMessage = `公网密文星河 ${suffix}`;
 const reply = `已收到 ${suffix}`;
 const savedMessage = `给自己的备忘 ${suffix}`;
@@ -40,9 +39,13 @@ async function register(page, account) {
     await displayName.waitFor({ state: "visible", timeout: 75_000 });
   }
   await displayName.fill(account.name);
-  await page.getByLabel("用户名").fill(account.username);
-  await page.getByLabel("密码").fill(password);
+  const registration = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/register/opaque", { timeout: 120_000 });
   await page.getByRole("button", { name: "创建并继续", exact: true }).click();
+  const response = await registration;
+  if (!response.ok()) throw new Error(`registration failed with ${response.status()}: ${(await response.text()).slice(0, 1_000)}`);
+  const session = await response.json();
+  if (typeof session.user_id !== "string") throw new Error("registration response did not contain a user_id");
+  account.username = session.user_id.replace(/^@/, "").split(":", 1)[0];
   await page.getByRole("heading", { name: "消息", exact: true }).waitFor({ timeout: 300_000 });
 }
 
