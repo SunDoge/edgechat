@@ -7,7 +7,7 @@ import { avatarColor, initials } from "../presenters";
 import { Avatar, Dialog, Input } from "./primitives";
 import type { ContactIdentity } from "../media";
 
-export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: RoomId, keyPackages: string[]) => Promise<MlsCreateGroupResult>; queueInitialProfile: (roomId: RoomId, name: string) => Promise<void>; serverName: string; initialContact?: ContactIdentity | null; onCreated: (id: RoomId, encryptedName: string | null, profileQueued: boolean) => void; onClose: () => void }) {
+export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: RoomId, keyPackages: string[]) => Promise<MlsCreateGroupResult>; queueInitialProfile: (roomId: RoomId, name: string) => Promise<void>; serverName: string; initialContact?: ContactIdentity | null; creationBlocked?: boolean; onCreated: (id: RoomId, encryptedName: string | null, profileQueued: boolean) => void; onClose: () => void }) {
   type Person = { user_id: string; display_name: string; avatar_url?: string | null };
   const [query, setQuery] = createSignal("");
   const [results, setResults] = createSignal<Person[]>([]);
@@ -28,7 +28,7 @@ export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: Roo
 
   function toggle(person: Person) { setChosen((current) => current.some((item) => item.user_id === person.user_id) ? current.filter((item) => item.user_id !== person.user_id) : [...current, person]); }
   async function create() {
-    if (!chosen().length) return;
+    if (!chosen().length || props.creationBlocked) return;
     setBusy(true); setError("");
     try {
       const members = chosen().map((person) => person.user_id);
@@ -53,7 +53,8 @@ export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: Roo
       <label class="relative" for="people-search"><span class="sr-only">搜索用户</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="people-search" name="people_search" class="h-10 w-full rounded-lg pl-9 pr-3 ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} placeholder="搜索用户" autofocus/></label>
       <div class="divide-y divide-black/5"><For each={results()}>{(person) => { const active = () => chosen().some((item) => item.user_id === person.user_id); return <button type="button" class="flex min-h-14 w-full items-center gap-3 px-1 text-left hover:bg-neutral-50 disabled:opacity-40" disabled={busy() || (!active() && chosen().length >= 31)} onClick={() => toggle(person)}><Avatar src={person.avatar_url} label={initials(person.display_name)} color={avatarColor(person.user_id)}/><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{person.display_name}</strong><small class="block truncate text-sm text-muted">{person.user_id}</small></span><span class="text-sm font-semibold text-brand">{active() ? "已选择" : "添加"}</span></button>; }}</For><Show when={query().length >= 2 && !results().length}><p class="py-8 text-center text-sm text-muted">没有找到匹配的用户</p></Show></div>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm text-red-700">{error()}</div></Show>
-      <button type="button" class="h-10 rounded-lg bg-brand px-3 text-sm font-semibold text-white disabled:bg-neutral-300" disabled={busy() || !chosen().length} onClick={() => void create()}>{busy() ? "正在建立 MLS 群组…" : chosen().length > 1 ? `创建 ${chosen().length + 1} 人群聊` : "开始对话"}</button>
+      <Show when={props.creationBlocked}><p class="rounded-lg bg-amber-50 px-3 py-2.5 text-sm/5 text-amber-800" role="status">本机记录恢复完成后才能建立新的加密对话。</p></Show>
+      <button type="button" class="h-10 rounded-lg bg-brand px-3 text-sm font-semibold text-white disabled:bg-neutral-300" disabled={props.creationBlocked || busy() || !chosen().length} onClick={() => void create()}>{busy() ? "正在建立 MLS 群组…" : chosen().length > 1 ? `创建 ${chosen().length + 1} 人群聊` : "开始对话"}</button>
     </div>
   </Dialog>;
 }

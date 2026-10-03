@@ -85,6 +85,7 @@ import { startsNewMessageDay } from "./message-date";
 import { formatRoomActivityPreview } from "./room-list-preview";
 import { conversationExportFilename, streamConversationTranscript } from "./conversation-export";
 import { commitAcceptedControlEvent } from "./control-event-ack";
+import { MlsProjectionBarrier } from "./mls-projection-barrier";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -96,6 +97,7 @@ type TimelineEntry = { kind: "message"; key: string; message: LocalMessage } | {
 type HistoryFocus = { roomId: RoomId; messageId: string; status: "loading" | "ready"; hasNewer: boolean };
 type UnreadBoundary = { roomId: RoomId; messageId: string; seq: number };
 type RoomIdentityTrust = { status: DeviceTrustState; verified: number; total: number };
+type LocalProjectionState = { roomId: RoomId; eventId: string; pending: boolean };
 type ExportWritable = { write(data: string | ArrayBuffer | Blob): Promise<void>; close(): Promise<void>; abort(reason?: unknown): Promise<void> };
 type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<{ createWritable(): Promise<ExportWritable> }> };
 
@@ -106,6 +108,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const restorePhaseKey = profileSessionKey(profileId, "restore-phase");
   const api = new ApiClient("", props.accessToken);
   const db = new LocalDatabase(profileId);
+  const mlsProjectionBarrier = new MlsProjectionBarrier();
   const attachmentCache = new AttachmentCiphertextCache(profileId);
   const attachmentLoader = new AttachmentCiphertextLoader(
     attachmentCache,
@@ -195,6 +198,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [timelineAwayAfterSeq, setTimelineAwayAfterSeq] = createSignal<number | null>(null);
   const [historyRecoveryRooms, setHistoryRecoveryRooms] = createSignal<Set<RoomId>>(new Set());
   const [historyRecoveryStates, setHistoryRecoveryStates] = createSignal<Record<string, HistoryRecoveryViewState>>({});
+  const [localProjectionRecoveries, setLocalProjectionRecoveries] = createSignal<Record<string, RoomId>>({});
   let syncRef: SyncEngine | null = null;
   let timelineRef: VirtualMessageListHandle | null = null;
   let timelineOpeningRoom: RoomId | null = null;
@@ -286,6 +290,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const selectedNeedsHistoryRecovery = createMemo(() => {
     const roomId = selectedId();
     return Boolean(roomId && historyRecoveryRooms().has(roomId));
+  });
+  const localProjectionRecoveryActive = createMemo(() => Object.keys(localProjectionRecoveries()).length > 0);
+  const selectedNeedsLocalProjectionRecovery = createMemo(() => {
+    const roomId = selectedId();
+    return Boolean(roomId && Object.values(localProjectionRecoveries()).includes(roomId));
   });
   const selectedRequestCannotSend = createMemo(() => {
     const room = selected();
@@ -518,9 +527,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     }
   }
 
+  async function restoreMlsProjectionBarrier(): Promise<void> {
+    const staged = await db.stagedDecryptedEvents(500);
+    mlsProjectionBarrier.replace(staged.map((event) => event.event_id));
+    setLocalProjectionRecoveries(Object.fromEntries(staged.map((event) => [event.event_id, event.room_id])));
+  }
+
   async function processEvent(event: RoomEvent) {
     const currentMls = mlsRef;
-    if (!currentMls?.hasGroup(event.room_id)) return null;
+    if (!currentMls?.hasGroup(event.room_id)) {
+      if (mlsProjectionBarrier.isBlocked()) throw new LocalProjectionPersistenceError(new Error("Room MLS state is waiting for staged projection recovery"));
+      return null;
+    }
     await authenticateRoomEvent(event);
     const isMembershipCommit = isMlsMembershipCommitEventType(event.type);
     if (event.device_id === identityRef?.deviceId) {
@@ -541,7 +559,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         let restored: OpenMlsMessagingCore;
         try { restored = await OpenMlsMessagingCore.create(identityRef.deviceId, staged.next_mls_state); }
         catch (cause) { throw new LocalStagingIntegrityError(`Staged MLS transition cannot be restored: ${cause instanceof Error ? cause.message : String(cause)}`); }
-        currentMls.destroy(); mlsRef = restored; setMls(restored);
+        currentMls.destroy(); mlsRef = restored;
       } else if (position === "mismatch") {
         throw new LocalStagingIntegrityError("Local MLS state does not match the staged event transition");
       }
@@ -564,6 +582,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       const nextState = currentMls.exportState();
       try {
+        mlsProjectionBarrier.add(event.event_id);
         await db.stageDecryptedEvent(event, new Uint8Array(processed.plaintext), processed.senderDeviceId, new Uint8Array(previousState), new Uint8Array(nextState));
         await persistMls(currentMls);
         return processed.plaintext;
@@ -572,13 +591,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         // response was lost, startup can safely advance this restored pre-state.
         if (previousIdentity) {
           const restored = await OpenMlsMessagingCore.create(previousIdentity.deviceId, previousState);
-          currentMls.destroy(); mlsRef = restored; setMls(restored);
+          currentMls.destroy(); mlsRef = restored;
           identityRef = { ...previousIdentity, mlsState: previousState };
           await saveIdentity(profileId, identityRef).catch(() => undefined);
         }
         throw new LocalProjectionPersistenceError(cause);
       }
-    });
+    }, event.event_id);
     if (!plaintextBytes.length) return null;
     const decoded: unknown = JSON.parse(decoder.decode(plaintextBytes));
     const persistProjection = async (operation: () => Promise<void>) => {
@@ -645,20 +664,23 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await db.setHiddenRoomMembers(room.room_id, room.hidden_member_ids);
       await db.mergeServerMute(room.room_id, room.muted_until ?? null);
     }
-    await mutateMls(async () => {
-      for (const room of response.rooms) {
-        if (!currentMls.hasGroup(room.room_id) && room.encrypted_state) {
-          const packet = JSON.parse(room.encrypted_state) as { version: number; welcome: string; ratchet_tree: string };
-          if (packet.version !== 1) throw new Error("不支持的 MLS Welcome 版本");
-          currentMls.joinGroup(packet.welcome, packet.ratchet_tree);
+    if (mlsProjectionBarrier.isBlocked()) needsRemoteRoomRefresh = true;
+    else {
+      await mutateMls(async () => {
+        for (const room of response.rooms) {
+          if (!currentMls.hasGroup(room.room_id) && room.encrypted_state) {
+            const packet = JSON.parse(room.encrypted_state) as { version: number; welcome: string; ratchet_tree: string };
+            if (packet.version !== 1) throw new Error("不支持的 MLS Welcome 版本");
+            currentMls.joinGroup(packet.welcome, packet.ratchet_tree);
+          }
         }
-      }
-      await persistMls(currentMls);
-    });
+        await persistMls(currentMls);
+      });
+    }
     const profiles = new Map((await db.roomProfiles()).map((profile) => [profile.room_id, profile]));
     setRooms(response.rooms.map((room) => ({ ...room, name: profiles.get(room.room_id)?.name ?? room.name })));
     setRoomProfileAvatars(Object.fromEntries([...profiles].map(([roomId, profile]) => [roomId, profile.avatar])));
-    needsRemoteRoomRefresh = false;
+    if (!mlsProjectionBarrier.isBlocked()) needsRemoteRoomRefresh = false;
     await Promise.all([refreshUnreadCounts(), refreshRoomPreferences(), refreshMessageExpiryPolicies(), refreshRoomListActivities()]);
   }
 
@@ -1015,7 +1037,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           if (!cached) throw cause;
           me = cached; offlineBootstrap = true; needsRemoteRoomRefresh = true; setConnectionState("offline");
         }
-        await Promise.all([db.bindAccount(me.user_id, me.display_name), bindLocalProfile(profileId, { user_id: me.user_id, display_name: me.display_name, device_id: me.device_id, access_token: props.accessToken! })]); reflectLocalProfile(me); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); setIdentity(storedIdentity); setSession(me);
+        await Promise.all([db.bindAccount(me.user_id, me.display_name), bindLocalProfile(profileId, { user_id: me.user_id, display_name: me.display_name, device_id: me.device_id, access_token: props.accessToken! })]);
+        await restoreMlsProjectionBarrier();
+        reflectLocalProfile(me); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); setIdentity(storedIdentity); setSession(me);
         if (!offlineBootstrap) void reconcilePush(api, me.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
         if (offlineBootstrap) await Promise.all([loadCachedRooms(currentMls), refreshComposerDrafts()]);
         else await Promise.all([loadRooms(currentMls), refreshComposerDrafts()]);
@@ -1109,6 +1133,27 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     };
     const realtime = (received: Event) => { const connected = Boolean((received as CustomEvent<{ connected: boolean }>).detail.connected); setConnectionState(connected ? "online" : navigator.onLine ? "syncing" : "offline"); };
     const syncError = (received: Event) => { if (canUseOfflineSession((received as CustomEvent<unknown>).detail, navigator.onLine)) setConnectionState("offline"); };
+    const localProjection = (received: Event) => {
+      const detail = (received as CustomEvent<LocalProjectionState>).detail;
+      const wasPending = detail.eventId in localProjectionRecoveries();
+      if (detail.pending) {
+        mlsProjectionBarrier.add(detail.eventId);
+        setLocalProjectionRecoveries((current) => ({ ...current, [detail.eventId]: detail.roomId }));
+        if (!wasPending) setNotice("本机记录暂时无法写入；已暂停新的加密操作并自动重试");
+        return;
+      }
+      mlsProjectionBarrier.settle(detail.eventId);
+      setLocalProjectionRecoveries((current) => {
+        if (!(detail.eventId in current)) return current;
+        const next = { ...current }; delete next[detail.eventId]; return next;
+      });
+      if (wasPending) setNotice("本机记录已恢复，可以继续发送消息");
+      if (!mlsProjectionBarrier.isBlocked() && needsRemoteRoomRefresh && navigator.onLine && mlsRef) {
+        needsRemoteRoomRefresh = false;
+        void loadRooms(mlsRef).catch(() => { needsRemoteRoomRefresh = true; });
+      }
+      if (mlsRef && mls() !== mlsRef) setMls(mlsRef);
+    };
     const historyTransferRequired = (received: Event) => {
       const detail = (received as CustomEvent<{ roomId: RoomId; processedThrough: number; requiredThrough: number }>).detail;
       const roomId = detail.roomId;
@@ -1136,6 +1181,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     engine.addEventListener("device-event", deviceEvent);
     engine.addEventListener("realtime", realtime);
     engine.addEventListener("error", syncError);
+    engine.addEventListener("local-projection", localProjection);
     engine.addEventListener("history-transfer-required", historyTransferRequired);
     engine.addEventListener("history-recovery-complete", historyRecoveryComplete);
     const typing = (received: Event) => applyTypingFrame((received as CustomEvent<TypingSocketFrame>).detail, currentSession.user_id);
@@ -1191,7 +1237,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     void engine.start().then(() => rooms().forEach((room) => { void engine.connectRoom(room.room_id); scheduleDeliveryReceipt(room.room_id); }));
     peerRecoveryTimer = window.setInterval(() => { if (navigator.onLine) void processPeerRecoveries().catch(() => undefined); }, 30_000);
     onCleanup(() => {
-      engine.removeEventListener("typing", typing); engine.removeEventListener("presence", presence); engine.removeEventListener("presence-snapshot", presenceSnapshot); engine.removeEventListener("presence-reset", presenceReset); engine.removeEventListener("repair-available", repairAvailable); engine.removeEventListener("attachment-repair-available", attachmentRepairAvailable); engine.removeEventListener("archive-repair-available", archiveRepairAvailable); engine.removeEventListener("synced", resumeRemovals); engine.removeEventListener("account-deletion", accountDeletion); engine.removeEventListener("device-revoked", deviceRevoked); engine.removeEventListener("session-expired", sessionExpired); engine.removeEventListener("room-unavailable", unavailableRoom); engine.removeEventListener("device-event", deviceEvent); engine.removeEventListener("realtime", realtime); engine.removeEventListener("error", syncError); engine.removeEventListener("history-transfer-required", historyTransferRequired); engine.removeEventListener("history-recovery-complete", historyRecoveryComplete); navigator.serviceWorker?.removeEventListener("message", pushSyncHint); document.removeEventListener("visibilitychange", resumeVisibleSession); window.removeEventListener("pageshow", resumePersistedPage); engine.stop();
+      engine.removeEventListener("typing", typing); engine.removeEventListener("presence", presence); engine.removeEventListener("presence-snapshot", presenceSnapshot); engine.removeEventListener("presence-reset", presenceReset); engine.removeEventListener("repair-available", repairAvailable); engine.removeEventListener("attachment-repair-available", attachmentRepairAvailable); engine.removeEventListener("archive-repair-available", archiveRepairAvailable); engine.removeEventListener("synced", resumeRemovals); engine.removeEventListener("account-deletion", accountDeletion); engine.removeEventListener("device-revoked", deviceRevoked); engine.removeEventListener("session-expired", sessionExpired); engine.removeEventListener("room-unavailable", unavailableRoom); engine.removeEventListener("device-event", deviceEvent); engine.removeEventListener("realtime", realtime); engine.removeEventListener("error", syncError); engine.removeEventListener("local-projection", localProjection); engine.removeEventListener("history-transfer-required", historyTransferRequired); engine.removeEventListener("history-recovery-complete", historyRecoveryComplete); navigator.serviceWorker?.removeEventListener("message", pushSyncHint); document.removeEventListener("visibilitychange", resumeVisibleSession); window.removeEventListener("pageshow", resumePersistedPage); engine.stop();
       for (const timer of typingExpiryTimers.values()) window.clearTimeout(timer);
       typingExpiryTimers.clear(); setTypingSessions({}); setPresenceByRoom({});
       for (const timer of deliveryReceiptTimers.values()) window.clearTimeout(timer);
@@ -1367,14 +1413,21 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     reflectLocalProfile(next);
     if (restoredHistory) { nextMls.destroy(); location.reload(); return; }
     identityRef = nextIdentity; mlsRef = nextMls;
-    setIdentity(nextIdentity); setMls(nextMls); setSession(next); setLoading(true);
-    void reconcilePush(api, next.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
-    try { await db.bindAccount(next.user_id, next.display_name); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); await db.cacheSession(offlineSessionSnapshot(next)); await Promise.all([loadRooms(nextMls), refreshComposerDrafts()]); await Promise.all([enforceLocalRetention(true), enforceMessageExpiry(false)]); } finally { setLoading(false); }
+    setIdentity(nextIdentity); setMls(nextMls); setLoading(true);
+    try {
+      await db.bindAccount(next.user_id, next.display_name);
+      await restoreMlsProjectionBarrier();
+      setSession(next);
+      void reconcilePush(api, next.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
+      setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); await db.cacheSession(offlineSessionSnapshot(next));
+      await Promise.all([loadRooms(nextMls), refreshComposerDrafts()]); await Promise.all([enforceLocalRetention(true), enforceMessageExpiry(false)]);
+    } finally { setLoading(false); }
   }
 
   async function enqueueNewMessage(room: ServerRoom, text: string, selectedFiles: readonly File[], relation?: MessagePayload["relation"], durationMs?: number | null): Promise<void> {
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
+    mlsProjectionBarrier.assertWritable();
     if (!text && !selectedFiles.length) throw new Error("没有可发送的内容");
     if (room.blocked_by_me) throw new Error("你已屏蔽此用户，请先取消屏蔽再发送消息");
     if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能发送消息");
@@ -1426,6 +1479,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendMessage() {
     const room = selected(); const selectedFiles = files(); const text = compose().trim();
     if (!room || (!text && !selectedFiles.length) || sendBusy()) return;
+    if (localProjectionRecoveryActive()) return setNotice("请等待本机记录恢复后再发送");
     if (historyRecoveryRooms().has(room.room_id)) return setNotice("请先从另一台设备或备份恢复此对话");
     const quote = quoting(); const reply = replyingTo();
     const relation: MessagePayload["relation"] = quote
@@ -1442,6 +1496,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendContactCard(contact: ContactIdentity): Promise<void> {
     const room = selected(); const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
+    mlsProjectionBarrier.assertWritable();
     if (!serverSupports(currentSession.protocol, "messages.contact.v1")) throw new Error("当前服务器不支持联系人名片");
     if (sendBusy()) throw new Error("另一条消息正在发送，请稍后重试");
     if (room.blocked_by_me) throw new Error("请先取消屏蔽再发送联系人");
@@ -1484,6 +1539,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (domain !== (currentSession.server_name ?? location.hostname)) { setNotice("跨服务器对话尚未开放"); return; }
     const existing = rooms().find((room) => room.kind === "direct" && room.members.some((member) => member.user_id === contact.user_id) && room.request_status !== "rejected");
     if (existing) { setSelectedId(existing.room_id); return; }
+    if (localProjectionRecoveryActive()) { setNotice("请等待本机记录恢复后再新建对话"); return; }
     setNewRoomContact(contact); setNewRoom(true);
   }
 
@@ -1511,6 +1567,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const targetRoom = rooms().find((room) => room.room_id === targetRoomId);
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!targetRoom || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
+    mlsProjectionBarrier.assertWritable();
     if (targetRoom.blocked_by_me) throw new Error("请先取消屏蔽再转发");
     if (targetRoom.leave_status === "pending") throw new Error("正在等待群主安全完成退出，不能再转发到这段群聊");
     if (historyRecoveryRooms().has(targetRoomId)) throw new Error("请先从另一台设备或备份恢复目标对话");
@@ -1937,7 +1994,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       : value);
     await refreshUnreadCounts();
     window.clearTimeout(readReceiptTimer);
-    readReceiptTimer = window.setTimeout(() => void sendReadReceipt(roomId), 750);
+    readReceiptTimer = window.setTimeout(() => void sendReadReceipt(roomId).catch(() => undefined), 750);
   }
 
   function applyTypingFrame(frame: TypingSocketFrame, currentUserId: string): void {
@@ -1984,7 +2041,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendReadReceipt(roomId: RoomId, explicit = false): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     if ((!explicit && (document.visibilityState !== "visible" || selectedRef !== roomId)) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)
-      || rooms().find((room) => room.room_id === roomId)?.leave_status === "pending") return;
+      || mlsProjectionBarrier.isBlocked() || rooms().find((room) => room.room_id === roomId)?.leave_status === "pending") return;
     const latestSeq = await db.latestVisibleMessageSeq(roomId);
     const [state, queuedSeq] = await Promise.all([db.readState(roomId), db.latestQueuedReadReceiptSeq(roomId)]);
     if (latestSeq < 1 || latestSeq <= Math.max(state.last_receipt_sent_seq, queuedSeq)) return;
@@ -2024,7 +2081,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendDeliveryReceipt(roomId: RoomId): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     const room = rooms().find((candidate) => candidate.room_id === roomId);
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || room?.blocked_by_me || room?.leave_status === "pending") return;
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || mlsProjectionBarrier.isBlocked() || room?.blocked_by_me || room?.leave_status === "pending") return;
     const latestSeq = await db.latestIncomingMessageSeq(roomId, currentSession.user_id);
     const [state, queuedSeq] = await Promise.all([db.deliveryState(roomId), db.latestQueuedDeliveryReceiptSeq(roomId)]);
     if (latestSeq < 1 || latestSeq <= Math.max(state.last_receipt_sent_seq, queuedSeq)) return;
@@ -2117,9 +2174,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   function submitComposer() { return editingMessage() ? sendEdit() : sendMessage(); }
 
-  function mutateMls<T>(operation: () => Promise<T>): Promise<T> {
+  function mutateMls<T>(operation: () => Promise<T>, projectionEventId?: string): Promise<T> {
     pendingMlsMutations += 1;
-    const result = mlsMutationTail.then(operation);
+    const result = mlsMutationTail.then(() => {
+      mlsProjectionBarrier.assertWritable(projectionEventId);
+      return operation();
+    });
     mlsMutationTail = result.then(() => undefined, () => undefined);
     return result.finally(() => { pendingMlsMutations -= 1; });
   }
@@ -3224,11 +3284,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         <div class="grid h-full grid-rows-[64px_auto_1fr_36px]">
           <header class="flex items-center justify-between border-b border-black/5 px-4"><Brand/><button type="button" aria-label={backupHealth(lastBackup()).attention ? "设备与账户，建议创建本机备份" : "设备与账户"} class="relative rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => void openDevices()}><Avatar src={currentSession().avatar_url} label={initials(currentSession().display_name)} color={avatarColor(currentSession().user_id)}/><Show when={backupHealth(lastBackup()).attention}><span aria-hidden="true" class="absolute -right-0.5 -top-0.5 size-3 rounded-full border-2 border-white bg-amber-500"/></Show></button></header>
           <div class="grid gap-3 border-b border-black/5 p-3">
-            <div class="flex items-center justify-between px-1"><h1 class="text-xl font-semibold tracking-tight text-ink">消息</h1><IconButton label="新建对话" class="text-brand hover:bg-brand-soft" onClick={() => setNewRoom(true)}><IconPlus class="size-4 stroke-brand" stroke-width={2.2}/></IconButton></div>
+            <div class="flex items-center justify-between px-1"><h1 class="text-xl font-semibold tracking-tight text-ink">消息</h1><IconButton label={localProjectionRecoveryActive() ? "本机记录恢复后才能新建对话" : "新建对话"} disabled={localProjectionRecoveryActive()} class="text-brand hover:bg-brand-soft disabled:opacity-40" onClick={() => setNewRoom(true)}><IconPlus class="size-4 stroke-brand" stroke-width={2.2}/></IconButton></div>
             <button type="button" class="flex h-10 items-center gap-2 rounded-lg bg-neutral-100 px-3 text-left text-sm text-muted hover:bg-neutral-200" onClick={() => setSearchOpen(true)}><IconSearch class="size-4 shrink-0 stroke-muted"/><span class="min-w-0 flex-1">搜索本机消息</span><kbd class="text-xs text-neutral-400">⌘K</kbd></button>
           </div>
-          <div class="overflow-y-auto p-2"><Show when={rooms().some((room) => room.request_status !== "rejected")} fallback={<div class="grid h-full place-content-center justify-items-center px-8 text-center"><IconMessageCircle class="size-8 stroke-neutral-300"/><h2 class="mt-4 text-base font-semibold text-ink">还没有对话</h2><p class="mt-1 text-sm/5 text-muted">添加同一服务器上的用户开始聊天。</p><button type="button" class="mt-4 text-sm font-semibold text-brand" onClick={() => setNewRoom(true)}>新建对话</button></div>}><Show when={showArchived()}><button type="button" class="mb-1 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-brand hover:bg-brand-soft" onClick={() => setShowArchived(false)}><IconChevronLeft class="size-4 stroke-brand"/>返回消息</button></Show><Show when={!showArchived() && incomingRequests().length}><section class="mb-3" aria-labelledby="message-requests-heading"><div class="flex items-center justify-between px-3 py-2"><h2 id="message-requests-heading" class="text-xs font-semibold uppercase tracking-wide text-muted">消息请求</h2><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">{incomingRequests().length}</span></div><div role="list"><For each={incomingRequests()}>{(room) => <div role="listitem"><button type="button" aria-current={selectedId() === room.room_id ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)] items-center gap-3 rounded-xl px-2.5 text-left ${selectedId() === room.room_id ? "bg-amber-50" : "hover:bg-neutral-100"}`} onClick={() => setSelectedId(room.room_id)}><Avatar class="size-11" label={initials(roomTitle(room, currentSession().user_id))} color={avatarColor(room.room_id)}/><span class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{roomTitle(room, currentSession().user_id)}</strong><small class="mt-1 block truncate text-sm text-amber-700">想给你发送消息</small></span></button></div>}</For></div></section></Show><div role="list"><For each={listedRooms()}>{(room) => { const peer = () => room.kind === "direct" ? room.members.find((member) => member.user_id !== currentSession().user_id) : undefined; return <RoomListItem room={room} title={roomTitle(room, currentSession().user_id)} avatarLabel={initials(roomTitle(room, currentSession().user_id))} avatarColor={avatarColor(room.room_id)} groupAvatar={roomProfileAvatars()[room.room_id]} decryptGroupAvatar={decryptRoomProfileAvatar} preview={roomPreview(room)} activityAt={roomActivityTimes()[room.room_id]} selected={selectedId() === room.room_id} unread={unreadCounts()[room.room_id] ?? 0} preference={preferenceFor(room.room_id)} recoveryRequired={historyRecoveryRooms().has(room.room_id)} onOpen={() => setSelectedId(room.room_id)} onTogglePinned={() => void updateRoomPreference(room.room_id, "pin")} onSetMutedUntil={(mutedUntil) => void setRoomMute(room.room_id, mutedUntil)} onSetReadState={(markedUnread) => void setRoomReadState(room.room_id, markedUnread)} onToggleArchived={() => void updateRoomPreference(room.room_id, "archive")} blockable={Boolean(peer())} blockedByMe={room.blocked_by_me} onToggleBlocked={() => void toggleRoomBlock(room)}/>; }}</For></div><Show when={!listedRooms().length && !incomingRequests().length}><div class="grid place-content-center justify-items-center px-8 py-12 text-center"><IconArchive class="size-7 stroke-neutral-300"/><p class="mt-3 text-sm text-muted">{showArchived() ? "没有已归档的对话" : "所有对话都已归档"}</p></div></Show><Show when={!showArchived() && archivedRoomCount() > 0}><button type="button" class="mt-2 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted hover:bg-neutral-100" onClick={() => setShowArchived(true)}><IconArchive class="size-4 stroke-muted"/><span class="flex-1 text-left">已归档</span><span class="text-xs tabular-nums text-neutral-400">{archivedRoomCount()}</span></button></Show></Show></div>
-          <footer role="status" aria-live="polite" class="flex items-center gap-2 border-t border-black/5 px-4 text-xs text-muted"><span aria-hidden="true" class={`size-1.5 rounded-full ${connectionState() === "online" ? "bg-emerald-500" : connectionState() === "syncing" ? "animate-pulse bg-amber-500" : "bg-neutral-400"}`}/>{connectionState() === "online" ? "已连接" : connectionState() === "syncing" ? "正在同步" : "离线，可查看和发送"}</footer>
+          <div class="overflow-y-auto p-2"><Show when={rooms().some((room) => room.request_status !== "rejected")} fallback={<div class="grid h-full place-content-center justify-items-center px-8 text-center"><IconMessageCircle class="size-8 stroke-neutral-300"/><h2 class="mt-4 text-base font-semibold text-ink">还没有对话</h2><p class="mt-1 text-sm/5 text-muted">添加同一服务器上的用户开始聊天。</p><button type="button" disabled={localProjectionRecoveryActive()} class="mt-4 text-sm font-semibold text-brand disabled:text-neutral-400" onClick={() => setNewRoom(true)}>新建对话</button></div>}><Show when={showArchived()}><button type="button" class="mb-1 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-brand hover:bg-brand-soft" onClick={() => setShowArchived(false)}><IconChevronLeft class="size-4 stroke-brand"/>返回消息</button></Show><Show when={!showArchived() && incomingRequests().length}><section class="mb-3" aria-labelledby="message-requests-heading"><div class="flex items-center justify-between px-3 py-2"><h2 id="message-requests-heading" class="text-xs font-semibold uppercase tracking-wide text-muted">消息请求</h2><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">{incomingRequests().length}</span></div><div role="list"><For each={incomingRequests()}>{(room) => <div role="listitem"><button type="button" aria-current={selectedId() === room.room_id ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)] items-center gap-3 rounded-xl px-2.5 text-left ${selectedId() === room.room_id ? "bg-amber-50" : "hover:bg-neutral-100"}`} onClick={() => setSelectedId(room.room_id)}><Avatar class="size-11" label={initials(roomTitle(room, currentSession().user_id))} color={avatarColor(room.room_id)}/><span class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{roomTitle(room, currentSession().user_id)}</strong><small class="mt-1 block truncate text-sm text-amber-700">想给你发送消息</small></span></button></div>}</For></div></section></Show><div role="list"><For each={listedRooms()}>{(room) => { const peer = () => room.kind === "direct" ? room.members.find((member) => member.user_id !== currentSession().user_id) : undefined; return <RoomListItem room={room} title={roomTitle(room, currentSession().user_id)} avatarLabel={initials(roomTitle(room, currentSession().user_id))} avatarColor={avatarColor(room.room_id)} groupAvatar={roomProfileAvatars()[room.room_id]} decryptGroupAvatar={decryptRoomProfileAvatar} preview={roomPreview(room)} activityAt={roomActivityTimes()[room.room_id]} selected={selectedId() === room.room_id} unread={unreadCounts()[room.room_id] ?? 0} preference={preferenceFor(room.room_id)} recoveryRequired={historyRecoveryRooms().has(room.room_id)} onOpen={() => setSelectedId(room.room_id)} onTogglePinned={() => void updateRoomPreference(room.room_id, "pin")} onSetMutedUntil={(mutedUntil) => void setRoomMute(room.room_id, mutedUntil)} onSetReadState={(markedUnread) => void setRoomReadState(room.room_id, markedUnread)} onToggleArchived={() => void updateRoomPreference(room.room_id, "archive")} blockable={Boolean(peer())} blockedByMe={room.blocked_by_me} onToggleBlocked={() => void toggleRoomBlock(room)}/>; }}</For></div><Show when={!listedRooms().length && !incomingRequests().length}><div class="grid place-content-center justify-items-center px-8 py-12 text-center"><IconArchive class="size-7 stroke-neutral-300"/><p class="mt-3 text-sm text-muted">{showArchived() ? "没有已归档的对话" : "所有对话都已归档"}</p></div></Show><Show when={!showArchived() && archivedRoomCount() > 0}><button type="button" class="mt-2 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted hover:bg-neutral-100" onClick={() => setShowArchived(true)}><IconArchive class="size-4 stroke-muted"/><span class="flex-1 text-left">已归档</span><span class="text-xs tabular-nums text-neutral-400">{archivedRoomCount()}</span></button></Show></Show></div>
+          <footer role="status" aria-live="polite" class="flex items-center gap-2 border-t border-black/5 px-4 text-xs text-muted"><span aria-hidden="true" class={`size-1.5 rounded-full ${localProjectionRecoveryActive() ? "animate-pulse bg-amber-500" : connectionState() === "online" ? "bg-emerald-500" : connectionState() === "syncing" ? "animate-pulse bg-amber-500" : "bg-neutral-400"}`}/>{localProjectionRecoveryActive() ? "本机存储恢复中" : connectionState() === "online" ? "已连接" : connectionState() === "syncing" ? "正在同步" : "离线，可查看和发送"}</footer>
         </div>
       </aside>
       <section id="current-conversation" tabindex={-1} class={`h-full min-w-0 outline-none ${selected() ? "" : "max-md:hidden"}`}><Show when={selected()} fallback={<div class="grid h-full place-content-center justify-items-center bg-chat text-center"><IconMessageCircle class="size-10 stroke-neutral-300"/><h2 class="mt-4 text-lg font-semibold text-ink">选择一段对话</h2><p class="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div>}>{(room) => <ChatViewport
@@ -3261,6 +3321,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           }}
         /><Show when={historyFocus()?.roomId === room().room_id ? historyFocus() : null}>{(focus) => <div class="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-4"><Show when={focus().status === "ready"} fallback={<div class="rounded-full bg-neutral-900/90 px-4 py-2 text-sm font-medium text-white shadow-lg" role="status">正在打开历史消息…</div>}><button type="button" class="pointer-events-auto flex min-h-10 items-center gap-1.5 rounded-full bg-neutral-900 px-4 text-sm font-semibold text-white shadow-lg hover:bg-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => void returnToLatestMessages()}><IconChevronDown class="size-4 stroke-white"/>{focus().hasNewer ? "回到最新消息" : "退出历史查看"}</button></Show></div>}</Show><Show when={!historyFocus() && !timelineNearBottom()}><div class="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-4"><button type="button" aria-label={hiddenNewMessageCount() ? `${hiddenNewMessageCount()} 条新消息，回到最新消息` : "回到最新消息"} class="pointer-events-auto flex min-h-10 items-center gap-1.5 rounded-full bg-neutral-900 px-4 text-sm font-semibold text-white shadow-lg hover:bg-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => timelineRef?.scrollToEnd()}><IconChevronDown class="size-4 stroke-white"/>{hiddenNewMessageCount() ? `${hiddenNewMessageCount()} 条新消息` : "回到最新消息"}</button></div></Show></div>}
         composer={<div>
+          <Show when={localProjectionRecoveryActive()}><div class="mx-auto flex max-w-[760px] items-start gap-3 border-t border-amber-200 bg-amber-50 px-4 py-3 text-amber-950" role="status" aria-live="polite"><span aria-hidden="true" class="mt-0.5 size-4 shrink-0 animate-spin rounded-full border-2 border-amber-300 border-t-amber-700"/><div class="min-w-0"><strong class="block text-sm font-semibold">本机记录正在恢复</strong><p class="mt-0.5 text-xs/5 text-amber-800">{selectedNeedsLocalProjectionRecovery() ? "这段对话有一条消息尚未安全写入。" : "另一段对话有一条消息尚未安全写入。"}完成前已暂停发送和其他加密更改；请保持页面打开并确认设备有足够空间。</p></div></div></Show>
           <Show when={room().request_status === "pending" && room().request_role === "recipient"}><div class="mx-auto max-w-[760px] border-t border-amber-200 bg-amber-50 px-4 py-3" role="region" aria-label="消息请求"><strong class="block text-sm font-semibold text-amber-950">接受后才能回复</strong><p class="mt-0.5 text-xs/5 text-amber-800">对方只能发送这一条加密文本；接受前不能发送附件，也不会占用云端对象存储。</p><div class="mt-3 flex flex-wrap gap-2"><button type="button" class="min-h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95" onClick={() => void acceptMessageRequest(room())}>接受</button><button type="button" class="min-h-10 rounded-lg bg-white px-4 text-sm font-semibold text-ink ring-1 ring-black/10 hover:bg-neutral-50" onClick={() => void rejectMessageRequest(room())}>拒绝</button><button type="button" class="min-h-10 rounded-lg px-3 text-sm font-semibold text-red-700 hover:bg-red-50" onClick={() => void reportMessageRequest(room())}>举报并屏蔽</button></div></div></Show>
           <Show when={room().request_status === "pending" && room().request_role === "requester"}><div class="mx-auto max-w-[760px] border-t border-sky-200 bg-sky-50 px-4 py-2 text-xs/5 text-sky-900" role="status">{room().request_message_sent ? "消息请求已发送。对方接受前不能继续发送。" : "你可以发送一条纯文本消息；对方接受后才能继续聊天或发送附件。"}</div></Show>
           <Show when={room().leave_status === "pending"}><div class="mx-auto flex max-w-[760px] items-start gap-3 border-t border-amber-200 bg-amber-50 px-4 py-3 text-amber-950" role="status"><div class="min-w-0 flex-1"><strong class="block text-sm font-semibold">正在退出群聊</strong><p class="mt-0.5 text-xs/5 text-amber-800">等待群主设备上线并安全更新群聊。在完成前你仍可查看已有消息，但不能发送新内容。</p></div><button type="button" class="min-h-9 shrink-0 rounded-lg bg-amber-100 px-3 text-xs font-semibold text-amber-900 hover:bg-amber-200" onClick={() => void cancelRoomLeave(room())}>取消退出</button></div></Show>
@@ -3285,7 +3346,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
               <button type="button" aria-label={`移除 ${selectedFile.name}`} class="grid size-8 shrink-0 place-items-center rounded-md hover:bg-black/5 disabled:opacity-40" disabled={sendBusy()} onClick={() => { setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index())); setVoiceDurationMs(null); }}><IconX class="size-4 stroke-muted"/></button>
             </div>}</For>
           </div></Show>
-          <ChatComposer value={compose()} hasContent={files().length > 0 || Boolean(editingMessage())} disabled={sendBusy() || voiceRecording() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || selectedRequestCannotSend()} disabledReason={room().leave_status === "pending" ? "正在等待安全退出群聊" : selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受消息请求后才能回复" : "等待对方接受消息请求" : selectedNeedsHistoryRecovery() ? "需要先从另一台设备或备份恢复这段对话" : voiceRecording() ? "录音期间不能输入文字" : room().blocked_by_me ? "取消屏蔽后才能发送消息" : sendBusy() ? "正在准备上一条消息" : undefined} placeholder={room().leave_status === "pending" ? "正在等待安全退出群聊" : selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受请求后才能回复" : "等待对方接受请求" : selectedNeedsHistoryRecovery() ? "恢复此对话后才能发送" : voiceRecording() ? "正在录音…" : room().blocked_by_me ? "你已屏蔽此用户" : quoting() ? "补充你的内容" : "写一条消息"} onChange={onComposerChange} onSend={() => void submitComposer()} accessory={<div class="flex shrink-0 items-center gap-1"><Show when={room().purpose !== "saved" && serverSupports(currentSession().protocol, "messages.contact.v1")}><button type="button" aria-label="分享联系人" disabled={sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} class="grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 disabled:opacity-40" onClick={() => setContactShareOpen(true)}><IconAddressBook class="size-4 stroke-muted"/></button></Show><Show when={!files().length}><VoiceRecorder contextId={room().room_id} disabled={sendBusy() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} onRecordingChange={setVoiceRecording} onRecorded={(recorded, duration) => { setFiles([recorded]); setVoiceDurationMs(duration); }} onError={setNotice}/></Show><label class={`relative grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 ${sendBusy() || voiceRecording() || editingMessage() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message ? "pointer-events-none opacity-50" : "cursor-pointer"}`} aria-label={room().leave_status === "pending" ? "正在等待安全退出群聊" : room().request_status === "pending" ? "接受消息请求后才能添加附件" : selectedNeedsHistoryRecovery() ? "请先恢复此对话" : room().blocked_by_me ? "请先取消屏蔽" : editingMessage() ? "编辑消息时不能添加附件" : files().length >= attachmentLimits().max_attachments_per_message ? `最多添加 ${attachmentLimits().max_attachments_per_message} 个附件` : "添加附件"}><IconPaperclip class="size-4 stroke-muted"/><input name="attachment" type="file" multiple={attachmentLimits().max_attachments_per_message > 1} class="sr-only" disabled={sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message} onChange={(event) => {
+          <ChatComposer value={compose()} hasContent={files().length > 0 || Boolean(editingMessage())} disabled={localProjectionRecoveryActive() || sendBusy() || voiceRecording() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || selectedRequestCannotSend()} disabledReason={localProjectionRecoveryActive() ? "正在恢复本机记录，完成前不能发送" : room().leave_status === "pending" ? "正在等待安全退出群聊" : selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受消息请求后才能回复" : "等待对方接受消息请求" : selectedNeedsHistoryRecovery() ? "需要先从另一台设备或备份恢复这段对话" : voiceRecording() ? "录音期间不能输入文字" : room().blocked_by_me ? "取消屏蔽后才能发送消息" : sendBusy() ? "正在准备上一条消息" : undefined} placeholder={localProjectionRecoveryActive() ? "本机记录恢复后才能发送" : room().leave_status === "pending" ? "正在等待安全退出群聊" : selectedRequestCannotSend() ? room().request_role === "recipient" ? "接受请求后才能回复" : "等待对方接受请求" : selectedNeedsHistoryRecovery() ? "恢复此对话后才能发送" : voiceRecording() ? "正在录音…" : room().blocked_by_me ? "你已屏蔽此用户" : quoting() ? "补充你的内容" : "写一条消息"} onChange={onComposerChange} onSend={() => void submitComposer()} accessory={<div class="flex shrink-0 items-center gap-1"><Show when={room().purpose !== "saved" && serverSupports(currentSession().protocol, "messages.contact.v1")}><button type="button" aria-label="分享联系人" disabled={localProjectionRecoveryActive() || sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} class="grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 disabled:opacity-40" onClick={() => setContactShareOpen(true)}><IconAddressBook class="size-4 stroke-muted"/></button></Show><Show when={!files().length}><VoiceRecorder contextId={room().room_id} disabled={localProjectionRecoveryActive() || sendBusy() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} onRecordingChange={setVoiceRecording} onRecorded={(recorded, duration) => { setFiles([recorded]); setVoiceDurationMs(duration); }} onError={setNotice}/></Show><label class={`relative grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 ${localProjectionRecoveryActive() || sendBusy() || voiceRecording() || editingMessage() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message ? "pointer-events-none opacity-50" : "cursor-pointer"}`} aria-label={localProjectionRecoveryActive() ? "本机记录恢复后才能添加附件" : room().leave_status === "pending" ? "正在等待安全退出群聊" : room().request_status === "pending" ? "接受消息请求后才能添加附件" : selectedNeedsHistoryRecovery() ? "请先恢复此对话" : room().blocked_by_me ? "请先取消屏蔽" : editingMessage() ? "编辑消息时不能添加附件" : files().length >= attachmentLimits().max_attachments_per_message ? `最多添加 ${attachmentLimits().max_attachments_per_message} 个附件` : "添加附件"}><IconPaperclip class="size-4 stroke-muted"/><input name="attachment" type="file" multiple={attachmentLimits().max_attachments_per_message > 1} class="sr-only" disabled={localProjectionRecoveryActive() || sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message} onChange={(event) => {
             const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
             const limits = attachmentLimits();
             if (selected.some((item) => item.size > limits.max_attachment_plaintext_bytes)) return setNotice(`每个附件不能超过 ${Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024)} MB`);
@@ -3295,8 +3356,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             setFiles(next); setVoiceDurationMs(null);
           }}/></label></div>}/>
         </div>}/>}</Show></section>
-      <Show when={selectedMessageIds().size > 0}><div class="fixed inset-x-0 bottom-0 z-20 flex min-h-16 items-center gap-3 border-t border-black/8 bg-white px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] md:left-[360px] sm:px-5"><button type="button" class="min-h-11 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={cancelMessageSelection}>取消</button><span class="min-w-0 flex-1 truncate text-center text-sm font-medium text-ink">已选择 {selectedMessages().length} 条</span><button type="button" disabled={!selectedMessages().length} class="flex min-h-11 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => setForwardingMessages(selectedMessages())}><IconArrowForwardUp class="size-4 stroke-white"/>转发 {selectedMessages().length} 条</button></div></Show>
-      <Show when={newRoom()}><NewRoomDialog api={api} createGroup={(roomId, packages) => mutateMls(async () => { const created = mls()!.createGroup(roomId, packages); await persistMls(mls()!); return created; })} queueInitialProfile={(roomId, name) => updateRoomProfile(roomId, name, false, true, null)} serverName={currentSession().server_name ?? location.hostname} initialContact={newRoomContact()} onClose={() => { setNewRoom(false); setNewRoomContact(null); }} onCreated={(id, encryptedName, profileQueued) => { setNewRoom(false); setNewRoomContact(null); void finishCreatedRoom(id, encryptedName, profileQueued); }}/></Show>
+      <Show when={selectedMessageIds().size > 0}><div class="fixed inset-x-0 bottom-0 z-20 flex min-h-16 items-center gap-3 border-t border-black/8 bg-white px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] md:left-[360px] sm:px-5"><button type="button" class="min-h-11 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={cancelMessageSelection}>取消</button><span class="min-w-0 flex-1 truncate text-center text-sm font-medium text-ink">已选择 {selectedMessages().length} 条</span><button type="button" disabled={localProjectionRecoveryActive() || !selectedMessages().length} class="flex min-h-11 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => setForwardingMessages(selectedMessages())}><IconArrowForwardUp class="size-4 stroke-white"/>转发 {selectedMessages().length} 条</button></div></Show>
+      <Show when={newRoom()}><NewRoomDialog api={api} createGroup={(roomId, packages) => mutateMls(async () => { const created = mls()!.createGroup(roomId, packages); await persistMls(mls()!); return created; })} queueInitialProfile={(roomId, name) => updateRoomProfile(roomId, name, false, true, null)} serverName={currentSession().server_name ?? location.hostname} initialContact={newRoomContact()} creationBlocked={localProjectionRecoveryActive()} onClose={() => { setNewRoom(false); setNewRoomContact(null); }} onCreated={(id, encryptedName, profileQueued) => { setNewRoom(false); setNewRoomContact(null); void finishCreatedRoom(id, encryptedName, profileQueued); }}/></Show>
       <Show when={contactShareOpen() && selected()}>{(room) => <ContactShareDialog contacts={shareableContacts(room())} onSend={sendContactCard} onClose={() => setContactShareOpen(false)}/>}</Show>
       <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
       <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>

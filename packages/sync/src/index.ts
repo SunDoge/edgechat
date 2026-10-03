@@ -1038,6 +1038,7 @@ export class SyncEngine extends EventTarget {
         if (error instanceof RoomHistoryTransferRequiredError) await this.db.deferRoomEvent(event);
         if (error instanceof LocalProjectionPersistenceError) {
           this.projectionRetries.set(event.room_id, attempted);
+          this.dispatchEvent(new CustomEvent("local-projection", { detail: { roomId: attempted.room_id, eventId: attempted.event_id, pending: true } }));
           this.scheduleProjectionRetry(event.room_id);
         }
         throw error;
@@ -1117,6 +1118,7 @@ export class SyncEngine extends EventTarget {
       } catch (cause) {
         throw cause instanceof LocalProjectionPersistenceError ? cause : new LocalProjectionPersistenceError(cause);
       }
+      this.dispatchEvent(new CustomEvent("local-projection", { detail: { roomId: event.room_id, eventId: event.event_id, pending: false } }));
       this.dispatchEvent(new CustomEvent("quarantined", { detail: { event, error } }));
       this.dispatchEvent(new CustomEvent("processed", { detail: event }));
       return;
@@ -1128,6 +1130,7 @@ export class SyncEngine extends EventTarget {
     } catch (cause) {
       throw cause instanceof LocalProjectionPersistenceError ? cause : new LocalProjectionPersistenceError(cause);
     }
+    this.dispatchEvent(new CustomEvent("local-projection", { detail: { roomId: event.room_id, eventId: event.event_id, pending: false } }));
     if (result) this.dispatchEvent(new CustomEvent("message", { detail: event }));
     // Observers may query projections after this event. Dispatch only once all
     // local writes are committed, otherwise unread counters race the message.

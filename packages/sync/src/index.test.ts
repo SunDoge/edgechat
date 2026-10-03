@@ -384,6 +384,8 @@ describe("SyncEngine event ingestion", () => {
     const process = vi.fn(async () => ({ plaintext: "recovered", payload: {} }));
     const engine = new SyncEngine(api, db, process, undefined, null);
     const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
+    const projectionStates: Array<{ roomId: string; eventId: string; pending: boolean }> = [];
+    engine.addEventListener("local-projection", (received) => projectionStates.push((received as CustomEvent).detail));
 
     try {
       await engine.start();
@@ -395,6 +397,10 @@ describe("SyncEngine event ingestion", () => {
       expect(process).toHaveBeenCalledTimes(2);
       expect(writes).toBe(2);
       expect(staged).toBe(false);
+      expect(projectionStates).toEqual([
+        { roomId, eventId: event.event_id, pending: true },
+        { roomId, eventId: event.event_id, pending: false },
+      ]);
     } finally {
       engine.stop();
       vi.useRealTimers();

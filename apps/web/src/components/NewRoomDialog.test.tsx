@@ -7,6 +7,20 @@ let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); });
 
 describe("NewRoomDialog encrypted group profile", () => {
+  it("does not claim keys while local MLS projection recovery is blocking creation", () => {
+    const claimMlsKeyPackages = vi.fn();
+    const root = document.createElement("div"); document.body.append(root);
+    dispose = render(() => <NewRoomDialog api={{ claimMlsKeyPackages } as unknown as ApiClient} serverName="example.com"
+      initialContact={{ user_id: "@bob:example.com", display_name: "Bob" }} creationBlocked
+      createGroup={vi.fn()} queueInitialProfile={vi.fn()} onCreated={vi.fn()} onClose={vi.fn()}/>, root);
+
+    const create = [...document.querySelectorAll("button")].find((button) => button.textContent === "开始对话") as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    expect(document.body.textContent).toContain("本机记录恢复完成后才能建立新的加密对话");
+    create.click();
+    expect(claimMlsKeyPackages).not.toHaveBeenCalled();
+  });
+
   it("never sends the initial group name in the room-creation request", async () => {
     const createRoom = vi.fn(async (payload: Record<string, unknown>) => ({ room_id: payload.room_id as `!${string}:${string}`, created: true }));
     const api = {
