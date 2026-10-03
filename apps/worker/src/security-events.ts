@@ -5,6 +5,7 @@ type SecurityEventPayloads = {
   "security.account_appeal_submitted": { category: "login_locked" | "device_lost" | "account_access"; replaced_pending: boolean };
   "security.account_appeal_resolved": { resolution: "approved" | "denied"; login_unlocked: boolean };
   "security.password_changed": { other_sessions_revoked: boolean };
+  "security.device_link.expired": { rooms: number };
 };
 
 /**

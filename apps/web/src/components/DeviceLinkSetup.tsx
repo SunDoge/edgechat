@@ -1,7 +1,7 @@
 import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { IconCopy, IconDeviceMobile, IconRefresh, IconShieldCheck } from "@tabler/icons-solidjs";
 import { deviceFingerprint, deviceLinkClaimBytes, openAccountCredential, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
-import type { ApiClient, DeviceLinkStatus, SessionIdentity } from "@edgechat/sync";
+import { ApiError, type ApiClient, type DeviceLinkStatus, type SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { renderSVG } from "uqr";
 import { clearIdentity, loadIdentity, saveIdentity } from "../vault";
@@ -174,9 +174,13 @@ export function DeviceLinkSetup(props: {
   }
 
   async function poll(): Promise<void> {
-    const current = pending(); if (!current || stopped) return;
+    let current = pending(); if (!current || stopped) return;
     try {
       const next = await props.api.deviceLinkStatus(current.link_id, current.secret); setStatus(next);
+      if (next.expires_at !== current.expires_at) {
+        current = { ...current, expires_at: next.expires_at };
+        savePendingDeviceLink(props.profileId, current); setPending(current);
+      }
       if (next.status === "awaiting_packages") {
         await replenishPackages(current, next.required_packages); setStage("approved");
       } else if (next.status === "approved") setStage("approved");
@@ -186,11 +190,23 @@ export function DeviceLinkSetup(props: {
       else setStage("waiting");
       timer = window.setTimeout(() => void poll(), 1_500);
     } catch (cause) {
+      if (cause instanceof ApiError && cause.code === "device_link_expired") {
+        window.clearTimeout(timer);
+        try {
+          await deviceHistoryStaging.clearLink(current.link_id); await clearIdentity(props.profileId);
+        } catch {
+          setError(t("deviceLink.error.expiredCleanup")); setStage("error"); return;
+        }
+        clearPendingDeviceLink(props.profileId);
+        mls?.destroy(); mls = null; identity = null; setPending(null); setStatus(null);
+        setError(t("deviceLink.error.expired")); setStage("error"); return;
+      }
       setError(cause instanceof Error ? cause.message : t("deviceLink.error.continue")); setStage("error");
     }
   }
 
   async function retry() {
+    if (!pending()) return begin();
     setError(""); setStage(status()?.status === "approved" ? "approved" : "waiting");
     await poll();
   }

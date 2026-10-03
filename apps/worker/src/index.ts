@@ -1683,6 +1683,66 @@ async function deviceLinkHistoryTransfer(env: Env, linkId: string) {
   };
 }
 
+async function stageExpiredDeviceLinkRevocation(env: Env, link: {
+  link_id: string; user_id: string | null; device_id: string; approved_by_device_id: string | null;
+}, now: number): Promise<void> {
+  if (!link.user_id || !link.approved_by_device_id) return;
+  const db = createDatabase(env.DB);
+  const device = await db.selectFrom("devices").select(["device_id", "revoked_at"])
+    .where("device_id", "=", link.device_id).where("user_id", "=", link.user_id).executeTakeFirst();
+  if (!device || device.revoked_at !== null) return;
+  const existing = await db.selectFrom("device_revocations").select("revocation_id")
+    .where("target_device_id", "=", link.device_id).where("user_id", "=", link.user_id)
+    .where("status", "!=", "complete").executeTakeFirst();
+  if (existing) return;
+  const rooms = await db.selectFrom("room_devices as rd").innerJoin("rooms as r", "r.room_id", "rd.room_id")
+    .innerJoin("room_members as rm", (join) => join.onRef("rm.room_id", "=", "rd.room_id").onRef("rm.user_id", "=", "rd.user_id"))
+    .select(["rd.room_id", "r.mls_epoch"]).where("rd.device_id", "=", link.device_id).where("rd.user_id", "=", link.user_id)
+    .where("rd.removed_at", "is", null).where("rm.removed_at", "is", null).orderBy("rd.room_id").execute();
+  const revocationId = randomId(18);
+  try {
+    await batch(env.DB, [
+      db.insertInto("device_revocations").values({ revocation_id: revocationId, user_id: link.user_id,
+        target_device_id: link.device_id, requested_by_device_id: link.approved_by_device_id,
+        status: "pending", created_at: now, updated_at: now, completed_at: null }),
+      ...rooms.map((room) => db.insertInto("device_revocation_rooms").values({ revocation_id: revocationId,
+        room_id: room.room_id, expected_epoch: room.mls_epoch + 1, status: "pending", event_id: null, updated_at: now })),
+      ...(rooms.length ? [db.insertInto("sync_log").values({ recipient_user_id: link.user_id, kind: "device.event",
+        room_id: null, seq: null, event_id: null,
+        payload: JSON.stringify({ type: "device.link.expired", device_id: link.device_id, revocation_id: revocationId }), created_at: now })] : []),
+    ]);
+  } catch (error) {
+    // Another room membership operation may temporarily own one of the room
+    // serialization slots. The link is already unusable; cron retries the
+    // durable revocation job without extending the capability lifetime.
+    if (error instanceof Error && error.message.includes("UNIQUE")) return;
+    throw error;
+  }
+  if (!rooms.length) await finalizeDeviceRevocation(env, revocationId);
+  logSecurityEvent("info", "security.device_link.expired", { rooms: rooms.length });
+}
+
+async function expireDeviceLink(env: Env, linkId: string, now = Date.now()): Promise<boolean> {
+  const db = createDatabase(env.DB);
+  let link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
+  if (!link || link.status === "claimed" || link.expires_at > now) return false;
+  let changed = false;
+  if (link.status !== "cancelled") {
+    const [cancelled] = await batch(env.DB, [
+      db.updateTable("device_links").set({ status: "cancelled", updated_at: now }).where("link_id", "=", linkId)
+        .where("status", "in", ["pending", "awaiting_packages", "approved", "complete"]).where("expires_at", "<=", now),
+      db.deleteFrom("device_link_rooms").where("link_id", "=", linkId).where("status", "=", "pending"),
+    ]);
+    changed = cancelled.numAffectedRows === 1n;
+    link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
+    if (!link || link.status === "claimed" || link.status !== "cancelled") return false;
+  }
+  await stageExpiredDeviceLinkRevocation(env, link, now);
+  await removeDeviceLinkHistory(env, link);
+  await removeDeviceLinkHistoryShards(env, link.link_id, link.user_id);
+  return changed;
+}
+
 function deviceLinkSecret(request: Request): string {
   const secret = request.headers.get("x-device-link-secret") ?? "";
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(secret)) throw new HttpError(401, "Device link secret required", "invalid_link_secret");
@@ -1694,8 +1754,8 @@ async function deviceLinkBySecret(request: Request, env: Env, linkId: string) {
   const link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId)
     .where("secret_hash", "=", await sha256(deviceLinkSecret(request))).executeTakeFirst();
   if (!link) throw new HttpError(404, "Device link not found", "not_found");
-  if (link.expires_at <= Date.now() && (link.status === "pending" || link.status === "awaiting_packages")) {
-    await db.updateTable("device_links").set({ status: "cancelled", updated_at: Date.now() }).where("link_id", "=", linkId).execute();
+  if (link.expires_at <= Date.now() && link.status !== "claimed") {
+    await expireDeviceLink(env, linkId);
     throw new HttpError(410, "Device link expired", "device_link_expired");
   }
   return link;
@@ -1783,8 +1843,12 @@ async function previewDeviceLink(env: Env, auth: AuthContext, linkId: string): P
   const link = await db.selectFrom("device_links")
     .select(["link_id", "device_id", "display_name", "signing_key", "encryption_key", "user_id", "approved_by_device_id", "status", "required_packages", "expires_at", "history_object_key", "history_bytes", "history_source_device_id", "account_credential_envelope"])
     .where("link_id", "=", linkId).executeTakeFirst();
-  if (!link || link.status === "cancelled" || (link.status === "pending" && link.expires_at <= Date.now())) throw new HttpError(404, "Device link not found", "not_found");
+  if (!link || link.status === "cancelled") throw new HttpError(404, "Device link not found", "not_found");
   if (link.user_id && link.user_id !== auth.userId) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.expires_at <= Date.now() && link.status !== "claimed") {
+    await expireDeviceLink(env, linkId);
+    throw new HttpError(410, "Device link expired", "device_link_expired");
+  }
   if (link.status === "approved") {
     await env.DB.prepare(`
       UPDATE device_link_rooms
@@ -1810,10 +1874,14 @@ async function uploadDeviceLinkAccountCredential(request: Request, env: Env, aut
   const envelope = stringField(body, "envelope", 4_096);
   if (!/^[A-Za-z0-9_-]{128,4096}$/.test(envelope)) throw new HttpError(400, "Invalid account credential envelope", "invalid_account_credential_envelope");
   const db = createDatabase(env.DB);
-  const link = await db.selectFrom("device_links").select(["user_id", "device_id", "approved_by_device_id", "status", "account_credential_envelope", "account_credential_source_device_id"])
+  const link = await db.selectFrom("device_links").select(["user_id", "device_id", "approved_by_device_id", "status", "expires_at", "account_credential_envelope", "account_credential_source_device_id"])
     .where("link_id", "=", linkId).executeTakeFirst();
   if (!link || link.user_id !== auth.userId || link.approved_by_device_id !== auth.deviceId || link.device_id === auth.deviceId
-    || !["awaiting_packages", "approved", "complete", "claimed"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
+    || !["awaiting_packages", "approved", "complete"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.expires_at <= Date.now()) {
+    await expireDeviceLink(env, linkId);
+    throw new HttpError(410, "Device link expired", "device_link_expired");
+  }
   if (link.account_credential_envelope) {
     if (link.account_credential_envelope !== envelope || link.account_credential_source_device_id !== auth.deviceId) {
       throw new HttpError(409, "A different account credential envelope is already attached", "account_credential_conflict");
@@ -1839,8 +1907,12 @@ async function createDeviceLinkHistoryTransfer(request: Request, env: Env, auth:
     throw new HttpError(400, "Invalid device history manifest", "invalid_history_manifest");
   }
   const db = createDatabase(env.DB);
-  const link = await db.selectFrom("device_links").select(["user_id", "device_id", "status"]).where("link_id", "=", linkId).executeTakeFirst();
+  const link = await db.selectFrom("device_links").select(["user_id", "device_id", "status", "expires_at"]).where("link_id", "=", linkId).executeTakeFirst();
   if (!link || link.user_id !== auth.userId || !["approved", "complete", "claimed"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.status !== "claimed" && link.expires_at <= Date.now()) {
+    await expireDeviceLink(env, linkId);
+    throw new HttpError(410, "Device link expired", "device_link_expired");
+  }
   const existing = await db.selectFrom("device_link_history_transfers").selectAll().where("link_id", "=", linkId).executeTakeFirst();
   if (existing) {
     const same = existing.transfer_id === transferId && existing.source_device_id === auth.deviceId && existing.plaintext_bytes === plaintextBytes
@@ -1862,9 +1934,17 @@ async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: Au
     throw new HttpError(413, "Device history shard is too large", "device_history_too_large");
   }
   const db = createDatabase(env.DB);
-  const transfer = await db.selectFrom("device_link_history_transfers").selectAll().where("link_id", "=", linkId).executeTakeFirst();
+  const transfer = await db.selectFrom("device_link_history_transfers as transfer")
+    .innerJoin("device_links as link", "link.link_id", "transfer.link_id")
+    .selectAll("transfer").select(["link.status as link_status", "link.expires_at as link_expires_at"])
+    .where("transfer.link_id", "=", linkId).executeTakeFirst();
   if (!transfer || transfer.user_id !== auth.userId || transfer.source_device_id !== auth.deviceId || !Number.isSafeInteger(shardIndex) || shardIndex < 0 || shardIndex >= transfer.shard_count) {
     throw new HttpError(404, "Device history transfer not found", "not_found");
+  }
+  if (transfer.link_status !== "approved" && transfer.link_status !== "complete" && transfer.link_status !== "claimed") throw new HttpError(404, "Device history transfer not found", "not_found");
+  if (transfer.link_status !== "claimed" && transfer.link_expires_at <= Date.now()) {
+    await expireDeviceLink(env, linkId);
+    throw new HttpError(410, "Device link expired", "device_link_expired");
   }
   const existing = await db.selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
   if (existing) return json({ ready: true, index: shardIndex, bytes: existing.ciphertext_bytes, status: existing.status });
@@ -1957,6 +2037,10 @@ async function uploadDeviceLinkHistory(request: Request, env: Env, auth: AuthCon
   const db = createDatabase(env.DB);
   let link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
   if (!link || link.user_id !== auth.userId || !["approved", "complete", "claimed"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.status !== "claimed" && link.expires_at <= Date.now()) {
+    await expireDeviceLink(env, linkId);
+    throw new HttpError(410, "Device link expired", "device_link_expired");
+  }
   if (link.history_object_key && !(await removeDeviceLinkHistory(env, link))) throw new HttpError(503, "Previous history transfer could not be replaced", "history_cleanup_failed");
   const objectKey = `device-links/${linkId}/history.bin`;
   const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
@@ -1990,7 +2074,8 @@ async function acknowledgeDeviceLinkHistory(request: Request, env: Env, linkId: 
 async function materializeDeviceLink(env: Env, linkId: string): Promise<void> {
   const db = createDatabase(env.DB);
   const link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirstOrThrow();
-  if (!link.user_id || !link.approved_by_device_id || (link.status !== "awaiting_packages" && link.status !== "approved")) return;
+  if (!link.user_id || !link.approved_by_device_id || link.expires_at <= Date.now()
+    || (link.status !== "awaiting_packages" && link.status !== "approved")) return;
   const rooms = await db.selectFrom("room_members as rm").innerJoin("rooms as r", "r.room_id", "rm.room_id")
     .select(["rm.room_id", "r.mls_epoch"]).where("rm.user_id", "=", link.user_id).where("rm.removed_at", "is", null).orderBy("rm.room_id").execute();
   const packages = await db.selectFrom("device_link_key_packages").select("key_package").where("link_id", "=", linkId).orderBy("ordinal").execute();
@@ -2039,6 +2124,11 @@ async function commitDeviceLinkRoom(request: Request, env: Env, auth: AuthContex
   const db = createDatabase(env.DB);
   const link = await db.selectFrom("device_links").selectAll().where("link_id", "=", linkId).executeTakeFirst();
   if (!link || link.user_id !== auth.userId) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.expires_at <= Date.now() && link.status !== "claimed") {
+    await expireDeviceLink(env, linkId);
+    throw new HttpError(410, "Device link expired", "device_link_expired");
+  }
+  if (link.status !== "approved" && link.status !== "complete" && link.status !== "claimed") throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
   const task = await db.selectFrom("device_link_rooms").selectAll().where("link_id", "=", linkId).where("room_id", "=", roomId).executeTakeFirst();
   if (!task) throw new HttpError(404, "Device link room not found", "not_found");
   if (task.status === "complete") {
@@ -2541,20 +2631,27 @@ async function cleanupMessageRequestRateWindows(env: Env): Promise<number> {
 
 export async function cleanupExpiredDeviceLinks(env: Env): Promise<number> {
   const db = createDatabase(env.DB); const now = Date.now();
-  const expired = await db.updateTable("device_links").set({ status: "cancelled", updated_at: now })
-    .where("status", "in", ["pending", "awaiting_packages"]).where("expires_at", "<=", now).executeTakeFirst();
-  const removable = await db.selectFrom("device_links").select(["link_id", "user_id", "history_object_key", "history_bytes"])
+  const expiredLinks = await db.selectFrom("device_links").select("link_id")
+    .where("status", "in", ["pending", "awaiting_packages", "approved", "complete", "cancelled"])
+    .where("expires_at", "<=", now).orderBy("updated_at").limit(100).execute();
+  let expired = 0;
+  for (const link of expiredLinks) if (await expireDeviceLink(env, link.link_id, now)) expired += 1;
+  const removable = await db.selectFrom("device_links").select(["link_id", "user_id", "device_id", "status", "history_object_key", "history_bytes"])
     .where((eb) => eb.or([
       eb.and([eb("status", "=", "cancelled"), eb("updated_at", "<", now - 24 * 60 * 60 * 1_000)]),
       eb.and([eb("status", "=", "claimed"), eb("claimed_at", "<", now - 7 * 24 * 60 * 60 * 1_000)]),
-      eb.and([eb("status", "=", "complete"), eb("completed_at", "<", now - 30 * 24 * 60 * 60 * 1_000)]),
     ])).orderBy("updated_at").limit(100).execute();
   const deletedIds: string[] = [];
   for (const link of removable) {
+    if (link.status === "cancelled"
+      && (await db.selectFrom("devices").select("revoked_at").where("device_id", "=", link.device_id).executeTakeFirst())?.revoked_at === null) {
+      const staged = await db.selectFrom("device_revocations").select("revocation_id").where("target_device_id", "=", link.device_id).executeTakeFirst();
+      if (!staged) continue;
+    }
     if (await removeDeviceLinkHistory(env, link) && await removeDeviceLinkHistoryShards(env, link.link_id, link.user_id)) deletedIds.push(link.link_id);
   }
   if (deletedIds.length) await db.deleteFrom("device_links").where("link_id", "in", deletedIds).execute();
-  return Number(expired.numUpdatedRows) + deletedIds.length;
+  return expired + deletedIds.length;
 }
 
 async function persistRetentionFloor(env: Env, roomId: RoomId, floorSeq: number, generation: number, checkedAt: number): Promise<void> {

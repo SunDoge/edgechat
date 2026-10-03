@@ -235,6 +235,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   let searchRequestVersion = 0;
   let mlsMutationTail: Promise<void> = Promise.resolve();
   let accountRemovalRun: Promise<void> | null = null;
+  let deviceRevocationRun: Promise<void> | null = null;
   let conversationExportAbort: AbortController | null = null;
   let roomMembershipRun: Promise<void> | null = null;
   let keyPackageRefill: Promise<void> | null = null;
@@ -1245,6 +1246,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const detail = (received as CustomEvent<Record<string, unknown>>).detail;
       if (["profile.updated", "room.leave.requested", "room.leave.updated", "room.leave.cancelled"].includes(String(detail?.type))) {
         void loadRooms(currentMls).catch(() => setConnectionState("offline"));
+      }
+      if (detail?.type === "device.link.expired") {
+        setNotice(t("devices.linkExpired.removing"));
+        void resumeDeviceRevocations(currentMls).then(() => {
+          const target = String(detail.device_id ?? "");
+          if (target && deviceRevocations()[target]?.status === "failed") setNotice(t("devices.linkExpired.failed"));
+        }).catch(() => setNotice(t("devices.linkExpired.failed")));
       }
     };
     const realtime = (received: Event) => { const connected = Boolean((received as CustomEvent<{ connected: boolean }>).detail.connected); setConnectionState(connected ? "online" : navigator.onLine ? "syncing" : "offline"); };
@@ -3037,11 +3045,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function resumeDeviceRevocations(currentMls: OpenMlsMessagingCore): Promise<void> {
-    const [pending, remote] = await Promise.all([db.pendingDeviceRevocations(), api.activeDeviceRevocations()]);
-    const targets = new Set([...pending.map((item) => item.target_device_id), ...remote.revocations.map((item) => item.target_device_id)]);
-    for (const deviceId of targets) {
-      await executeDeviceRevocation(deviceId, currentMls).catch(() => undefined);
-    }
+    if (deviceRevocationRun) return deviceRevocationRun;
+    deviceRevocationRun = (async () => {
+      const [pending, remote] = await Promise.all([db.pendingDeviceRevocations(), api.activeDeviceRevocations()]);
+      const targets = new Set([...pending.map((item) => item.target_device_id), ...remote.revocations.map((item) => item.target_device_id)]);
+      for (const deviceId of targets) await executeDeviceRevocation(deviceId, currentMls).catch(() => undefined);
+    })().finally(() => { deviceRevocationRun = null; });
+    return deviceRevocationRun;
   }
 
   async function reconcileRoomMembershipState(queued: RoomMembershipOutboxItem): Promise<void> {
@@ -3364,7 +3374,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     return files().length > 0 || voiceRecording() || sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy() || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || passkeysOpen() || accountDeletionOpen()
       || pendingMlsMutations > 0 || mlsProjectionBarrier.isBlocked()
       || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
-      || Boolean(roomMembershipRun || accountRemovalRun || savedRoomCreation || keyPackageRefill || retentionRun || messageExpiryRun
+      || Boolean(roomMembershipRun || accountRemovalRun || deviceRevocationRun || savedRoomCreation || keyPackageRefill || retentionRun || messageExpiryRun
         || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun || peerRecoveryRun || draftSyncRun)
       || Boolean(syncRef?.isBusy() || outboxRef?.isBusy() || archiveRef?.isBusy());
   }
