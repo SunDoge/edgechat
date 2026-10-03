@@ -70,11 +70,13 @@ by EdgeChat and should not be enabled merely to build this dashboard.
    `pnpm browser:install:matrix`, then run `pnpm check:release` from the exact
    revision. This composes migration/type generation verification, TypeScript
    and Rust/OpenMLS tests, production builds, the high-severity production
-   dependency audit, and the Chromium/Firefox/WebKit database, tab handoff,
-   rendered update/recovery, and offline PWA gates. The PWA gate reuses the
-   exact production build created by `pnpm check`; it does not rebuild a
-   different artifact. Apart from the package-registry audit, the browser gates
-   use only a loopback server and make no Worker, D1, R2, or S3 request.
+   dependency audit, an isolated local-Worker two-device messaging smoke, and
+   the Chromium/Firefox/WebKit database, tab handoff, rendered update/recovery,
+   and offline PWA gates. The browser gates reuse the exact production build
+   created by `pnpm check`; they do not rebuild a different artifact. Apart from
+   the package-registry audit, every gate is loopback-only. The messaging smoke
+   uses temporary local D1/R2/Durable Object state and deletes it afterward;
+   no phase contacts Cloudflare or an external S3 provider.
 2. Run `pnpm run db:migrations:check`. Every recorded migration must retain its
    exact SHA-256 digest and filenames must form one contiguous zero-padded
    sequence. Never edit a recorded migration; add the next file instead.

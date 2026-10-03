@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { existsSync } from "node:fs";
 
 const baseUrl = process.env.EDGECHAT_SMOKE_URL;
 if (!baseUrl) throw new Error("EDGECHAT_SMOKE_URL is required");
@@ -15,6 +16,8 @@ const savedMessage = `给自己的备忘 ${suffix}`;
 const failures = [];
 const optionalModelRequests = [];
 let ambiguousRegistrationWindow = false;
+const chromiumExecutable = process.env.EDGECHAT_CHROMIUM_EXECUTABLE
+  ?? (existsSync("/usr/bin/google-chrome") ? "/usr/bin/google-chrome" : undefined);
 
 function base64Url(bytes) {
   return Buffer.from(bytes).toString("base64url");
@@ -134,8 +137,8 @@ async function main() {
   // Treat each endpoint as a real device process so their browser storage,
   // Wasm runtime, crash lifecycle and resource limits remain independent.
   const [aliceBrowser, bobBrowser] = await Promise.all([
-    chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true }),
-    chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true }),
+    chromium.launch({ ...(chromiumExecutable ? { executablePath: chromiumExecutable } : {}), headless: true }),
+    chromium.launch({ ...(chromiumExecutable ? { executablePath: chromiumExecutable } : {}), headless: true }),
   ]);
   const aliceContext = await aliceBrowser.newContext({ serviceWorkers: "block" });
   const bobContext = await bobBrowser.newContext({ serviceWorkers: "block" });

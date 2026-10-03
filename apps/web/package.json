@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --port 5173",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit && node --check scripts/pwa-offline.mjs && node --check scripts/tunnel-smoke.mjs",
+    "typecheck": "tsc --noEmit && node --check scripts/pwa-offline.mjs && node --check scripts/tunnel-smoke.mjs && node --check scripts/local-messaging-smoke.mjs",
     "test": "vitest run --passWithNoTests --exclude 'src/**/*.browser.test.ts'",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "browser:install:firefox": "node node_modules/playwright/cli.js install firefox",
@@ -19,7 +19,8 @@
     "test:pwa:firefox": "EDGECHAT_BROWSER=firefox node scripts/pwa-offline.mjs",
     "test:pwa:webkit": "EDGECHAT_BROWSER=webkit node scripts/pwa-offline.mjs",
     "test:pwa:matrix": "pnpm run test:pwa && pnpm run test:pwa:firefox && pnpm run test:pwa:webkit",
-    "smoke:tunnel": "node scripts/tunnel-smoke.mjs"
+    "smoke:tunnel": "node scripts/tunnel-smoke.mjs",
+    "smoke:local": "node scripts/local-messaging-smoke.mjs"
   },
   "dependencies": {
     "@edgechat/db": "workspace:*",
