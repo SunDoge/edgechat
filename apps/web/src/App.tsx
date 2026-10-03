@@ -2780,13 +2780,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setCompose(""); setReplyingTo(null); setQuoting(null); setEditingMessage(null); setForwardingMessages(null); setIncomingShare(null); setContactShareOpen(false); setNewRoomContact(null); setIdentityVerificationOpen(false); setProfileOpen(false); setProfile(null); cancelMessageSelection(); setComposerDrafts({}); setRoomListActivities({}); setMessageExpiryPolicies({}); setHistoryRecoveryRooms(new Set<RoomId>()); setPresenceSharing(false); setPresenceByRoom({});
     setRooms([]); setSelectedId(null); setMessages([]); setRoomIdentityTrust({}); setSession(null); setIdentity(null); setMls(null);
     setAccountDeletionOpen(false); setDevicesOpen(false);
-    sessionStorage.setItem("edgechat.local-profile-notice", localCleanupFailed ? "账户已停用，但本机缓存未能完全清除；请清除该站点的浏览数据" : successMessage);
+    sessionStorage.setItem("edgechat.local-profile-notice", localCleanupFailed ? t("workspace.feedback.accountCleanupIncomplete") : successMessage);
     location.reload();
   }
 
   async function deleteAccount(password: string): Promise<void> {
     await api.deleteAccount(password);
-    await clearLocalAccount("账户已停用，本机消息和密钥已清除；共享对话将在其他成员上线后完成安全清理");
+    await clearLocalAccount(t("workspace.feedback.accountDeletionComplete"));
   }
   function setRevocationProgress(deviceId: string, progress: DeviceRevocationProgress | null) {
     setDeviceRevocations((current) => {
@@ -2851,7 +2851,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function executeDeviceLink(linkId: string, currentMls = mlsRef): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session();
     if (!currentMls || !currentIdentity || !currentSession) throw new Error("本机加密状态尚未就绪");
-    let activeMls = currentMls; let historyTransferWarning = ""; let viewLoaded = false;
+    let activeMls = currentMls; let historyTransferSkipped = false; let viewLoaded = false;
     let view: DeviceLinkPreview;
     try {
       view = await api.deviceLinkPreview(linkId); viewLoaded = true;
@@ -2893,7 +2893,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             history_transfer: { ...created.transfer, ready_shards: Array.from({ length: manifest.shard_count }, (_, index) => index), ciphertext_bytes: uploadedBytes } };
         } catch (cause) {
           const message = cause instanceof Error ? cause.message : String(cause);
-          if (message.includes("迁移上限")) historyTransferWarning = "；本机历史超过迁移分片上限，未随此次链接复制";
+          if (message.includes("迁移上限")) historyTransferSkipped = true;
           else throw cause;
         }
       }
@@ -2916,7 +2916,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         }
         await db.removeDeviceLinkJob(linkId); setDevices((await api.devices()).devices); scheduleDraftSync(0);
         await deviceHistoryStaging.clearLink(linkId);
-        setNotice(`新设备已安全加入现有加密对话${historyTransferWarning}`); setDeviceLinkOpen(false); return;
+        setNotice(t(historyTransferSkipped ? "workspace.feedback.deviceLinkedWithoutHistory" : "workspace.feedback.deviceLinked")); setDeviceLinkOpen(false); return;
       }
       if (view.status !== "approved") throw new Error("新设备尚未准备完成");
 
@@ -2996,7 +2996,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       view = await api.deviceLinkPreview(linkId);
       if (view.status !== "complete" && view.status !== "claimed") throw new Error("部分对话尚未完成，请重试");
       await db.removeDeviceLinkJob(linkId); setDevices((await api.devices()).devices); scheduleDraftSync(0);
-      setNotice(`新设备已安全加入现有加密对话${historyTransferWarning}`); setDeviceLinkOpen(false);
+      setNotice(t(historyTransferSkipped ? "workspace.feedback.deviceLinkedWithoutHistory" : "workspace.feedback.deviceLinked")); setDeviceLinkOpen(false);
     } catch (cause) {
       if (cause instanceof ApiError && (cause.code === "device_link_cancelled" || cause.code === "device_link_expired"
         || (!viewLoaded && cause.code === "not_found"))) {
@@ -3102,7 +3102,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (job.status !== "complete") throw new Error("服务器仍在关闭旧设备连接，请重试");
       setDevices((await api.devices()).devices);
       setRevocationProgress(deviceId, null);
-      setNotice("设备已从所有加密对话移除，登录会话和实时连接已关闭");
+      setNotice(t("workspace.feedback.deviceRevocationComplete"));
     } catch (cause) {
       const previous = deviceRevocations()[deviceId];
       setRevocationProgress(deviceId, { status: "failed", completed: previous?.completed ?? 0, total: previous?.total ?? 0,
@@ -3211,7 +3211,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           await db.removeRoomMembershipOutbox(roomId); await loadRooms(mlsRef);
           if (queued.operation === "add") {
             const profile = await db.roomProfile(roomId);
-            if (profile) await updateRoomProfile(roomId, profile.name, false).catch(() => setNotice("成员已加入；群聊资料将在下次修改时同步"));
+            if (profile) await updateRoomProfile(roomId, profile.name, false).catch(() => setNotice(t("workspace.feedback.memberAddedProfilePending")));
           }
           return;
         }
@@ -3231,7 +3231,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     await loadRooms(mlsRef);
     if (queued.operation === "add") {
       const profile = await db.roomProfile(roomId);
-      if (profile) await updateRoomProfile(roomId, profile.name, false).catch(() => setNotice("成员已加入；群聊资料将在下次修改时同步"));
+      if (profile) await updateRoomProfile(roomId, profile.name, false).catch(() => setNotice(t("workspace.feedback.memberAddedProfilePending")));
     }
     await refreshRoomIdentityTrust(roomId);
   }
@@ -3255,7 +3255,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           payload: payload as unknown as Record<string, unknown>, metadata: { target_user_id: targetUserId } });
       });
       await db.outbox(room.room_id).then(setPendingMessages).catch(() => undefined);
-      setRoomSettingsOpen(false); setNotice("群主转让已加入发送队列");
+      setRoomSettingsOpen(false); setNotice(t("workspace.feedback.ownerTransferQueued"));
     } finally { setRoomOwnershipBusy(null); }
   }
 
@@ -3278,7 +3278,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       for (const item of pending) await executeRoomMembershipChange(item.room_id);
       for (const task of delegated) await executeRoomMembershipChange(task.room_id, "remove", task.target_user_id as UserId, task.request_id);
       const count = pending.length + delegated.length;
-      setNotice(count === 1 ? "群成员变更已完成" : `已完成 ${count} 项群成员变更`);
+      setNotice(count === 1
+        ? t("workspace.feedback.membershipChangeComplete")
+        : t("workspace.feedback.membershipChangesComplete", { count }));
     })().catch((cause) => { setNotice(operationErrorMessage(cause, t("workspace.feedback.membershipChangeError"), t)); })
       .finally(() => { roomMembershipRun = null; setRoomMembershipBusy(null); });
     roomMembershipRun = run;
@@ -3287,17 +3289,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function requestRoomLeave(room: ServerRoom): Promise<void> {
     if (!serverSupports(session()?.protocol, "rooms.leave.v1")) throw new UserFacingError(t("workspace.feedback.roomLeaveUnsupported"));
-    if (!confirm(`退出“${roomTitle(room, session()!.user_id)}”？群主设备上线并更新群聊密钥后，你将停止接收新消息。`)) return;
+    if (!confirm(t("workspace.feedback.leaveConfirm", { title: roomTitle(room, session()!.user_id) }))) return;
     stopTyping(room.room_id); flushComposerDraft(room.room_id); cancelComposerMode(); setFiles([]); setVoiceDurationMs(null);
     await api.requestRoomLeave(room.room_id);
     await loadRooms(mlsRef);
-    setRoomSettingsOpen(false); setNotice("退出申请已发送；等待群主设备安全更新群聊密钥");
+    setRoomSettingsOpen(false); setNotice(t("workspace.feedback.leaveRequested"));
   }
 
   async function cancelRoomLeave(room: ServerRoom): Promise<void> {
     await api.cancelRoomLeave(room.room_id);
     await loadRooms(mlsRef);
-    setNotice("已取消退出群聊");
+    setNotice(t("workspace.feedback.leaveCancelled"));
   }
 
   async function resumeAccountRemovals(): Promise<void> {
@@ -3387,11 +3389,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       if (tasks.size) {
         await loadRooms(mlsRef);
-        setNotice(tasks.size === 1 ? "已安全更新一段对话的成员密钥" : `已安全更新 ${tasks.size} 段对话的成员密钥`);
+        setNotice(tasks.size === 1
+          ? t("workspace.feedback.accountRemovalRoomComplete")
+          : t("workspace.feedback.accountRemovalRoomsComplete", { count: tasks.size }));
       }
     })().catch(async (cause) => {
       if (cause instanceof ApiError && cause.code === "account_deletion_pending") {
-        await clearLocalAccount("账户已在其他设备上停用；本机消息和密钥已清除");
+        await clearLocalAccount(t("workspace.feedback.accountDisabledElsewhere"));
         return;
       }
       setNotice(operationErrorMessage(cause, t("workspace.feedback.accountRemovalRetry"), t));
@@ -3401,7 +3405,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function revokeDevice(deviceId: string) {
     const existing = deviceRevocations()[deviceId];
-    if (!existing && !confirm("安全移除这台设备？将逐个更新所有对话的加密密钥，然后关闭它的登录与实时连接。过程中请保持此页面打开。")) return;
+    if (!existing && !confirm(t("workspace.feedback.deviceRevocationConfirm"))) return;
     await executeDeviceRevocation(deviceId).catch((cause) => setNotice(operationErrorMessage(cause, t("workspace.feedback.deviceRevocationError"), t)));
   }
   async function enablePush() {
@@ -3487,7 +3491,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function logout() {
-    if (!confirm("从这台浏览器移除此身份？该身份的本机消息、搜索索引、附件缓存和密钥都会删除；服务器账户和其他设备不受影响。")) return;
+    if (!confirm(t("workspace.feedback.localProfileDeleteConfirm"))) return;
     try { await removeCurrentLocalProfile(); }
     catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.localProfileDeleteError"), t)); }
   }
@@ -3495,7 +3499,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const Workspace = () => {
     const currentSession = () => session()!;
     return <main inert={newRoom() || contactShareOpen() || Boolean(forwardingMessages()) || Boolean(incomingShare()) || searchOpen() || devicesOpen() || localProfilesOpen() || profileOpen() || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || passkeysOpen() || accountDeletionOpen() || roomSettingsOpen() || identityVerificationOpen() ? true : undefined} class="isolate h-dvh bg-white antialiased md:grid md:grid-cols-[360px_minmax(0,1fr)]">
-      <Show when={selected()}><a href="#current-conversation" class="fixed left-3 top-3 z-50 -translate-y-20 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-brand shadow-xl ring-2 ring-brand transition-transform focus:translate-y-0">跳到当前对话</a></Show>
+      <Show when={selected()}><a href="#current-conversation" class="fixed left-3 top-3 z-50 -translate-y-20 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-brand shadow-xl ring-2 ring-brand transition-transform focus:translate-y-0">{t("workspace.conversation.skipToCurrent")}</a></Show>
       <aside aria-label={t("workspace.conversations.label")} class={`h-full min-w-0 border-r border-black/8 bg-white ${selected() ? "max-md:hidden" : ""}`}>
         <div class="grid h-full grid-rows-[64px_auto_1fr_36px]">
           <header class="flex items-center justify-between border-b border-black/5 px-4"><Brand/><button type="button" aria-label={backupHealth(lastBackup()).attention ? t("workspace.account.backupAttention") : t("workspace.account.label")} class="relative rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => void openDevices()}><Avatar src={currentSession().avatar_url} label={initials(currentSession().display_name)} color={avatarColor(currentSession().user_id)}/><Show when={backupHealth(lastBackup()).attention}><span aria-hidden="true" class="absolute -right-0.5 -top-0.5 size-3 rounded-full border-2 border-white bg-amber-500"/></Show></button></header>

@@ -28,6 +28,9 @@ describe("local message catalog", () => {
     expect(translate("workspace.feedback.retentionSetAndPurged", { days: 30, count: 7 })).toBe("已设置保留 30 天，并清理 7 条到期消息");
     expect(translate("workspace.feedback.localHistoryCleared", { count: 12 })).toBe("已从这台设备清空 12 条消息");
     expect(translate("workspace.feedback.conversationExportComplete", { count: 42 })).toBe("已导出 42 条本机消息；附件内容未下载");
+    expect(translate("workspace.feedback.membershipChangesComplete", { count: 3 })).toBe("已完成 3 项群成员变更");
+    expect(translate("workspace.feedback.leaveConfirm", { title: "家人" })).toBe("退出“家人”？群主设备上线并更新群聊密钥后，你将停止接收新消息。");
+    expect(translate("workspace.feedback.accountRemovalRoomsComplete", { count: 2 })).toBe("已安全更新 2 段对话的成员密钥");
     expect(translate("secondaryTab.description.denied")).toContain("完成或取消");
     expect(translate("newRoom.createGroup", { count: 4 })).toBe("创建 4 人群聊");
     expect(translate("roomList.actions", { title: "家人" })).toBe("家人的对话操作");
