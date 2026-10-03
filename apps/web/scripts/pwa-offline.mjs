@@ -188,6 +188,49 @@ try {
   invariant(cached.paths.some((path) => path.endsWith(".wasm")), "Wasm bundle was not precached");
   invariant(cached.paths.some((path) => path.endsWith(".data")), "PGlite data bundle was not precached");
 
+  const recoveryProfileId = await page.evaluate(async () => {
+    const database = await new Promise((resolvePromise, reject) => {
+      const request = indexedDB.open("edgechat-local-profiles");
+      request.onsuccess = () => resolvePromise(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      const profileId = await new Promise((resolvePromise, reject) => {
+        const request = database.transaction("settings", "readonly").objectStore("settings").get("active-profile");
+        request.onsuccess = () => resolvePromise(request.result?.value);
+        request.onerror = () => reject(request.error);
+      });
+      if (typeof profileId !== "string") throw new Error("Active local profile is missing");
+      sessionStorage.setItem(`edgechat.profile.${profileId}.restore-phase`, "preparing");
+      return profileId;
+    } finally { database.close(); }
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: "本机恢复尚未完成", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
+  invariant((await page.locator("body").innerText()).includes("不会尝试混用新旧消息库与设备密钥"), "Interrupted restore guidance is incomplete");
+  invariant(!(await page.locator("body").innerText()).includes("删除本机身份"), "Recovery screen exposed a destructive first-line action");
+  await page.getByRole("button", { name: "重新选择备份", exact: true }).click();
+  await page.locator('input[type="file"]').waitFor({ state: "visible" });
+  invariant(await page.getByRole("button", { name: "验证并恢复", exact: true }).isDisabled(), "Restore action was enabled before credentials, file, and confirmation");
+  const profilePreserved = await page.evaluate(async (profileId) => {
+    const database = await new Promise((resolvePromise, reject) => {
+      const request = indexedDB.open("edgechat-local-profiles");
+      request.onsuccess = () => resolvePromise(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      return await new Promise((resolvePromise, reject) => {
+        const request = database.transaction("profiles", "readonly").objectStore("profiles").get(profileId);
+        request.onsuccess = () => resolvePromise(Boolean(request.result));
+        request.onerror = () => reject(request.error);
+      });
+    } finally { database.close(); }
+  }, recoveryProfileId);
+  invariant(profilePreserved, "Rendered recovery flow removed the existing local profile");
+  await page.evaluate((profileId) => sessionStorage.removeItem(`edgechat.profile.${profileId}.restore-phase`), recoveryProfileId);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator("#root > *").waitFor({ state: "visible", timeout: 30_000 });
+
   originOffline = true;
   // WebKit's Playwright offline toggle aborts a service-worker-controlled
   // navigation before the worker can serve its cached fallback. The origin
@@ -222,7 +265,7 @@ try {
   invariant(serviceWorkerRequests >= 2, `Expected initial and update Service Worker requests, saw ${serviceWorkerRequests}`);
 
   await context.close();
-  console.log(`PWA ${requestedBrowser} rendered-update/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
+  console.log(`PWA ${requestedBrowser} rendered-update/recovery/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
 } finally {
   await browser?.close();
   await new Promise((resolvePromise) => server.close(resolvePromise));
