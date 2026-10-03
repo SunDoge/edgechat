@@ -26,7 +26,14 @@ async function documentLockProvider(label: string): Promise<{ frame: HTMLIFrameE
 async function appDocument(label: string): Promise<HTMLIFrameElement> {
   const frame = document.createElement("iframe");
   frame.hidden = true;
-  frame.src = `/?tab-handoff-test=${encodeURIComponent(label)}-${crypto.randomUUID()}`;
+  // Vitest rewrites application dynamic imports through a runner global that
+  // exists only in the outer test document. A same-origin application iframe
+  // is deliberately a fresh JavaScript realm, so give it the same pass-through
+  // adapter Vitest injects into browser Worker realms before loading the real
+  // entry point. This keeps the exercised application and lazy boundaries
+  // production-identical without sharing the test document's mock registry.
+  const entry = `/src/main.tsx?tab-handoff-test=${encodeURIComponent(label)}-${crypto.randomUUID()}`;
+  frame.srcdoc = `<!doctype html><html lang="zh-Hans"><head><meta charset="UTF-8"><base href="/"></head><body><div id="root"></div><script>globalThis.__vitest_browser_runner__={wrapDynamicImport:(load)=>load()}</script><script type="module" src="${entry}"></script></body></html>`;
   frames.add(frame);
   const loaded = new Promise<void>((resolve, reject) => {
     frame.addEventListener("load", () => resolve(), { once: true });

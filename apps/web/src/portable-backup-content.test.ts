@@ -24,6 +24,14 @@ describe("portable backup local history", () => {
     expect(attachmentCache.entries).not.toHaveBeenCalled(); expect(archiveCache.entries).not.toHaveBeenCalled();
   });
 
+  it("turns an unavailable local media cache into actionable safe copy", async () => {
+    await expect(createPortableBackupHistory(
+      new Blob([new Uint8Array([1])]), true,
+      { entries: async () => { throw new DOMException("transient", "UnknownError"); } },
+      { entries: async () => [] },
+    )).rejects.toThrow("backup.error.mediaUnavailable");
+  });
+
   it("restores ciphertext sequentially and fails closed on a local write error", async () => {
     const attachmentPut = vi.fn(async (_id: string, _ciphertext: ArrayBuffer) => true);
     const segmentPut = vi.fn(async (_id: string, _ciphertext: ArrayBuffer) => true);

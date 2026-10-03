@@ -41,9 +41,12 @@ export async function createPortableBackupHistory(
   attachmentCache: EnumerableCiphertextCache,
   archiveCache: EnumerableCiphertextCache,
 ): Promise<{ historyBundle: Blob; attachmentCount: number; segmentCount: number }> {
-  const [attachments, segments] = includeCachedMedia
-    ? await Promise.all([attachmentCache.entries(), archiveCache.entries()])
-    : [[], []];
+  let attachments: CiphertextCacheEntry[] = [];
+  let segments: CiphertextCacheEntry[] = [];
+  if (includeCachedMedia) {
+    try { [attachments, segments] = await Promise.all([attachmentCache.entries(), archiveCache.entries()]); }
+    catch { throw UserFacingError.localized("backup.error.mediaUnavailable"); }
+  }
   return {
     historyBundle: await createDeviceHistoryBundle(databaseSnapshot, attachments, segments),
     attachmentCount: attachments.length,

@@ -2769,9 +2769,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       return { databaseSnapshot, identity: portableIdentity, userId: currentSession.user_id,
         serverOrigin: location.origin, backupCheckpoint, password };
     });
-    const canReadPersistentCaches = Boolean((navigator.storage as unknown as { getDirectory?: unknown })?.getDirectory);
     const { createPortableBackupHistory } = await import("./portable-backup-content");
-    const packed = await createPortableBackupHistory(prepared.databaseSnapshot, includeCachedMedia && canReadPersistentCaches, attachmentCache, archiveSegmentCache);
+    const packed = await createPortableBackupHistory(prepared.databaseSnapshot, includeCachedMedia, attachmentCache, archiveSegmentCache);
     const { databaseSnapshot: _, ...metadata } = prepared;
     const input = { ...metadata, historyBundle: packed.historyBundle };
     const { historyBundle } = input;

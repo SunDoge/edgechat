@@ -5,6 +5,18 @@ import { createPortableBackupHistory, openPortableBackupHistory, restorePortable
 
 describe("real browser portable media backup", () => {
   it("round-trips exact OPFS attachment and archive ciphertext without cloud access", async () => {
+    try { await navigator.storage.getDirectory(); }
+    catch {
+      const packed = await createPortableBackupHistory(
+        new Blob([new Uint8Array([31, 139, 1])]), false,
+        { entries: async () => { throw new Error("must not enumerate unavailable OPFS"); } },
+        { entries: async () => { throw new Error("must not enumerate unavailable OPFS"); } },
+      );
+      const opened = await openPortableBackupHistory(packed.historyBundle);
+      expect(packed).toMatchObject({ attachmentCount: 0, segmentCount: 0 });
+      expect(opened.attachments).toEqual([]); expect(opened.segments).toEqual([]);
+      return;
+    }
     const sourceProfile = crypto.randomUUID(); const targetProfile = crypto.randomUUID();
     const sourceAttachments = new AttachmentCiphertextCache(sourceProfile);
     const sourceSegments = new ArchiveSegmentCiphertextCache(sourceProfile);
