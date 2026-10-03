@@ -647,6 +647,7 @@ export class SyncEngine extends EventTarget {
   private desiredRooms = new Set<RoomId>();
   private disconnectedRooms = new Set<RoomId>();
   private historyBlockedRooms = new Set<RoomId>();
+  private projectionRetries = new Map<RoomId, RoomEvent>();
   private ingestQueue: Promise<void> = Promise.resolve();
   private pendingIngests = 0;
   private catchUpTask: Promise<void> | null = null;
@@ -1016,9 +1017,21 @@ export class SyncEngine extends EventTarget {
         await this.db.deferRoomEvent(event);
         return;
       }
-      try { await this.ingestOne(event); }
+      let attempted = event;
+      try {
+        const retry = this.projectionRetries.get(event.room_id);
+        if (retry) {
+          attempted = retry;
+          await this.ingestOne(retry);
+          this.projectionRetries.delete(event.room_id);
+          if (retry.event_id === event.event_id) return;
+          attempted = event;
+        }
+        await this.ingestOne(event);
+      }
       catch (error) {
         if (error instanceof RoomHistoryTransferRequiredError) await this.db.deferRoomEvent(event);
+        if (error instanceof LocalProjectionPersistenceError) this.projectionRetries.set(event.room_id, attempted);
         throw error;
       }
     });
@@ -1068,19 +1081,25 @@ export class SyncEngine extends EventTarget {
       if (isMlsMembershipCommitEventType(event.type)
         || error instanceof LocalStagingIntegrityError || error instanceof LocalProjectionPersistenceError) throw error;
       const message = error instanceof Error ? error.message : "Encrypted event processing failed";
-      await this.db.quarantineEvent(event, message);
-      await this.db.markProcessed(event);
-      await this.db.removeStagedDecryptedEvent?.(event.event_id);
+      try {
+        await this.db.quarantineEvent(event, message);
+        await this.db.markProcessed(event);
+        await this.db.removeStagedDecryptedEvent?.(event.event_id);
+      } catch (cause) {
+        throw cause instanceof LocalProjectionPersistenceError ? cause : new LocalProjectionPersistenceError(cause);
+      }
       this.dispatchEvent(new CustomEvent("quarantined", { detail: { event, error } }));
       this.dispatchEvent(new CustomEvent("processed", { detail: event }));
       return;
     }
-    await this.db.markProcessed(event);
-    if (result) {
-      await this.db.saveDecryptedEvent(event, result.plaintext, result.payload);
-      this.dispatchEvent(new CustomEvent("message", { detail: event }));
+    try {
+      await this.db.markProcessed(event);
+      if (result) await this.db.saveDecryptedEvent(event, result.plaintext, result.payload);
+      await this.db.removeStagedDecryptedEvent?.(event.event_id);
+    } catch (cause) {
+      throw cause instanceof LocalProjectionPersistenceError ? cause : new LocalProjectionPersistenceError(cause);
     }
-    await this.db.removeStagedDecryptedEvent?.(event.event_id);
+    if (result) this.dispatchEvent(new CustomEvent("message", { detail: event }));
     // Observers may query projections after this event. Dispatch only once all
     // local writes are committed, otherwise unread counters race the message.
     this.dispatchEvent(new CustomEvent("processed", { detail: event }));

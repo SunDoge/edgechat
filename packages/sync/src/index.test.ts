@@ -327,6 +327,44 @@ describe("SyncEngine event ingestion", () => {
     expect(removeStagedDecryptedEvent).not.toHaveBeenCalled();
   });
 
+  it("replays a failed local projection before a queued later room event", async () => {
+    const roomId = "!projection-retry-order:example.com" as const;
+    const base = { room_id: roomId, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as const;
+    const first = { ...base, event_id: "$projection-retry-1:example.com", seq: 1 } as RoomEvent;
+    const second = { ...base, event_id: "$projection-retry-2:example.com", seq: 2 } as RoomEvent;
+    let through = 0; let staged = true; let failFirstWrite = true;
+    const processed: string[] = []; const writes: string[] = [];
+    const db = {
+      roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: through }),
+      stagedDecryptedEvent: async (eventId: string) => eventId === first.event_id && staged ? ({ event: first }) : null,
+      hasMessage: async () => false,
+      markProcessed: async (event: RoomEvent) => { through = Math.max(through, event.seq); },
+      saveDecryptedEvent: async (event: RoomEvent) => {
+        writes.push(event.event_id);
+        if (event.event_id === first.event_id && failFirstWrite) {
+          failFirstWrite = false;
+          throw new Error("OPFS write failed");
+        }
+      },
+      removeStagedDecryptedEvent: async (eventId: string) => { if (eventId === first.event_id) staged = false; },
+    } as unknown as LocalDatabase;
+    const engine = new SyncEngine(new ApiClient(""), db, async (event) => {
+      processed.push(event.event_id);
+      return { plaintext: "ok", payload: {} };
+    });
+    const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
+
+    const failed = ingest(first);
+    const queued = ingest(second);
+
+    await expect(failed).rejects.toBeInstanceOf(LocalProjectionPersistenceError);
+    await expect(queued).resolves.toBeUndefined();
+    expect(processed).toEqual([first.event_id, first.event_id, second.event_id]);
+    expect(writes).toEqual([first.event_id, first.event_id, second.event_id]);
+    expect(through).toBe(2);
+    expect(staged).toBe(false);
+  });
+
   it("never quarantines or advances an event whose authentication fails before MLS processing", async () => {
     const roomId = "!event-auth-failure:example.com" as const;
     const event = { event_id: "$event-auth-failure:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
