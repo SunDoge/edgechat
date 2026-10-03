@@ -20,6 +20,8 @@ describe("local message catalog", () => {
     expect(translate("newRoom.createGroup", { count: 4 })).toBe("创建 4 人群聊");
     expect(translate("roomList.actions", { title: "家人" })).toBe("家人的对话操作");
     expect(translate("search.similarity", { score: 87 })).toBe("相似度 87%");
+    expect(translate("roomSettings.members.count", { count: 5 })).toBe("5 人");
+    expect(translate("roomSettings.confirm.transferOwnership", { name: "小林" })).toContain("转让给 小林");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {
