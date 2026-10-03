@@ -16,7 +16,7 @@ export function hardenApiResponse(response: Response, additionalHeaders?: Header
   if (additionalHeaders) for (const [name, value] of new Headers(additionalHeaders)) headers.set(name, value);
   headers.set("cache-control", "no-store");
   headers.set("cross-origin-resource-policy", "same-origin");
-  headers.set("permissions-policy", "camera=(self), microphone=(), geolocation=(), payment=(), usb=()");
+  headers.set("permissions-policy", "camera=(self), microphone=(self), geolocation=(), payment=(), usb=()");
   headers.set("referrer-policy", "no-referrer");
   headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
   headers.set("x-content-type-options", "nosniff");

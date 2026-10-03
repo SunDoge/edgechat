@@ -551,6 +551,7 @@ describe("single-server durable delivery", () => {
     expect(missing.status).toBe(401);
     expect(missing.headers.get("cache-control")).toBe("no-store");
     expect(missing.headers.get("permissions-policy")).toContain("camera=(self)");
+    expect(missing.headers.get("permissions-policy")).toContain("microphone=(self)");
   });
 
   it("creates one owner-only saved-messages room and keeps its membership fixed", async () => {
