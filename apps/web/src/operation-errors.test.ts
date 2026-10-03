@@ -5,6 +5,12 @@ import { operationErrorMessage, UserFacingError } from "./operation-errors";
 describe("operation error presentation", () => {
   it("preserves only explicitly user-facing validation errors", () => {
     expect(operationErrorMessage(new UserFacingError("请先恢复此对话"), "发送失败")).toBe("请先恢复此对话");
+    expect(operationErrorMessage(UserFacingError.localized("backup.error.passwordOrDamage"), "无法恢复备份")).toBe("备份密码错误，或文件已经损坏");
+    expect(operationErrorMessage(UserFacingError.localized("avatar.error.invalidDimensions"), "无法处理图片")).toBe("图片尺寸无效");
+    if (false) {
+      // @ts-expect-error Low-level errors cannot emit a key that needs runtime interpolation.
+      UserFacingError.localized("deviceLink.rooms");
+    }
   });
 
   it("maps transport, quota, rate and rollout failures without exposing raw diagnostics", () => {

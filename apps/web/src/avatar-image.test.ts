@@ -9,7 +9,7 @@ describe("profile avatar crop", () => {
   });
 
   it("rejects invalid decoded dimensions", () => {
-    expect(() => centeredSquareCrop(0, 100)).toThrow("图片尺寸无效");
-    expect(() => centeredSquareCrop(Number.NaN, 100)).toThrow("图片尺寸无效");
+    expect(() => centeredSquareCrop(0, 100)).toThrow("avatar.error.invalidDimensions");
+    expect(() => centeredSquareCrop(Number.NaN, 100)).toThrow("avatar.error.invalidDimensions");
   });
 });

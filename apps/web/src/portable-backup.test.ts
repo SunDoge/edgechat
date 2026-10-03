@@ -21,8 +21,8 @@ describe("portable encrypted backup", () => {
 
     const tampered = new Uint8Array(await backup.arrayBuffer());
     tampered[tampered.length - 1] ^= 1;
-    await expect(readPortableBackup(new Blob([tampered]), "correct horse battery staple")).rejects.toThrow("密码错误");
-    await expect(readPortableBackup(backup, "wrong password that is long enough")).rejects.toThrow("密码错误");
+    await expect(readPortableBackup(new Blob([tampered]), "correct horse battery staple")).rejects.toThrow("backup.error.passwordOrDamage");
+    await expect(readPortableBackup(backup, "wrong password that is long enough")).rejects.toThrow("backup.error.passwordOrDamage");
   });
 
   it("marks expected file validation failures as safe recovery copy", async () => {

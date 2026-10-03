@@ -3,7 +3,7 @@ import { translate, type Translator } from "./i18n";
 import { UserFacingError } from "./operation-errors";
 
 export function authErrorMessage(cause: unknown, t: Translator = translate, fallback = t("auth.error.localSecurity")): string {
-  if (cause instanceof UserFacingError) return cause.message;
+  if (cause instanceof UserFacingError) return cause.messageKey ? t(cause.messageKey) : cause.message;
   if (cause instanceof ApiError) {
     switch (cause.code) {
       case "invalid_credentials": return t("auth.error.invalidCredentials");

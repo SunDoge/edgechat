@@ -11,7 +11,7 @@ describe("device-link handoff", () => {
   });
 
   it("rejects malformed handoffs and groups fingerprints", () => {
-    expect(() => parseDeviceLinkInput("https://chat.example/?secret=leaked")).toThrow("有效");
+    expect(() => parseDeviceLinkInput("https://chat.example/?secret=leaked")).toThrow("deviceLink.error.invalidCode");
     expect(verificationWords("AAAA BBBB CCCC")).toEqual(["AAAA", "BBBB", "CCCC"]);
   });
 

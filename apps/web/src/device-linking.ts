@@ -30,7 +30,7 @@ export function parseDeviceLinkInput(value: string): string {
     const linkId = new URLSearchParams(fragment).get("link_id") ?? "";
     if (/^[A-Za-z0-9_-]{16,96}$/.test(linkId)) return linkId;
   } catch { /* translated below */ }
-  throw new UserFacingError("这不是有效的设备链接码");
+  throw UserFacingError.localized("deviceLink.error.invalidCode");
 }
 
 function pendingDeviceLinkKey(profileId: string): string {

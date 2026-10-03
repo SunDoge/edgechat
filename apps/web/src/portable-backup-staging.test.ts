@@ -117,7 +117,7 @@ describe("portable backup OPFS staging", () => {
     const encrypted = await createPortableBackupBlob(backupInput(), { chunkBytes: 64 * 1024, iterations: 100_000 });
     const bytes = new Uint8Array(await encrypted.arrayBuffer()); bytes[bytes.length - 1] ^= 1;
     const opfs = fakeOpfs();
-    await expect(stagePortableBackupRestore(PROFILE, new Blob([bytes]), PASSWORD, undefined, { rootProvider: async () => opfs.root })).rejects.toThrow("密码错误");
+    await expect(stagePortableBackupRestore(PROFILE, new Blob([bytes]), PASSWORD, undefined, { rootProvider: async () => opfs.root })).rejects.toThrow("backup.error.passwordOrDamage");
     expect(opfs.writes()).toBeGreaterThan(0);
     expect([...opfs.directories.values()][0]?.size).toBe(0);
   });

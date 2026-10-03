@@ -9,7 +9,7 @@ export { UserFacingError } from "./user-facing-error";
  * server, storage-provider, or cryptographic diagnostics in the main UI.
  */
 export function operationErrorMessage(cause: unknown, fallback: string, t: Translator = translate): string {
-  if (cause instanceof UserFacingError) return cause.message;
+  if (cause instanceof UserFacingError) return cause.messageKey ? t(cause.messageKey) : cause.message;
   if (cause instanceof ApiError) {
     if (cause.code === "storage_quota_exceeded") return t("operation.error.storageQuota");
     if (cause.code === "client_upgrade_required") return t("operation.error.clientUpgrade");

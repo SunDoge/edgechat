@@ -23,7 +23,7 @@ export type StagedPortableBackupRestore = PortableBackupContents & { cleanup(): 
 
 function defaultRootProvider(): Promise<FileSystemDirectoryHandle> {
   const storage = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
-  if (!storage?.getDirectory) throw new UserFacingError("当前浏览器不能安全暂存大型备份");
+  if (!storage?.getDirectory) throw UserFacingError.localized("backup.error.stagingUnsupported");
   return storage.getDirectory();
 }
 
@@ -114,7 +114,7 @@ export async function stagePortableBackupRestore(
     );
     await writable.close(); closed = true;
     const databaseSnapshot = await handle.getFile();
-    if (databaseSnapshot.size !== contents.databaseBytes) throw new UserFacingError("备份内容无效");
+    if (databaseSnapshot.size !== contents.databaseBytes) throw UserFacingError.localized("backup.error.invalidContents");
     const { databaseBytes: _, ...metadata } = contents;
     return { ...metadata, databaseSnapshot, cleanup: () => removeExact(directory, filename) };
   } catch (cause) {

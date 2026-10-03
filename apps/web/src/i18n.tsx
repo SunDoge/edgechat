@@ -579,6 +579,13 @@ export const zhHansMessages = {
   "profile.error.save": "无法保存个人资料",
   "profile.error.avatar": "无法处理这张图片",
   "profile.error.avatarBusy": "上一张头像仍在安全清理中，请稍后重试；不会重复占用云端空间。",
+  "avatar.error.invalidDimensions": "图片尺寸无效",
+  "avatar.error.encodeUnsupported": "浏览器无法编码 WebP 图片",
+  "avatar.error.readFailed": "无法读取这张图片",
+  "avatar.error.unsupportedFormat": "请选择 JPEG、PNG 或 WebP 图片",
+  "avatar.error.sourceTooLarge": "原图不能超过 10 MB",
+  "avatar.error.processingUnsupported": "浏览器无法处理图片",
+  "avatar.error.compressedTooLarge": "图片压缩后仍然过大，请换一张图片",
   "profile.title": "个人资料",
   "profile.description": "显示名称会出现在你参与的对话中",
   "profile.avatar.processing": "正在处理…",
@@ -971,6 +978,15 @@ export const zhHansMessages = {
   "backup.error.restoreStorage": "本机可用空间不足，无法安全恢复这个大型备份。请释放一些设备空间后重试",
   "backup.error.restoreBrowser": "这个备份较大，当前浏览器无法安全恢复。请更新当前浏览器，或改用新版桌面浏览器重试",
   "backup.error.invalidMls": "备份中的群聊加密状态无效",
+  "backup.error.stagingUnsupported": "当前浏览器不能安全暂存大型备份",
+  "backup.error.invalidFile": "无法识别这个备份文件",
+  "backup.error.invalidContents": "备份内容无效",
+  "backup.error.wrongServer": "这个备份属于另一台 EdgeChat 服务器",
+  "backup.error.passwordTooShort": "备份密码至少需要 12 个字符",
+  "backup.error.databaseInvalid": "本机数据库为空或过大，无法创建浏览器备份",
+  "backup.error.databaseTooLarge": "本机数据库过大，无法创建浏览器备份",
+  "backup.error.passwordOrDamage": "备份密码错误，或文件已经损坏",
+  "backup.error.incompleteFile": "备份文件不完整或包含多余数据",
   "deviceLink.device.mobile": "新手机",
   "deviceLink.device.desktop": "新浏览器",
   "deviceLink.error.incomplete": "链接信息不完整，请在旧设备上重试",
@@ -989,6 +1005,7 @@ export const zhHansMessages = {
   "deviceLink.error.create": "无法创建链接",
   "deviceLink.error.cancel": "无法撤销链接，请保持此页面并重试",
   "deviceLink.error.notReady": "旧设备仍在准备链接数据，请保持两台设备联网后重试",
+  "deviceLink.error.invalidCode": "这不是有效的设备链接码",
   "deviceLink.title": "链接这台设备",
   "deviceLink.description": "在已经登录的设备中打开“设备与账户”，扫描这里的二维码。扫描后仍需在旧设备上确认。",
   "deviceLink.preparingKeys": "正在创建独立设备密钥…",
@@ -1014,6 +1031,9 @@ export type MessageCatalog = Readonly<Record<MessageKey, string>>;
 
 type PlaceholderNames<Value extends string> =
   Value extends `${string}{${infer Name}}${infer Rest}` ? Name | PlaceholderNames<Rest> : never;
+export type StaticMessageKey = {
+  [Key in MessageKey]: [PlaceholderNames<(typeof zhHansMessages)[Key]>] extends [never] ? Key : never
+}[MessageKey];
 type MessageArguments<Key extends MessageKey> =
   [PlaceholderNames<(typeof zhHansMessages)[Key]>] extends [never]
     ? []

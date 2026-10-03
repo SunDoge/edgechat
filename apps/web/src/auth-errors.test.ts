@@ -15,6 +15,7 @@ describe("authentication error copy", () => {
 
   it("preserves explicit validation copy but hides unknown diagnostics", () => {
     expect(authErrorMessage(new UserFacingError("请先链接这台设备"))).toBe("请先链接这台设备");
+    expect(authErrorMessage(UserFacingError.localized("deviceLink.error.invalidCode"))).toBe("这不是有效的设备链接码");
     expect(authErrorMessage(new Error("private/path/token"))).toBe("无法完成这台设备上的安全操作，请重试");
     expect(authErrorMessage(new ApiError("private backend detail", 400, "unknown_code"), undefined, "无法完成设置")).toBe("无法完成设置");
   });
