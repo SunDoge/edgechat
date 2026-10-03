@@ -17,7 +17,7 @@ function transfer(files: File[], withFileType = true): DataTransfer {
 
 function mount(onFiles: (files: File[]) => void) {
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <ChatComposer value="" onChange={vi.fn()} onSend={vi.fn()} onFiles={onFiles} dropLabel="松开添加"/>, root);
+  dispose = render(() => <ChatComposer value="" onChange={vi.fn()} onSend={vi.fn()} onFiles={onFiles} placeholder="输入" messageLabel="消息输入" sendLabel="发送消息" dropLabel="松开添加"/>, root);
   return { form: root.querySelector("form")!, textarea: root.querySelector("textarea")! };
 }
 
@@ -45,7 +45,7 @@ describe("chat composer file transfer", () => {
   it("does not capture files when attachment admission is unavailable", () => {
     const root = document.createElement("div"); document.body.append(root);
     const onFiles = vi.fn();
-    dispose = render(() => <ChatComposer value="editing" onChange={vi.fn()} onSend={vi.fn()} dropLabel="松开添加"/>, root);
+    dispose = render(() => <ChatComposer value="editing" onChange={vi.fn()} onSend={vi.fn()} placeholder="输入" messageLabel="消息输入" sendLabel="发送消息" dropLabel="松开添加"/>, root);
     const paste = new Event("paste", { bubbles: true, cancelable: true });
     Object.defineProperty(paste, "clipboardData", { value: transfer([new File(["x"], "photo.png")]) });
     expect(root.querySelector("textarea")!.dispatchEvent(paste)).toBe(true);
@@ -65,5 +65,12 @@ describe("chat composer file transfer", () => {
     form.dispatchEvent(drop);
     expect(onFiles).toHaveBeenCalledWith([file]);
     expect(document.body.textContent).not.toContain("松开添加");
+  });
+
+  it("uses caller-supplied visible and accessible labels", () => {
+    const { form, textarea } = mount(vi.fn());
+    expect(textarea.getAttribute("aria-label")).toBe("消息输入");
+    expect(textarea.placeholder).toBe("输入");
+    expect(form.querySelector("button")?.textContent).toBe("发送消息");
   });
 });

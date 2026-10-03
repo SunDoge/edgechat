@@ -47,24 +47,25 @@ function publicProfile(record: LocalProfileRecord): LocalProfile {
   };
 }
 
-function pendingRecord(now = Date.now()): LocalProfileRecord {
+function pendingRecord(displayName: string, now = Date.now()): LocalProfileRecord {
+  if (!displayName.trim()) throw new Error("Pending local profile name is required");
   return {
-    profile_id: crypto.randomUUID(), user_id: null, display_name: "新身份", device_id: null,
+    profile_id: crypto.randomUUID(), user_id: null, display_name: displayName.trim(), device_id: null,
     access_token: null, created_at: now, last_used_at: now, last_backup_at: null, last_backup_delivery: null,
   };
 }
 
-export async function createLocalProfile(): Promise<LocalProfile> {
-  const record = pendingRecord();
+export async function createLocalProfile(displayName: string): Promise<LocalProfile> {
+  const record = pendingRecord(displayName);
   await database.profiles.add(record);
   return publicProfile(record);
 }
 
-export async function ensureActiveLocalProfile(): Promise<LocalProfile> {
+export async function ensureActiveLocalProfile(pendingDisplayName: string): Promise<LocalProfile> {
   return database.transaction("rw", database.profiles, database.settings, async () => {
     const activeId = (await database.settings.get(ACTIVE_SETTING))?.value;
     const active = activeId ? await database.profiles.get(activeId) : undefined;
-    const record = active ?? await database.profiles.orderBy("last_used_at").last() ?? pendingRecord();
+    const record = active ?? await database.profiles.orderBy("last_used_at").last() ?? pendingRecord(pendingDisplayName);
     if (!active && !(await database.profiles.get(record.profile_id))) await database.profiles.add(record);
     const lastUsedAt = Date.now();
     await database.profiles.update(record.profile_id, { last_used_at: lastUsedAt });

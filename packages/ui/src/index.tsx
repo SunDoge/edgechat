@@ -77,7 +77,7 @@ export interface VirtualMessageListHandle {
   isNearBottom(): boolean;
 }
 
-export function ChatViewport(props: { header: JSX.Element; messages?: JSX.Element; messageList?: JSX.Element; composer: JSX.Element }) {
+export function ChatViewport(props: { label: string; messageListLabel: string; header: JSX.Element; messages?: JSX.Element; messageList?: JSX.Element; composer: JSX.Element }) {
   const [keyboardInset, setKeyboardInset] = createSignal(0);
   onMount(() => {
     const viewport = window.visualViewport;
@@ -91,14 +91,15 @@ export function ChatViewport(props: { header: JSX.Element; messages?: JSX.Elemen
       viewport.removeEventListener("scroll", update);
     });
   });
-  return <section aria-label="当前对话" class={chatUi.viewport} style={{ "--keyboard-inset": `${keyboardInset()}px` }}>
+  return <section aria-label={props.label} class={chatUi.viewport} style={{ "--keyboard-inset": `${keyboardInset()}px` }}>
     <div class={chatUi.header}>{props.header}</div>
-    {props.messageList ?? <MessageList>{props.messages}</MessageList>}
+    {props.messageList ?? <MessageList label={props.messageListLabel}>{props.messages}</MessageList>}
     <div class={chatUi.composerSlot}>{props.composer}</div>
   </section>;
 }
 
 export function VirtualMessageList(props: {
+  label: string;
   contextKey: string;
   itemKeys: readonly string[];
   render: (index: number) => JSX.Element;
@@ -250,7 +251,7 @@ export function VirtualMessageList(props: {
   }}>
     <div ref={contentElement} class={props.contentClass}>
       <div ref={beforeElement}>{props.before}</div>
-      <div class="relative" style={{ height: `${layout().totalHeight}px` }} role="list" aria-label="消息">
+      <div class="relative" style={{ height: `${layout().totalHeight}px` }} role="list" aria-label={props.label}>
         <For each={visibleItems()}>{(item) => <div
           ref={(node) => observeRow(node, item.key)}
           class="absolute inset-x-0 pb-2"
@@ -264,7 +265,7 @@ export function VirtualMessageList(props: {
   </div>;
 }
 
-export function MessageList(props: { children: JSX.Element }) {
+export function MessageList(props: { label: string; children: JSX.Element }) {
   let element: HTMLDivElement | undefined;
   let wasNearBottom = true;
   const content = children(() => props.children);
@@ -281,7 +282,7 @@ export function MessageList(props: { children: JSX.Element }) {
     observer.observe(element.firstElementChild ?? element);
     onCleanup(() => observer.disconnect());
   });
-  return <div ref={element} class={chatUi.messageList} onScroll={(event) => {
+  return <div ref={element} class={chatUi.messageList} role="log" aria-label={props.label} onScroll={(event) => {
     const target = event.currentTarget;
     wasNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
   }}>{content()}</div>;
@@ -294,10 +295,12 @@ export function ChatComposer(props: {
   disabled?: boolean;
   accessory?: JSX.Element;
   hasContent?: boolean;
-  placeholder?: string;
+  placeholder: string;
+  messageLabel: string;
+  sendLabel: string;
   disabledReason?: string;
   onFiles?: (files: File[]) => void;
-  dropLabel?: string;
+  dropLabel: string;
 }) {
   let textarea: HTMLTextAreaElement | undefined;
   const descriptionId = createUniqueId();
@@ -350,9 +353,9 @@ export function ChatComposer(props: {
     }} onDragEnd={() => setDraggingFiles(false)} onDrop={drop}>
     {props.accessory}
     <textarea class={chatUi.textarea} ref={textarea} value={props.value} disabled={props.disabled} onInput={(event) => props.onChange(event.currentTarget.value)} onKeyDown={keyDown} onPaste={paste}
-      onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} rows={1} name="message" placeholder={props.placeholder ?? "写一条消息"} aria-label="消息" aria-describedby={props.disabled && props.disabledReason ? descriptionId : undefined}/>
-    <button class={chatUi.send} type="submit" disabled={props.disabled || !canSend()}>发送</button>
-    {draggingFiles() ? <span class="pointer-events-none absolute inset-0 grid place-items-center rounded-xl bg-brand-soft/95 text-sm font-semibold text-brand" role="status">{props.dropLabel ?? "松开以添加文件"}</span> : null}
+      onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} rows={1} name="message" placeholder={props.placeholder} aria-label={props.messageLabel} aria-describedby={props.disabled && props.disabledReason ? descriptionId : undefined}/>
+    <button class={chatUi.send} type="submit" disabled={props.disabled || !canSend()}>{props.sendLabel}</button>
+    {draggingFiles() ? <span class="pointer-events-none absolute inset-0 grid place-items-center rounded-xl bg-brand-soft/95 text-sm font-semibold text-brand" role="status">{props.dropLabel}</span> : null}
     {props.disabled && props.disabledReason ? <span id={descriptionId} class="sr-only">{props.disabledReason}</span> : null}
   </form>;
 }

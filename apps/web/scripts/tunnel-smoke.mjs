@@ -162,7 +162,7 @@ async function main() {
     const roomId = (await roomResponse.json()).room_id;
     if (typeof roomId !== "string") throw new Error("room creation response did not contain a room_id");
     await alicePage.getByRole("dialog").waitFor({ state: "hidden", timeout: 120_000 });
-    await alicePage.getByRole("textbox", { name: "消息", exact: true }).fill(firstMessage);
+    await alicePage.getByRole("textbox", { name: "消息输入", exact: true }).fill(firstMessage);
     await alicePage.getByRole("button", { name: "发送", exact: true }).click();
     await timelineMessage(alicePage, firstMessage).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "alice-sent" }));
@@ -194,7 +194,7 @@ async function main() {
       return;
     }
 
-    const bobComposer = bobPage.getByRole("textbox", { name: "消息", exact: true });
+    const bobComposer = bobPage.getByRole("textbox", { name: "消息输入", exact: true });
     await bobComposer.waitFor({ state: "visible", timeout: 120_000 });
     await bobComposer.fill(reply, { timeout: 120_000 });
     await bobPage.getByRole("button", { name: "发送", exact: true }).click();
@@ -224,7 +224,7 @@ async function main() {
     }
     await savedEntry.waitFor({ state: "hidden", timeout: 30_000 });
     await alicePage.getByText("仅你和你的设备可读", { exact: true }).first().waitFor({ timeout: 120_000 });
-    const aliceComposer = alicePage.getByRole("textbox", { name: "消息", exact: true });
+    const aliceComposer = alicePage.getByRole("textbox", { name: "消息输入", exact: true });
     await aliceComposer.fill(savedMessage, { timeout: 120_000 });
     await alicePage.getByRole("button", { name: "发送", exact: true }).click();
     await timelineMessage(alicePage, savedMessage).waitFor({ timeout: 120_000 });
