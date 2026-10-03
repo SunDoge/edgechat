@@ -1,4 +1,5 @@
 import Dexie, { type Table } from "dexie";
+import { DiagnosticError } from "./diagnostic-error";
 
 const DATABASE_NAME = "edgechat-local-profiles";
 const ACTIVE_SETTING = "active-profile";
@@ -83,7 +84,7 @@ export async function activateLocalProfile(profileId: string): Promise<LocalProf
   const id = assertLocalProfileId(profileId);
   return database.transaction("rw", database.profiles, database.settings, async () => {
     const record = await database.profiles.get(id);
-    if (!record) throw new Error("本机身份不存在");
+    if (!record) throw new DiagnosticError("LOCAL_PROFILE_NOT_FOUND");
     const lastUsedAt = Date.now();
     await database.profiles.update(id, { last_used_at: lastUsedAt });
     await database.settings.put({ id: ACTIVE_SETTING, value: id });
@@ -93,12 +94,12 @@ export async function activateLocalProfile(profileId: string): Promise<LocalProf
 
 export async function bindLocalProfile(profileId: string, value: { user_id: string; display_name: string; device_id: string; access_token: string }): Promise<LocalProfile> {
   const id = assertLocalProfileId(profileId);
-  if (!value.user_id || !value.display_name.trim() || !value.device_id || !value.access_token) throw new Error("本机身份信息不完整");
+  if (!value.user_id || !value.display_name.trim() || !value.device_id || !value.access_token) throw new DiagnosticError("LOCAL_PROFILE_BINDING_INCOMPLETE");
   return database.transaction("rw", database.profiles, async () => {
     const record = await database.profiles.get(id);
-    if (!record) throw new Error("本机身份不存在");
+    if (!record) throw new DiagnosticError("LOCAL_PROFILE_NOT_FOUND");
     if (record.user_id && (record.user_id !== value.user_id || (record.device_id && record.device_id !== value.device_id))) {
-      throw new Error("这个本机身份已绑定到另一个账户或设备");
+      throw new DiagnosticError("LOCAL_PROFILE_BINDING_CONFLICT");
     }
     const next: LocalProfileRecord = {
       ...record, user_id: value.user_id, display_name: value.display_name.trim(), device_id: value.device_id,
@@ -134,7 +135,7 @@ export async function recordLocalBackupExport(profileId: string, value: LocalBac
     throw new Error("Invalid local backup record");
   }
   const updated = await database.profiles.update(id, { last_backup_at: value.created_at, last_backup_delivery: value.delivery });
-  if (updated !== 1) throw new Error("本机身份不存在");
+  if (updated !== 1) throw new DiagnosticError("LOCAL_PROFILE_NOT_FOUND");
   return value;
 }
 

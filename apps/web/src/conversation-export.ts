@@ -2,6 +2,7 @@ import type { LocalMessage } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
 import { attachmentPresentation, messageAttachments, messageContacts, messageQuote, messageText, normalizeMessagePayload, type MessagePayload } from "./media";
 import { translate, type Translator } from "./i18n";
+import { DiagnosticError } from "./diagnostic-error";
 
 const PAGE_SIZE = 500;
 const UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g;
@@ -98,12 +99,12 @@ export async function streamConversationTranscript(options: ConversationTranscri
     throwIfAborted(options.signal);
     const page = await options.loadPage(afterSeq, PAGE_SIZE);
     throwIfAborted(options.signal);
-    if (page.length > PAGE_SIZE) throw new Error("本机消息分页结果超出限制");
+    if (page.length > PAGE_SIZE) throw new DiagnosticError("CONVERSATION_EXPORT_PAGE_LIMIT_EXCEEDED");
     if (!page.length) break;
     let chunk = "";
     for (const message of page) {
       const seq = Number(message.seq);
-      if (message.room_id !== options.roomId || !Number.isSafeInteger(seq) || seq <= afterSeq) throw new Error("本机消息顺序无效，导出已停止");
+      if (message.room_id !== options.roomId || !Number.isSafeInteger(seq) || seq <= afterSeq) throw new DiagnosticError("CONVERSATION_EXPORT_ORDER_INVALID");
       chunk += formatConversationMessage(message, options.displayName, t);
       afterSeq = seq; count += 1;
     }

@@ -1,4 +1,5 @@
 import type { MessageKey } from "./i18n";
+import { DiagnosticError } from "./diagnostic-error";
 
 export type StartupFailureKind = "newer-client-required" | "local-database" | "device-crypto" | "service-unavailable" | "unknown";
 
@@ -49,7 +50,8 @@ export function describeStartupFailure(cause: unknown): StartupFailure {
       primaryIntent: "retry",
     };
   }
-  if (/MLS|cryptographic|crypto state|device (?:identity|key)|加密状态|设备密钥/i.test(message)) {
+  if ((cause instanceof DiagnosticError && /(?:MLS|CRYPTO|IDENTITY|ARCHIVE_KEY)/.test(cause.code))
+    || /MLS|cryptographic|crypto state|device (?:identity|key)/i.test(message)) {
     return {
       kind: "device-crypto",
       code: "DEVICE_CRYPTO_UNAVAILABLE",

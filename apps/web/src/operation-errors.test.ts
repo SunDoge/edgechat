@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError, ApiTimeoutError } from "@edgechat/sync";
 import { operationErrorMessage, UserFacingError } from "./operation-errors";
+import { DiagnosticError } from "./diagnostic-error";
 
 describe("operation error presentation", () => {
   it("preserves only explicitly user-facing validation errors", () => {
@@ -33,5 +34,6 @@ describe("operation error presentation", () => {
 
   it("uses the operation-specific fallback for unknown internal failures", () => {
     expect(operationErrorMessage(new Error("private-path/secret-token"), "无法转发消息")).toBe("无法转发消息");
+    expect(operationErrorMessage(new DiagnosticError("LOCAL_PROFILE_BINDING_CONFLICT"), "无法切换本机身份")).toBe("无法切换本机身份");
   });
 });

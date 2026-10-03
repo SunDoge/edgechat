@@ -103,6 +103,7 @@ import { deliveryReceiptRetryDelay } from "./delivery-receipt-retry";
 import { clearRoomSigningKeyPins, pinRoomSigningKeys, pinnedRoomSigningKey } from "./room-signing-key-pins";
 import { useI18n } from "./i18n";
 import { operationErrorMessage, UserFacingError } from "./operation-errors";
+import { DiagnosticError } from "./diagnostic-error";
 
 const AuthScreen = lazy(() => import("./components/AuthScreen").then((module) => ({ default: module.AuthScreen })));
 const DeviceLinkApprovalDialog = lazy(() => import("./components/DeviceLinkApprovalDialog").then((module) => ({ default: module.DeviceLinkApprovalDialog })));
@@ -399,7 +400,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const currentSession = session();
     if (!currentSession) throw UserFacingError.localized("send.queueNotReady");
     if (ids.length > attachmentLimits().max_attachments_per_message) throw new UserFacingError(t("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message }));
-    if (sourceIds.length && sourceIds.length !== ids.length) throw new Error("附件转发引用不完整");
+    if (sourceIds.length && sourceIds.length !== ids.length) throw new DiagnosticError("FORWARD_ATTACHMENT_REFERENCES_INCOMPLETE");
     if (serverSupports(currentSession.protocol, "attachments.multi.v1")) {
       return { attachment_ids: [...ids], ...(sourceIds.length ? { forward_source_attachment_ids: [...sourceIds] } : {}) };
     }
@@ -693,43 +694,43 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       catch (cause) { throw new LocalProjectionPersistenceError(cause); }
     };
     if (event.type === "message.delete") {
-      if (!isMessageDeletePayload(decoded) || decoded.target.room_id !== event.room_id) throw new Error("无效的消息撤回事件");
+      if (!isMessageDeletePayload(decoded) || decoded.target.room_id !== event.room_id) throw new DiagnosticError("MESSAGE_DELETE_EVENT_INVALID");
       await persistProjection(() => db.applyMessageTombstone(event, decoded.target.message_id));
       return null;
     }
     if (event.type === "message.edit") {
-      if (!isMessageEditPayload(decoded) || decoded.target.room_id !== event.room_id) throw new Error("无效的消息编辑事件");
+      if (!isMessageEditPayload(decoded) || decoded.target.room_id !== event.room_id) throw new DiagnosticError("MESSAGE_EDIT_EVENT_INVALID");
       await persistProjection(() => db.applyMessageEdit(event, decoded));
       return null;
     }
     if (event.type === "message.reaction") {
-      if (!isMessageReactionPayload(decoded) || decoded.target.room_id !== event.room_id) throw new Error("无效的消息回应事件");
+      if (!isMessageReactionPayload(decoded) || decoded.target.room_id !== event.room_id) throw new DiagnosticError("MESSAGE_REACTION_EVENT_INVALID");
       await persistProjection(() => db.applyMessageReaction(event, decoded));
       return null;
     }
     if (event.type === "receipt.read") {
-      if (!isReadReceiptPayload(decoded) || decoded.room_id !== event.room_id) throw new Error("无效的已读回执事件");
+      if (!isReadReceiptPayload(decoded) || decoded.room_id !== event.room_id) throw new DiagnosticError("READ_RECEIPT_EVENT_INVALID");
       await persistProjection(() => db.applyReadReceipt(event, decoded, event.sender === session()?.user_id));
       return null;
     }
     if (event.type === "receipt.delivered") {
-      if (!isDeliveryReceiptPayload(decoded) || decoded.room_id !== event.room_id) throw new Error("无效的送达回执事件");
+      if (!isDeliveryReceiptPayload(decoded) || decoded.room_id !== event.room_id) throw new DiagnosticError("DELIVERY_RECEIPT_EVENT_INVALID");
       await persistProjection(() => db.applyDeliveryReceipt(event, decoded, event.sender === session()?.user_id));
       return null;
     }
     if (event.type === "control.message-expiry") {
-      if (!isMessageExpiryPolicyPayload(decoded)) throw new Error("无效的消息自动消失设置");
+      if (!isMessageExpiryPolicyPayload(decoded)) throw new DiagnosticError("MESSAGE_EXPIRY_POLICY_EVENT_INVALID");
       await persistProjection(() => db.applyMessageExpiryPolicy(event, decoded));
       return null;
     }
     if (event.type === "control.room.profile") {
-      if (!isRoomProfilePayload(decoded)) throw new Error("无效的群聊资料设置");
-      if ((decoded.avatar?.attachment_id ?? null) !== (event.metadata.room_profile_avatar_id ?? null)) throw new Error("群聊头像引用与加密资料不一致");
+      if (!isRoomProfilePayload(decoded)) throw new DiagnosticError("ROOM_PROFILE_EVENT_INVALID");
+      if ((decoded.avatar?.attachment_id ?? null) !== (event.metadata.room_profile_avatar_id ?? null)) throw new DiagnosticError("ROOM_PROFILE_AVATAR_REFERENCE_MISMATCH");
       await persistProjection(() => db.applyRoomProfile(event, decoded));
       return null;
     }
     if (event.type === "control.owner.transfer") {
-      if (!isRoomOwnerTransferPayload(decoded) || decoded.target_user_id !== event.metadata.target_user_id) throw new Error("无效的群主转让事件");
+      if (!isRoomOwnerTransferPayload(decoded) || decoded.target_user_id !== event.metadata.target_user_id) throw new DiagnosticError("ROOM_OWNER_TRANSFER_EVENT_INVALID");
       return null;
     }
     if (!event.type.startsWith("message.")) return null;
@@ -749,13 +750,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     payload: Record<string, unknown>; plaintext?: string; metadata?: Record<string, unknown>;
   }): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(input.roomId)) throw new Error("发送队列尚未就绪");
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(input.roomId)) throw new DiagnosticError("SEND_QUEUE_NOT_READY");
     const previousState = currentMls.exportState();
     let signedEvent: ClientEvent | null = null;
     let stageAttempted = false;
     try {
       const ciphertext = encodeBase64Url(currentMls.encryptMessage(input.roomId, encoder.encode(JSON.stringify(input.payload))));
-      if (ciphertext.length > MAX_EVENT_CIPHERTEXT_LENGTH) throw new Error("加密消息超过服务器允许的大小");
+      if (ciphertext.length > MAX_EVENT_CIPHERTEXT_LENGTH) throw new DiagnosticError("EVENT_CIPHERTEXT_LIMIT_EXCEEDED");
       const nextState = currentMls.exportState();
       const unsigned: Omit<ClientEvent, "signature"> = {
         event_id: input.eventId, room_id: input.roomId, sender: currentSession.user_id as UserId,
@@ -831,7 +832,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         for (const room of response.rooms) {
           if (!currentMls.hasGroup(room.room_id) && room.encrypted_state) {
             const packet = JSON.parse(room.encrypted_state) as { version: number; welcome: string; ratchet_tree: string };
-            if (packet.version !== 1) throw new Error("不支持的 MLS Welcome 版本");
+            if (packet.version !== 1) throw new DiagnosticError("MLS_WELCOME_VERSION_UNSUPPORTED");
             currentMls.joinGroup(packet.welcome, packet.ratchet_tree);
           }
         }
@@ -1196,7 +1197,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         let me: SessionIdentity; let offlineBootstrap = false;
         try {
           me = await api.me();
-          if (me.device_id !== storedIdentity.deviceId) throw new Error("登录会话与这台设备的密钥不匹配");
+          if (me.device_id !== storedIdentity.deviceId) throw new DiagnosticError("SESSION_DEVICE_IDENTITY_MISMATCH");
           await db.cacheSession(offlineSessionSnapshot(me));
         } catch (cause) {
           if (!canUseOfflineSession(cause, navigator.onLine)) throw cause;
@@ -1886,7 +1887,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         return rooms().find((room) => room.purpose === "saved") ?? remoteExisting;
       }
       const currentSession = session(); const currentIdentity = identityRef;
-      if (!currentSession || !currentIdentity || !mlsRef) throw new Error("设备加密状态尚未就绪");
+      if (!currentSession || !currentIdentity || !mlsRef) throw new DiagnosticError("DEVICE_CRYPTO_NOT_READY");
       if (!savedRoomAttempt) {
         const domain = currentSession.server_name ?? location.hostname;
         const roomId = `!${encodeBase64Url(crypto.getRandomValues(new Uint8Array(18)))}:${domain}` as RoomId;
@@ -1895,7 +1896,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         try {
           await mutateMls(async () => {
             const active = mlsRef;
-            if (!active) throw new Error("设备加密状态尚未就绪");
+            if (!active) throw new DiagnosticError("DEVICE_CRYPTO_NOT_READY");
             const candidate = await OpenMlsMessagingCore.create(currentIdentity.deviceId, active.exportState());
             const created = candidate.createGroup(roomId, claimed.key_packages.map((item) => item.key_package));
             const attempt = {
@@ -2124,9 +2125,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function decryptRoomProfileAvatar(avatar: RoomProfileAvatar): Promise<ArrayBuffer> {
     const ciphertext = await attachmentLoader.load(avatar.attachment_id);
-    if (ciphertext.byteLength > 128 * 1024 + 16) throw new Error("群聊头像密文过大");
+    if (ciphertext.byteLength > 128 * 1024 + 16) throw new DiagnosticError("ROOM_AVATAR_CIPHERTEXT_LIMIT_EXCEEDED");
     const plaintext = await core.decryptAttachment(ciphertext, avatar.key, avatar.nonce);
-    if (plaintext.byteLength !== avatar.plaintext_bytes || plaintext.byteLength > 128 * 1024) throw new Error("群聊头像大小校验失败");
+    if (plaintext.byteLength !== avatar.plaintext_bytes || plaintext.byteLength > 128 * 1024) throw new DiagnosticError("ROOM_AVATAR_PLAINTEXT_SIZE_MISMATCH");
     return plaintext;
   }
 
@@ -2440,20 +2441,20 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function wrapArchiveKey(input: { room_id: RoomId; segment_id: string; start_seq: number; end_seq: number; segment_key: Uint8Array<ArrayBuffer> }): Promise<Uint8Array<ArrayBuffer>> {
     const activeIdentity = identityRef;
-    if (!activeIdentity) throw new Error("缺少设备密钥，无法封装历史密钥");
+    if (!activeIdentity) throw new DiagnosticError("ARCHIVE_KEY_SEAL_IDENTITY_MISSING");
     const { devices } = await api.roomDevices(input.room_id);
-    if (!devices.some((device) => device.device_id === activeIdentity.deviceId)) throw new Error("当前设备不在房间设备列表中");
+    if (!devices.some((device) => device.device_id === activeIdentity.deviceId)) throw new DiagnosticError("ARCHIVE_KEY_SEAL_DEVICE_NOT_IN_ROOM");
     return sealArchiveSegmentKey(input, input.segment_key, devices.map((device) => ({ device_id: device.device_id, encryption_key: device.encryption_key })));
   }
 
   async function resolveArchiveKey(roomId: RoomId, segment: ArchiveSegmentDescriptor, envelope: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
     const cached = await db.archiveKey(segment.segment_id);
     if (cached) {
-      if (cached.room_id !== roomId || cached.start_seq !== segment.start_seq || cached.end_seq !== segment.end_seq) throw new Error("本机历史密钥与归档清单冲突");
+      if (cached.room_id !== roomId || cached.start_seq !== segment.start_seq || cached.end_seq !== segment.end_seq) throw new DiagnosticError("ARCHIVE_KEY_CACHE_MANIFEST_MISMATCH");
       return cached.segment_key;
     }
     const activeIdentity = identityRef;
-    if (!activeIdentity) throw new Error("缺少设备密钥，无法解封历史密钥");
+    if (!activeIdentity) throw new DiagnosticError("ARCHIVE_KEY_OPEN_IDENTITY_MISSING");
     const key = await openArchiveSegmentKey(envelope, { room_id: roomId, segment_id: segment.segment_id, start_seq: segment.start_seq, end_seq: segment.end_seq }, activeIdentity);
     await db.saveArchiveKey(roomId, segment.segment_id, key, segment.start_seq, segment.end_seq);
     return key;
@@ -2942,15 +2943,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     });
   }
 
-  async function restoreMlsBeforeQueuedCommit(roomId: RoomId, expectedEpoch: number, snapshot: Uint8Array | null, label: string): Promise<OpenMlsMessagingCore> {
+  async function restoreMlsBeforeQueuedCommit(roomId: RoomId, expectedEpoch: number, snapshot: Uint8Array | null, operationCode: string): Promise<OpenMlsMessagingCore> {
     const currentIdentity = identityRef;
-    if (!currentIdentity) throw new Error("本机身份尚未就绪");
-    if (!snapshot?.length) throw new Error(`${label}来自旧版客户端，缺少安全回滚快照；请勿清除本站数据并刷新后重试`);
+    if (!currentIdentity) throw new DiagnosticError("LOCAL_IDENTITY_NOT_READY");
+    if (!snapshot?.length) throw new DiagnosticError(`${operationCode}_ROLLBACK_SNAPSHOT_MISSING`);
     return mutateMls(async () => {
       const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, snapshot);
       if (!restored.hasGroup(roomId) || restored.epoch(roomId) !== expectedEpoch - 1) {
         restored.destroy();
-        throw new Error(`${label}的回滚快照无效`);
+        throw new DiagnosticError(`${operationCode}_ROLLBACK_SNAPSHOT_INVALID`);
       }
       const previous = mlsRef;
       mlsRef = restored; setMls(restored);
@@ -2966,16 +2967,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (view.status !== "awaiting_packages") return view;
       await new Promise((resolve) => window.setTimeout(resolve, 1_000));
     }
-    throw new Error("新设备尚未准备完成，请保持两台设备联网后重试");
+    throw new DiagnosticError("DEVICE_LINK_TARGET_NOT_READY");
   }
 
   async function settleCancelledDeviceLink(linkId: string, currentMls: OpenMlsMessagingCore): Promise<OpenMlsMessagingCore> {
     const queued = (await db.pendingDeviceLinks()).filter((item) => item.link_id === linkId);
-    if (queued.length > 1) throw new Error("设备链接存在多个未确认的本机加密提交，无法安全自动回滚");
+    if (queued.length > 1) throw new DiagnosticError("DEVICE_LINK_ROLLBACK_AMBIGUOUS");
     let activeMls = currentMls;
     if (queued[0]) {
       const expectedEpoch = Number(queued[0].event.metadata.mls_epoch);
-      activeMls = await restoreMlsBeforeQueuedCommit(queued[0].room_id, expectedEpoch, queued[0].previous_mls_state, "已撤销的设备链接");
+      activeMls = await restoreMlsBeforeQueuedCommit(queued[0].room_id, expectedEpoch, queued[0].previous_mls_state, "CANCELLED_DEVICE_LINK");
       await db.removeDeviceLinkOutbox(linkId, queued[0].room_id);
     }
     await db.removeDeviceLinkJob(linkId); await deviceHistoryStaging.clearLink(linkId);
@@ -2987,7 +2988,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function cancelApprovedDeviceLink(linkId: string): Promise<void> {
     const currentMls = mlsRef;
-    if (!currentMls) throw new Error("本机加密状态尚未就绪");
+    if (!currentMls) throw new DiagnosticError("DEVICE_CRYPTO_NOT_READY");
     await api.cancelApprovedDeviceLink(linkId);
     await settleCancelledDeviceLink(linkId, currentMls);
     setNotice(t("devices.linkCancelled.complete")); setDeviceLinkOpen(false);
@@ -2995,7 +2996,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function executeDeviceLink(linkId: string, currentMls = mlsRef): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session();
-    if (!currentMls || !currentIdentity || !currentSession) throw new Error("本机加密状态尚未就绪");
+    if (!currentMls || !currentIdentity || !currentSession) throw new DiagnosticError("DEVICE_CRYPTO_NOT_READY");
     let activeMls = currentMls; let historyTransferSkipped = false; let viewLoaded = false;
     let view: DeviceLinkPreview;
     try {
@@ -3004,7 +3005,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (view.status === "pending") await api.approveDeviceLink(linkId);
       view = await waitForDeviceLinkReady(linkId);
       if (view.account_mode === "opaque" && !currentIdentity.accountCredential) {
-        throw new Error("这台设备缺少账户恢复凭证，无法完整链接新设备");
+        throw new DiagnosticError("DEVICE_LINK_ACCOUNT_CREDENTIAL_MISSING");
       }
       if (currentIdentity.accountCredential && !view.account_credential_ready) {
         const envelope = await sealAccountCredential(currentIdentity.accountCredential, {
@@ -3054,10 +3055,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           if (!queued) continue;
           const localEpoch = activeMls.epoch(room.room_id);
           if (localEpoch < room.expected_epoch) {
-            if (localEpoch !== room.expected_epoch - 1) throw new Error(`房间 ${room.room_id} 的设备链接状态无法恢复`);
+            if (localEpoch !== room.expected_epoch - 1) throw new DiagnosticError("DEVICE_LINK_LOCAL_EPOCH_UNRECOVERABLE");
             await mutateMls(async () => {
               const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued.mls_state);
-              if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new Error("设备链接快照无效"); }
+              if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new DiagnosticError("DEVICE_LINK_SNAPSHOT_INVALID"); }
               const previous = activeMls; activeMls = restored; mlsRef = restored; setMls(restored); await persistMls(restored); if (previous !== restored) previous.destroy();
             });
           }
@@ -3071,16 +3072,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         setDevices((await api.devices()).devices); scheduleDraftSync(0);
         setNotice(t(historyTransferSkipped ? "workspace.feedback.deviceLinkedWithoutHistory" : "workspace.feedback.deviceLinked")); setDeviceLinkOpen(false); return;
       }
-      if (view.status !== "approved") throw new Error("新设备尚未准备完成");
+      if (view.status !== "approved") throw new DiagnosticError("DEVICE_LINK_TARGET_NOT_READY");
 
       for (const room of view.rooms) {
         let queued = await db.deviceLinkOutbox(linkId, room.room_id);
         if (room.status === "complete") {
           if (queued && activeMls.epoch(room.room_id) < room.expected_epoch) {
-            if (activeMls.epoch(room.room_id) !== room.expected_epoch - 1) throw new Error(`房间 ${room.room_id} 的设备链接状态无法恢复`);
+            if (activeMls.epoch(room.room_id) !== room.expected_epoch - 1) throw new DiagnosticError("DEVICE_LINK_LOCAL_EPOCH_UNRECOVERABLE");
             await mutateMls(async () => {
               const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued!.mls_state);
-              if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new Error("设备链接快照无效"); }
+              if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new DiagnosticError("DEVICE_LINK_SNAPSHOT_INVALID"); }
               const previous = activeMls; activeMls = restored; mlsRef = restored; setMls(restored); await persistMls(restored); if (previous !== restored) previous.destroy();
             });
           }
@@ -3093,16 +3094,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           continue;
         }
         if (queued && Number(queued.event.metadata.mls_epoch) !== room.expected_epoch) {
-          activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备链接提交");
+          activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "DEVICE_LINK_COMMIT");
           await db.removeDeviceLinkOutbox(linkId, room.room_id); await syncRef?.catchUp();
-          throw new Error("对话密钥刚刚发生变化，已同步并准备重新加入");
+          throw new DiagnosticError("DEVICE_LINK_EPOCH_CHANGED");
         }
         if (!queued) {
           await mutateMls(async () => {
-            if (!activeMls.hasGroup(room.room_id) || activeMls.epoch(room.room_id) !== room.expected_epoch - 1) throw new Error("请先同步最新的对话密钥后重试");
+            if (!activeMls.hasGroup(room.room_id) || activeMls.epoch(room.room_id) !== room.expected_epoch - 1) throw new DiagnosticError("DEVICE_LINK_ROOM_STATE_STALE");
             const previousState = activeMls.exportState();
             const commit = activeMls.addMembers(room.room_id, [room.key_package]);
-            if (commit.epoch !== room.expected_epoch || !commit.welcome) throw new Error("无法为新设备生成加入凭证");
+            if (commit.epoch !== room.expected_epoch || !commit.welcome) throw new DiagnosticError("DEVICE_LINK_WELCOME_GENERATION_FAILED");
             const encryptedState = JSON.stringify({ version: 1, welcome: commit.welcome, ratchet_tree: commit.ratchet_tree });
             const unsigned: Omit<ClientEvent, "signature"> = {
               event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
@@ -3119,12 +3120,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             await persistMls(activeMls);
           });
           queued = await db.deviceLinkOutbox(linkId, room.room_id);
-          if (!queued) throw new Error("无法保存设备链接进度");
+          if (!queued) throw new DiagnosticError("DEVICE_LINK_PROGRESS_PERSIST_FAILED");
         }
         if (activeMls.epoch(room.room_id) === room.expected_epoch - 1) {
           await mutateMls(async () => {
             const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued!.mls_state);
-            if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new Error("设备链接快照无效"); }
+            if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new DiagnosticError("DEVICE_LINK_SNAPSHOT_INVALID"); }
             const previous = activeMls; activeMls = restored; mlsRef = restored; setMls(restored); await persistMls(restored); if (previous !== restored) previous.destroy();
           });
         }
@@ -3139,15 +3140,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             setDeviceLinkOpen(false); return;
           }
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
-            activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备链接提交");
+            activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "DEVICE_LINK_COMMIT");
             await db.removeDeviceLinkOutbox(linkId, room.room_id); await syncRef?.catchUp();
-            throw new Error("对话密钥刚刚发生变化，已同步并准备重新加入");
+            throw new DiagnosticError("DEVICE_LINK_EPOCH_CHANGED");
           }
           await db.failDeviceLinkOutbox(linkId, room.room_id, cause instanceof Error ? cause.message : String(cause)); throw cause;
         }
       }
       view = await api.deviceLinkPreview(linkId);
-      if (view.status !== "complete" && view.status !== "claimed") throw new Error("部分对话尚未完成，请重试");
+      if (view.status !== "complete" && view.status !== "claimed") throw new DiagnosticError("DEVICE_LINK_ROOMS_INCOMPLETE");
       if (mayRetireDeviceLinkSourceState(view.status)) {
         await db.removeDeviceLinkJob(linkId); await deviceHistoryStaging.clearLink(linkId);
       }
@@ -3170,16 +3171,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function executeDeviceRevocation(deviceId: string, currentMls = mlsRef): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session();
-    if (!currentMls || !currentIdentity || !currentSession) throw new Error("本机加密状态尚未就绪");
+    if (!currentMls || !currentIdentity || !currentSession) throw new DiagnosticError("DEVICE_CRYPTO_NOT_READY");
     let job: DeviceRevocation; let activeMls = currentMls;
     const reconcileQueuedState = async (queued: Awaited<ReturnType<LocalDatabase["deviceRevocationOutbox"]>>, expectedEpoch: number) => {
       if (!queued) return;
       const currentEpoch = activeMls.epoch(queued.room_id);
       if (currentEpoch === expectedEpoch) return;
-      if (currentEpoch !== expectedEpoch - 1 || !queued.mls_state?.length) throw new Error(`房间 ${queued.room_id} 的本机加密状态无法恢复`);
+      if (currentEpoch !== expectedEpoch - 1 || !queued.mls_state?.length) throw new DiagnosticError("DEVICE_REVOCATION_LOCAL_EPOCH_UNRECOVERABLE");
       await mutateMls(async () => {
         const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued.mls_state);
-        if (restored.epoch(queued.room_id) !== expectedEpoch) { restored.destroy(); throw new Error(`房间 ${queued.room_id} 的撤销快照无效`); }
+        if (restored.epoch(queued.room_id) !== expectedEpoch) { restored.destroy(); throw new DiagnosticError("DEVICE_REVOCATION_SNAPSHOT_INVALID"); }
         const previous = activeMls;
         activeMls = restored; mlsRef = restored; setMls(restored);
         await persistMls(restored);
@@ -3202,18 +3203,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       for (const room of job.rooms.filter((item) => item.status === "pending")) {
         let queued = await db.deviceRevocationOutbox(job.revocation_id, room.room_id);
         if (queued && Number(queued.event.metadata.mls_epoch) !== room.expected_epoch) {
-          activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备撤销提交");
+          activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "DEVICE_REVOCATION_COMMIT");
           await db.removeDeviceRevocationOutbox(job.revocation_id, room.room_id);
           await syncRef?.catchUp();
-          throw new Error("已同步其他成员更新，将自动重新生成设备撤销提交");
+          throw new DiagnosticError("DEVICE_REVOCATION_EPOCH_CHANGED");
         }
         if (!queued) {
           const event = await mutateMls(async () => {
-            if (!activeMls.hasGroup(room.room_id)) throw new Error(`这台设备缺少房间 ${room.room_id} 的加密状态`);
-            if (activeMls.epoch(room.room_id) !== room.expected_epoch - 1) throw new Error(`房间 ${room.room_id} 的加密状态已变化，请先完成同步`);
+            if (!activeMls.hasGroup(room.room_id)) throw new DiagnosticError("DEVICE_REVOCATION_ROOM_STATE_MISSING");
+            if (activeMls.epoch(room.room_id) !== room.expected_epoch - 1) throw new DiagnosticError("DEVICE_REVOCATION_ROOM_STATE_STALE");
             const previousState = activeMls.exportState();
             const commit = activeMls.removeMembers(room.room_id, [deviceId]);
-            if (commit.epoch !== room.expected_epoch) throw new Error("MLS 撤销提交的 epoch 不匹配");
+            if (commit.epoch !== room.expected_epoch) throw new DiagnosticError("DEVICE_REVOCATION_COMMIT_EPOCH_MISMATCH");
             const unsigned: Omit<ClientEvent, "signature"> = {
               event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
               room_id: room.room_id,
@@ -3232,8 +3233,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             return signed;
           });
           queued = await db.deviceRevocationOutbox(job.revocation_id, room.room_id);
-          if (!queued) throw new Error("无法保存设备撤销队列");
-          if (queued.event.event_id !== event.event_id) throw new Error("设备撤销队列发生冲突");
+          if (!queued) throw new DiagnosticError("DEVICE_REVOCATION_OUTBOX_PERSIST_FAILED");
+          if (queued.event.event_id !== event.event_id) throw new DiagnosticError("DEVICE_REVOCATION_OUTBOX_CONFLICT");
         }
         await reconcileQueuedState(queued, room.expected_epoch);
         try {
@@ -3243,10 +3244,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           job = result;
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
-            activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备撤销提交");
+            activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "DEVICE_REVOCATION_COMMIT");
             await db.removeDeviceRevocationOutbox(job.revocation_id, room.room_id);
             await syncRef?.catchUp();
-            throw new Error("已同步其他成员更新，将自动重新生成设备撤销提交");
+            throw new DiagnosticError("DEVICE_REVOCATION_EPOCH_CHANGED");
           }
           await db.failDeviceRevocationOutbox(job.revocation_id, room.room_id, cause instanceof Error ? cause.message : String(cause));
           throw cause;
@@ -3255,7 +3256,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         setRevocationProgress(deviceId, { status: "working", completed, total: job.rooms.length });
       }
       if (job.status !== "complete") job = await api.prepareDeviceRevocation(deviceId);
-      if (job.status !== "complete") throw new Error("服务器仍在关闭旧设备连接，请重试");
+      if (job.status !== "complete") throw new DiagnosticError("DEVICE_REVOCATION_SERVER_FINALIZATION_PENDING");
       setDevices((await api.devices()).devices);
       setRevocationProgress(deviceId, null);
       setNotice(t("workspace.feedback.deviceRevocationComplete"));
@@ -3283,11 +3284,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const expectedEpoch = Number(queued.event.metadata.mls_epoch);
     const localEpoch = currentMls.epoch(queued.room_id);
     if (localEpoch >= expectedEpoch) return;
-    if (localEpoch !== expectedEpoch - 1 || !queued.mls_state.length) throw new Error("无法恢复群成员变更后的加密状态");
+    if (localEpoch !== expectedEpoch - 1 || !queued.mls_state.length) throw new DiagnosticError("ROOM_MEMBERSHIP_LOCAL_EPOCH_UNRECOVERABLE");
     await mutateMls(async () => {
       const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued.mls_state);
       if (!restored.hasGroup(queued.room_id) || restored.epoch(queued.room_id) !== expectedEpoch) {
-        restored.destroy(); throw new Error("群成员变更加密快照无效");
+        restored.destroy(); throw new DiagnosticError("ROOM_MEMBERSHIP_SNAPSHOT_INVALID");
       }
       const previous = mlsRef; mlsRef = restored; setMls(restored); await persistMls(restored);
       if (previous && previous !== restored) previous.destroy();
@@ -3326,8 +3327,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const activeMls = mlsRef!;
         const previousState = activeMls.exportState();
         const commit = operation === "add" ? activeMls.addMembers(roomId, keyPackages) : activeMls.removeMembers(roomId, targetDeviceIds);
-        if (commit.epoch !== freshRoom.epoch! + 1) throw new Error("群成员变更版本不匹配");
-        if (operation === "add" && !commit.welcome) throw new Error("无法为新成员生成加入凭证");
+        if (commit.epoch !== freshRoom.epoch! + 1) throw new DiagnosticError("ROOM_MEMBERSHIP_COMMIT_EPOCH_MISMATCH");
+        if (operation === "add" && !commit.welcome) throw new DiagnosticError("ROOM_MEMBERSHIP_WELCOME_GENERATION_FAILED");
         const unsigned: Omit<ClientEvent, "signature"> = {
           event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
           room_id: roomId,
@@ -3346,7 +3347,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await persistMls(activeMls);
       });
       queued = await db.roomMembershipOutbox(roomId);
-      if (!queued) throw new Error("无法保存群成员变更进度");
+      if (!queued) throw new DiagnosticError("ROOM_MEMBERSHIP_OUTBOX_PERSIST_FAILED");
     }
 
     await reconcileRoomMembershipState(queued);
@@ -3373,12 +3374,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         }
       }
       if (cause instanceof ApiError && cause.code === "stale_epoch") {
-        if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "群成员变更");
+        if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "ROOM_MEMBERSHIP_CHANGE");
         await db.removeRoomMembershipOutbox(roomId); await syncRef?.catchUp();
         throw new RoomOperationError("keys_changed");
       }
       if (cause instanceof ApiError && cause.code === "room_leave_cancelled") {
-        if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "退出群聊");
+        if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "ROOM_LEAVE");
         await db.removeRoomMembershipOutbox(roomId); await loadRooms();
         return;
       }
@@ -3481,22 +3482,22 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       for (const task of tasks.values()) {
         let queued = await db.accountRemovalOutbox(task.deletion_id, task.room_id);
         let activeMls = mlsRef;
-        if (!activeMls) throw new Error("本机加密状态尚未就绪");
+        if (!activeMls) throw new DiagnosticError("DEVICE_CRYPTO_NOT_READY");
         if (queued && Number(queued.event.metadata.mls_epoch) !== task.expected_epoch) {
-          activeMls = await restoreMlsBeforeQueuedCommit(task.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "账户移除提交");
+          activeMls = await restoreMlsBeforeQueuedCommit(task.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "ACCOUNT_REMOVAL_COMMIT");
           await db.removeAccountRemovalOutbox(task.deletion_id, task.room_id);
           await syncRef?.catchUp();
-          throw new Error("已同步其他成员更新，将自动重新生成账户移除提交");
+          throw new DiagnosticError("ACCOUNT_REMOVAL_EPOCH_CHANGED");
         }
         if (!queued) {
-          if (!task.target_device_ids.length) throw new Error("待移除账户没有可识别的加密设备");
+          if (!task.target_device_ids.length) throw new DiagnosticError("ACCOUNT_REMOVAL_TARGET_DEVICES_MISSING");
           const signed = await mutateMls(async () => {
             activeMls = mlsRef!;
-            if (!activeMls.hasGroup(task.room_id)) throw new Error("这台设备缺少待更新对话的加密状态");
-            if (activeMls.epoch(task.room_id) !== task.expected_epoch - 1) throw new Error("对话密钥已经变化，请先同步后重试");
+            if (!activeMls.hasGroup(task.room_id)) throw new DiagnosticError("ACCOUNT_REMOVAL_ROOM_STATE_MISSING");
+            if (activeMls.epoch(task.room_id) !== task.expected_epoch - 1) throw new DiagnosticError("ACCOUNT_REMOVAL_ROOM_STATE_STALE");
             const previousState = activeMls.exportState();
             const commit = activeMls.removeMembers(task.room_id, task.target_device_ids);
-            if (commit.epoch !== task.expected_epoch) throw new Error("账户移除提交的版本不匹配");
+            if (commit.epoch !== task.expected_epoch) throw new DiagnosticError("ACCOUNT_REMOVAL_COMMIT_EPOCH_MISMATCH");
             const unsigned: Omit<ClientEvent, "signature"> = {
               event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
               room_id: task.room_id,
@@ -3513,15 +3514,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             return event;
           });
           queued = await db.accountRemovalOutbox(task.deletion_id, task.room_id);
-          if (!queued || queued.event.event_id !== signed.event_id) throw new Error("无法保存账户移除队列");
+          if (!queued || queued.event.event_id !== signed.event_id) throw new DiagnosticError("ACCOUNT_REMOVAL_OUTBOX_PERSIST_FAILED");
         } else {
           const expectedEpoch = Number(queued.event.metadata.mls_epoch);
           const localEpoch = activeMls.epoch(task.room_id);
           if (localEpoch < expectedEpoch) {
-            if (localEpoch !== expectedEpoch - 1 || !queued.mls_state.length) throw new Error("无法恢复账户移除后的加密状态");
+            if (localEpoch !== expectedEpoch - 1 || !queued.mls_state.length) throw new DiagnosticError("ACCOUNT_REMOVAL_LOCAL_EPOCH_UNRECOVERABLE");
             await mutateMls(async () => {
               const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued!.mls_state);
-              if (restored.epoch(task.room_id) !== expectedEpoch) { restored.destroy(); throw new Error("账户移除快照无效"); }
+              if (restored.epoch(task.room_id) !== expectedEpoch) { restored.destroy(); throw new DiagnosticError("ACCOUNT_REMOVAL_SNAPSHOT_INVALID"); }
               const previous = mlsRef; mlsRef = restored; setMls(restored); await persistMls(restored);
               if (previous && previous !== restored) previous.destroy();
             });
@@ -3534,10 +3535,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             () => db.removeAccountRemovalOutbox(task.deletion_id, task.room_id));
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
-            activeMls = await restoreMlsBeforeQueuedCommit(task.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "账户移除提交");
+            activeMls = await restoreMlsBeforeQueuedCommit(task.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "ACCOUNT_REMOVAL_COMMIT");
             await db.removeAccountRemovalOutbox(task.deletion_id, task.room_id);
             await syncRef?.catchUp();
-            throw new Error("已同步其他成员更新，将自动重新生成账户移除提交");
+            throw new DiagnosticError("ACCOUNT_REMOVAL_EPOCH_CHANGED");
           }
           await db.failAccountRemovalOutbox(task.deletion_id, task.room_id, cause instanceof Error ? cause.message : String(cause));
           throw cause;

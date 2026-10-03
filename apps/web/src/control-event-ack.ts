@@ -2,7 +2,7 @@ import { acceptedEventMatchesClientEvent, type ClientEvent, type RoomEvent, type
 
 export class AcceptedControlEventMismatchError extends Error {
   constructor() {
-    super("服务器确认与本机已签名事件不一致，已保留待发送操作");
+    super("ACCEPTED_CONTROL_EVENT_MISMATCH");
     this.name = "AcceptedControlEventMismatchError";
   }
 }

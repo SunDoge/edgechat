@@ -53,7 +53,7 @@ describe("conversation transcript export", () => {
   });
 
   it("fails closed on a duplicate or cross-room page", async () => {
-    await expect(streamConversationTranscript({ roomId: room, roomTitle: "test", displayName: String, write: () => undefined, loadPage: async () => [message(1), message(1)] })).rejects.toThrow("消息顺序无效");
+    await expect(streamConversationTranscript({ roomId: room, roomTitle: "test", displayName: String, write: () => undefined, loadPage: async () => [message(1), message(1)] })).rejects.toThrow("CONVERSATION_EXPORT_ORDER_INVALID");
   });
 
   it("can stop a long export between bounded pages", async () => {

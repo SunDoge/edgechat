@@ -1,6 +1,7 @@
 import type { ImageSearchResult, LocalDatabase } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
 import { LOCAL_IMAGE_MODEL } from "./semantic-model";
+import { DiagnosticError } from "./diagnostic-error";
 
 type Pending = { resolve: (embedding: Float32Array) => void; reject: (error: Error) => void };
 type WorkerResponse = { id: number; embedding?: ArrayBuffer; error?: string };
@@ -16,11 +17,11 @@ export class LocalImageSemanticSearch {
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
-      if (response.error || !response.embedding) pending.reject(new Error(response.error ?? "图片模型没有返回向量"));
+      if (response.error || !response.embedding) pending.reject(new DiagnosticError(response.error ? "SEMANTIC_WORKER_REQUEST_FAILED" : "SEMANTIC_WORKER_EMBEDDING_MISSING"));
       else pending.resolve(new Float32Array(response.embedding));
     };
     this.worker.onerror = (event) => {
-      const error = new Error(event.message || "图片语义搜索 Worker 失败");
+      const error = new DiagnosticError("SEMANTIC_WORKER_CRASHED", event.error ? { cause: event.error } : undefined);
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
     };
@@ -40,7 +41,7 @@ export class LocalImageSemanticSearch {
 
   close(): void {
     this.worker.terminate();
-    for (const pending of this.pending.values()) pending.reject(new Error("图片语义搜索已关闭"));
+    for (const pending of this.pending.values()) pending.reject(new DiagnosticError("SEMANTIC_SEARCH_CLOSED"));
     this.pending.clear();
   }
 

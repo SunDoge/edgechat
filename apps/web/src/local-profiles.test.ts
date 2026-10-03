@@ -46,8 +46,8 @@ describe("local profile registry", () => {
   it("refuses to rebind one local profile to another account or device", async () => {
     const profile = await ensureActiveLocalProfile(pendingName);
     await bindLocalProfile(profile.profile_id, { user_id: "@alice:example.com", display_name: "Alice", device_id: "phone", access_token: "first" });
-    await expect(bindLocalProfile(profile.profile_id, { user_id: "@bob:example.com", display_name: "Bob", device_id: "phone", access_token: "second" })).rejects.toThrow("另一个账户");
-    await expect(bindLocalProfile(profile.profile_id, { user_id: "@alice:example.com", display_name: "Alice", device_id: "laptop", access_token: "second" })).rejects.toThrow("另一个账户");
+    await expect(bindLocalProfile(profile.profile_id, { user_id: "@bob:example.com", display_name: "Bob", device_id: "phone", access_token: "second" })).rejects.toThrow("LOCAL_PROFILE_BINDING_CONFLICT");
+    await expect(bindLocalProfile(profile.profile_id, { user_id: "@alice:example.com", display_name: "Alice", device_id: "laptop", access_token: "second" })).rejects.toThrow("LOCAL_PROFILE_BINDING_CONFLICT");
   });
 
   it("keeps backup health metadata isolated to the local profile", async () => {

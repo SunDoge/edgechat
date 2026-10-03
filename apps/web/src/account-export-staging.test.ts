@@ -64,7 +64,7 @@ describe("account export staging", () => {
     const buffer = createBoundedAccountExportBuffer(5);
     buffer.write("你"); buffer.write("ab");
     expect(buffer.bytes).toBe(5); expect(buffer.blob().size).toBe(5);
-    expect(() => buffer.write("c")).toThrow("导出内容较大");
+    expect(() => buffer.write("c")).toThrow("workspace.feedback.exportLocalStorageError");
     expect(isAccountExportStorageError(new DOMException("full", "QuotaExceededError"))).toBe(true);
     expect(isAccountExportStorageError(new DOMException("cancel", "AbortError"))).toBe(false);
   });

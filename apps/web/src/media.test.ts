@@ -81,8 +81,8 @@ describe("unified attachment presentation", () => {
       { part_id: "one", kind: "contact", contact: { user_id: "alice", display_name: "Alice" } },
       { part_id: "two", kind: "contact", contact: { user_id: "@alice:example.com", display_name: "x".repeat(129) } },
     ] } as never;
-    expect(() => normalizeMessagePayload(malformed, "$bad-contact:example.com")).toThrow("联系人名片无效");
-    expect(() => createContactMessagePayload("$bad12345:example.com", { user_id: "alice" as never, display_name: "Alice" })).toThrow("联系人名片无效");
+    expect(() => normalizeMessagePayload(malformed, "$bad-contact:example.com")).toThrow("CONTACT_CARD_INVALID");
+    expect(() => createContactMessagePayload("$bad12345:example.com", { user_id: "alice" as never, display_name: "Alice" })).toThrow("CONTACT_CARD_INVALID");
   });
 
   it("keeps multiple attachments in one logical message and assigns independent forward aliases", () => {
@@ -123,7 +123,7 @@ describe("unified attachment presentation", () => {
       { ...valid, duration_ms: 600_001 },
       { ...valid, key: "not+base64" },
     ]) {
-      expect(() => normalizeMessagePayload({ version: 2, message_id: "$bad12345:example.com", parts: [{ part_id: "part", kind: "attachment", attachment }] } as never, "$bad12345:example.com")).toThrow("附件元数据无效");
+      expect(() => normalizeMessagePayload({ version: 2, message_id: "$bad12345:example.com", parts: [{ part_id: "part", kind: "attachment", attachment }] } as never, "$bad12345:example.com")).toThrow("ATTACHMENT_METADATA_INVALID");
     }
   });
 
@@ -134,12 +134,12 @@ describe("unified attachment presentation", () => {
     expect(embeddedImagePreviewByteLength(preview)).toBe(3);
 
     const oversized = "AAAA".repeat(Math.ceil((MAX_EMBEDDED_IMAGE_PREVIEW_BYTES + 1) / 3));
-    expect(() => createMessagePayload("$previewbig:example.com", "", { id: "image", name: "photo.jpg", type: "image/jpeg", size: 42, key: "key", nonce: "nonce", preview: { ...preview, data: oversized } })).toThrow("附件元数据无效");
-    expect(() => createMessagePayload("$previewfile:example.com", "", { id: "file", name: "notes.txt", type: "text/plain", size: 42, key: "key", nonce: "nonce", preview })).toThrow("附件元数据无效");
+    expect(() => createMessagePayload("$previewbig:example.com", "", { id: "image", name: "photo.jpg", type: "image/jpeg", size: 42, key: "key", nonce: "nonce", preview: { ...preview, data: oversized } })).toThrow("ATTACHMENT_METADATA_INVALID");
+    expect(() => createMessagePayload("$previewfile:example.com", "", { id: "file", name: "notes.txt", type: "text/plain", size: 42, key: "key", nonce: "nonce", preview })).toThrow("ATTACHMENT_METADATA_INVALID");
 
     const maximum = "AAAA".repeat(Math.floor(MAX_EMBEDDED_IMAGE_PREVIEW_BYTES / 3));
     const attachments = Array.from({ length: 6 }, (_, index) => ({ id: `image-${index}`, name: `${index}.jpg`, type: "image/jpeg", size: 42, key: "key", nonce: "nonce", preview: { ...preview, data: maximum } }));
-    expect(() => createMessagePayload("$previewsum:example.com", "", attachments)).toThrow("图片预览总大小无效");
+    expect(() => createMessagePayload("$previewsum:example.com", "", attachments)).toThrow("MESSAGE_PREVIEW_LIMIT_EXCEEDED");
   });
 
   it("generates a bounded thumbnail on the sending device and closes decoded image memory", async () => {
@@ -170,11 +170,11 @@ describe("unified attachment presentation", () => {
     const attachment = (index: number) => ({ id: `attachment_${index}`, name: `${index}.bin`, type: "application/octet-stream", size: 1, key: "key", nonce: "nonce" });
     expect(() => normalizeMessagePayload({ version: 2, message_id: "$duplicate:example.com", parts: [
       { part_id: "same", kind: "text", text: "one" }, { part_id: "same", kind: "text", text: "two" },
-    ] }, "$duplicate:example.com")).toThrow("消息内容格式无效");
-    expect(() => normalizeMessagePayload({ version: 2, message_id: "$many12345:example.com", parts: Array.from({ length: 11 }, (_, index) => ({ part_id: `part-${index}`, kind: "attachment", attachment: attachment(index) })) } as never, "$many12345:example.com")).toThrow("附件数量或总大小无效");
+    ] }, "$duplicate:example.com")).toThrow("MESSAGE_PAYLOAD_INVALID");
+    expect(() => normalizeMessagePayload({ version: 2, message_id: "$many12345:example.com", parts: Array.from({ length: 11 }, (_, index) => ({ part_id: `part-${index}`, kind: "attachment", attachment: attachment(index) })) } as never, "$many12345:example.com")).toThrow("MESSAGE_ATTACHMENT_LIMIT_EXCEEDED");
     expect(() => normalizeMessagePayload({ version: 2, message_id: "$duplicateattachment:example.com", parts: [
       { part_id: "first", kind: "attachment", attachment: attachment(1) }, { part_id: "second", kind: "attachment", attachment: attachment(1) },
-    ] } as never, "$duplicateattachment:example.com")).toThrow("附件引用重复");
+    ] } as never, "$duplicateattachment:example.com")).toThrow("ATTACHMENT_REFERENCE_DUPLICATE");
   });
 
   it("binds decrypted attachment IDs and order to the server-authorized references", () => {
@@ -183,10 +183,10 @@ describe("unified attachment presentation", () => {
       { id: "attachment_two", name: "two.bin", type: "application/octet-stream", size: 1, key: "key", nonce: "nonce" },
     ]);
     expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_one", "attachment_two"] })).not.toThrow();
-    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_two", "attachment_one"] })).toThrow("不一致");
-    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_one", "attachment_one"] })).toThrow("格式无效");
-    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_id: "attachment_one", attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("格式冲突");
-    expect(() => assertMessageAttachmentReferences(payload, "message.text", { attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("不一致");
+    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_two", "attachment_one"] })).toThrow("ATTACHMENT_REFERENCE_ENVELOPE_MISMATCH");
+    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_one", "attachment_one"] })).toThrow("ATTACHMENT_REFERENCES_INVALID");
+    expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_id: "attachment_one", attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("ATTACHMENT_REFERENCE_FORMAT_CONFLICT");
+    expect(() => assertMessageAttachmentReferences(payload, "message.text", { attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("ATTACHMENT_REFERENCE_ENVELOPE_MISMATCH");
   });
 
   it("binds the logical message ID, relation room, and visible event shape", () => {
@@ -194,10 +194,10 @@ describe("unified attachment presentation", () => {
     const eventId = "$event1234:example.com";
     const text = createMessagePayload(eventId, "hello");
     expect(() => assertMessageEnvelope(text, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).not.toThrow();
-    expect(() => normalizeMessagePayload({ ...text, message_id: "$forged123:example.com" }, eventId)).toThrow("不一致");
-    expect(() => assertMessageEnvelope({ ...text, relation: { type: "reply", target: { kind: "message", message_id: "$target123:example.com", room_id: "!fedcba9876543210:example.com" } } }, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("跨越");
+    expect(() => normalizeMessagePayload({ ...text, message_id: "$forged123:example.com" }, eventId)).toThrow("MESSAGE_ID_EVENT_MISMATCH");
+    expect(() => assertMessageEnvelope({ ...text, relation: { type: "reply", target: { kind: "message", message_id: "$target123:example.com", room_id: "!fedcba9876543210:example.com" } } }, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("MESSAGE_RELATION_ROOM_MISMATCH");
     const contact = createContactMessagePayload(eventId, { user_id: "@alice:example.com", display_name: "Alice" });
-    expect(() => assertMessageEnvelope(contact, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("文字消息");
+    expect(() => assertMessageEnvelope(contact, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("TEXT_MESSAGE_PARTS_INVALID");
     expect(() => assertMessageEnvelope(contact, { event_id: eventId, room_id: room, type: "message.contact", metadata: {} })).not.toThrow();
   });
 
@@ -207,8 +207,8 @@ describe("unified attachment presentation", () => {
     const payload = normalizeMessagePayload({ version: 2, message_id: eventId, origin: { kind: "bot", bot_id: botId, display_name: " Alerts " }, parts: [{ part_id: "text", kind: "text", text: "build done" }] }, eventId);
     expect(payload.origin?.display_name).toBe("Alerts");
     expect(() => assertMessageEnvelope(payload, { event_id: eventId, room_id: room, type: "message.text", metadata: { sender_kind: "bot", bot_id: botId } })).not.toThrow();
-    expect(() => assertMessageEnvelope(payload, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("Bot 来源");
-    expect(() => assertMessageEnvelope(createMessagePayload(eventId, "human"), { event_id: eventId, room_id: room, type: "message.text", metadata: { sender_kind: "bot", bot_id: botId } })).toThrow("未认证");
-    expect(() => normalizeMessagePayload({ ...payload, origin: { ...payload.origin!, display_name: "bad\u202ename" } }, eventId)).toThrow("消息来源格式无效");
+    expect(() => assertMessageEnvelope(payload, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("BOT_ORIGIN_AUTHORIZATION_MISMATCH");
+    expect(() => assertMessageEnvelope(createMessagePayload(eventId, "human"), { event_id: eventId, room_id: room, type: "message.text", metadata: { sender_kind: "bot", bot_id: botId } })).toThrow("BOT_ORIGIN_UNAUTHENTICATED");
+    expect(() => normalizeMessagePayload({ ...payload, origin: { ...payload.origin!, display_name: "bad\u202ename" } }, eventId)).toThrow("MESSAGE_ORIGIN_INVALID");
   });
 });

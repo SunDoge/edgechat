@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE } from "./startup-recovery";
 import { translate } from "./i18n";
+import { DiagnosticError } from "./diagnostic-error";
 
 describe("startup recovery classification", () => {
   it("requires an update instead of attempting to downgrade a newer local schema", () => {
@@ -32,6 +33,7 @@ describe("startup recovery classification", () => {
 
   it("separates crypto and temporary service failures", () => {
     expect(describeStartupFailure(new Error("MLS snapshot could not be decoded")).kind).toBe("device-crypto");
+    expect(describeStartupFailure(new DiagnosticError("DEVICE_CRYPTO_NOT_READY")).kind).toBe("device-crypto");
     expect(describeStartupFailure(new TypeError("Failed to fetch")).kind).toBe("service-unavailable");
     expect(describeStartupFailure({ status: 503 }).kind).toBe("service-unavailable");
   });

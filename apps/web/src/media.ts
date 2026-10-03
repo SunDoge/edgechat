@@ -1,4 +1,5 @@
 import { isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES, type MessageId, type MessagePartId, type MessageReference, type UserId } from "@edgechat/protocol";
+import { DiagnosticError } from "./diagnostic-error";
 
 export const PREVIEWABLE_IMAGE_TYPES = new Set([
   "image/avif",
@@ -70,7 +71,7 @@ export function createMessagePayload(messageId: MessageId, text: string, attachm
   if (text) parts.push({ part_id: crypto.randomUUID(), kind: "text", text });
   for (const attachment of attachments ? Array.isArray(attachments) ? attachments : [attachments] : []) {
     const normalized = normalizeAttachmentMetadata(attachment);
-    if (!normalized) throw new Error("附件元数据无效");
+    if (!normalized) throw new DiagnosticError("ATTACHMENT_METADATA_INVALID");
     parts.push({ part_id: crypto.randomUUID(), kind: "attachment", attachment: normalized });
   }
   return normalizeMessagePayload({ version: 2, message_id: messageId, parts, ...(relation ? { relation } : {}) }, messageId);
@@ -78,51 +79,51 @@ export function createMessagePayload(messageId: MessageId, text: string, attachm
 
 export function createContactMessagePayload(messageId: MessageId, contact: ContactIdentity): MessagePayload {
   const normalized = normalizeContact(contact);
-  if (!normalized) throw new Error("联系人名片无效");
+  if (!normalized) throw new DiagnosticError("CONTACT_CARD_INVALID");
   return normalizeMessagePayload({ version: 2, message_id: messageId, parts: [{ part_id: crypto.randomUUID(), kind: "contact", contact: normalized }] }, messageId);
 }
 
 export function normalizeMessagePayload(payload: MessagePayload | LegacyMessagePayload, fallbackId: string): MessagePayload {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("消息内容格式无效");
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new DiagnosticError("MESSAGE_PAYLOAD_INVALID");
   if ("version" in payload && payload.version === 2 && Array.isArray(payload.parts)) {
-    if (!isNamespacedMessageId(payload.message_id) || payload.message_id !== fallbackId) throw new Error("消息标识与事件不一致");
-    if (payload.parts.length > MAX_MESSAGE_PARTS) throw new Error("消息内容格式无效");
+    if (!isNamespacedMessageId(payload.message_id) || payload.message_id !== fallbackId) throw new DiagnosticError("MESSAGE_ID_EVENT_MISMATCH");
+    if (payload.parts.length > MAX_MESSAGE_PARTS) throw new DiagnosticError("MESSAGE_PAYLOAD_INVALID");
     const partIds = new Set<string>(); const attachmentIds = new Set<string>(); let attachmentBytes = 0; let attachmentCount = 0; let previewBytes = 0; let textBytes = 0;
     const parts = payload.parts.map((part): MessagePart => {
-      if (!part || typeof part !== "object" || typeof part.part_id !== "string" || !/^[A-Za-z0-9_:$.-]{1,512}$/.test(part.part_id) || partIds.has(part.part_id)) throw new Error("消息内容格式无效");
+      if (!part || typeof part !== "object" || typeof part.part_id !== "string" || !/^[A-Za-z0-9_:$.-]{1,512}$/.test(part.part_id) || partIds.has(part.part_id)) throw new DiagnosticError("MESSAGE_PAYLOAD_INVALID");
       partIds.add(part.part_id);
       if (part.kind === "text") {
-        if (typeof part.text !== "string" || part.text.length > 16_000) throw new Error("消息文字无效");
+        if (typeof part.text !== "string" || part.text.length > 16_000) throw new DiagnosticError("MESSAGE_TEXT_INVALID");
         textBytes += part.text.length;
-        if (textBytes > 16_000) throw new Error("消息文字过长");
+        if (textBytes > 16_000) throw new DiagnosticError("MESSAGE_TEXT_LIMIT_EXCEEDED");
         return { part_id: part.part_id as MessagePartId, kind: "text", text: part.text };
       }
       if (part.kind === "attachment") {
         const attachment = normalizeAttachmentMetadata(part.attachment);
-        if (!attachment) throw new Error("附件元数据无效");
-        if (attachmentIds.has(attachment.id)) throw new Error("附件引用重复");
+        if (!attachment) throw new DiagnosticError("ATTACHMENT_METADATA_INVALID");
+        if (attachmentIds.has(attachment.id)) throw new DiagnosticError("ATTACHMENT_REFERENCE_DUPLICATE");
         attachmentIds.add(attachment.id);
         attachmentCount += 1; attachmentBytes += attachment.size;
-        if (attachmentCount > MAX_MESSAGE_ATTACHMENTS || attachmentBytes > MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES) throw new Error("附件数量或总大小无效");
+        if (attachmentCount > MAX_MESSAGE_ATTACHMENTS || attachmentBytes > MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES) throw new DiagnosticError("MESSAGE_ATTACHMENT_LIMIT_EXCEEDED");
         previewBytes += attachment.preview ? embeddedImagePreviewByteLength(attachment.preview) : 0;
-        if (previewBytes > MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES) throw new Error("图片预览总大小无效");
+        if (previewBytes > MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES) throw new DiagnosticError("MESSAGE_PREVIEW_LIMIT_EXCEEDED");
         return { part_id: part.part_id as MessagePartId, kind: "attachment", attachment };
       }
       if (part.kind === "contact") {
         const contact = normalizeContact(part.contact);
-        if (!contact) throw new Error("联系人名片无效");
+        if (!contact) throw new DiagnosticError("CONTACT_CARD_INVALID");
         return { part_id: part.part_id as MessagePartId, kind: "contact", contact };
       }
-      throw new Error("未知的消息内容类型");
+      throw new DiagnosticError("MESSAGE_PART_KIND_UNKNOWN");
     });
     const relation = payload.relation === undefined ? undefined : normalizeMessageRelation(payload.relation);
-    if (payload.relation !== undefined && !relation) throw new Error("消息引用格式无效");
+    if (payload.relation !== undefined && !relation) throw new DiagnosticError("MESSAGE_RELATION_INVALID");
     const savedFrom = payload.saved_from === undefined ? undefined : normalizeMessageReference(payload.saved_from);
-    if (payload.saved_from !== undefined && !savedFrom) throw new Error("保存来源格式无效");
+    if (payload.saved_from !== undefined && !savedFrom) throw new DiagnosticError("MESSAGE_SAVED_SOURCE_INVALID");
     const origin = payload.origin === undefined ? undefined : normalizeBotOrigin(payload.origin);
-    if (payload.origin !== undefined && !origin) throw new Error("消息来源格式无效");
-    if (payload.forwarded !== undefined && payload.forwarded !== true) throw new Error("转发标记无效");
-    if (payload.deleted !== undefined && payload.deleted !== true) throw new Error("删除标记无效");
+    if (payload.origin !== undefined && !origin) throw new DiagnosticError("MESSAGE_ORIGIN_INVALID");
+    if (payload.forwarded !== undefined && payload.forwarded !== true) throw new DiagnosticError("MESSAGE_FORWARDED_FLAG_INVALID");
+    if (payload.deleted !== undefined && payload.deleted !== true) throw new DiagnosticError("MESSAGE_DELETED_FLAG_INVALID");
     return {
       version: 2, message_id: payload.message_id, parts,
       ...(payload.deleted === true ? { deleted: true as const } : {}),
@@ -133,16 +134,16 @@ export function normalizeMessagePayload(payload: MessagePayload | LegacyMessageP
   }
   const legacy = payload as LegacyMessagePayload;
   const parts: MessagePart[] = [];
-  if (legacy.text !== undefined && typeof legacy.text !== "string") throw new Error("消息文字无效");
+  if (legacy.text !== undefined && typeof legacy.text !== "string") throw new DiagnosticError("MESSAGE_TEXT_INVALID");
   const legacyText = legacy.text?.trim() ?? "";
-  if (legacyText.length > 16_000) throw new Error("消息文字过长");
+  if (legacyText.length > 16_000) throw new DiagnosticError("MESSAGE_TEXT_LIMIT_EXCEEDED");
   if (legacyText) parts.push({ part_id: `${fallbackId}:text`, kind: "text", text: legacyText });
   if (legacy.attachment) {
     const attachment = normalizeAttachmentMetadata(legacy.attachment);
-    if (!attachment) throw new Error("附件元数据无效");
+    if (!attachment) throw new DiagnosticError("ATTACHMENT_METADATA_INVALID");
     parts.push({ part_id: `${fallbackId}:attachment`, kind: "attachment", attachment });
   }
-  if (!isNamespacedMessageId(fallbackId)) throw new Error("消息标识无效");
+  if (!isNamespacedMessageId(fallbackId)) throw new DiagnosticError("MESSAGE_ID_INVALID");
   return { version: 2, message_id: fallbackId as MessageId, parts };
 }
 
@@ -223,7 +224,7 @@ export function embeddedImagePreviewUrl(preview: EmbeddedImagePreview): string {
 
 export function createForwardPayload(messageId: MessageId, source: MessagePayload, attachmentAliases: readonly string[] = [], savedFrom?: MessageReference): MessagePayload {
   const attachments = messageAttachments(source);
-  if (attachments.length !== attachmentAliases.length) throw new Error("转发附件缺少新的引用");
+  if (attachments.length !== attachmentAliases.length) throw new DiagnosticError("FORWARD_ATTACHMENT_ALIAS_MISSING");
   let attachmentIndex = 0;
   const parts = source.parts.flatMap((part): MessagePart[] => {
     if (part.kind === "text") return [{ ...part, part_id: crypto.randomUUID() }];
@@ -246,31 +247,31 @@ export function messageAttachments(payload: MessagePayload): AttachmentPart[] {
 
 export function assertMessageAttachmentReferences(payload: MessagePayload, eventType: string, metadata: Record<string, unknown>): void {
   const multiple = metadata.attachment_ids; const single = metadata.attachment_id;
-  if (multiple !== undefined && single !== undefined) throw new Error("附件引用格式冲突");
+  if (multiple !== undefined && single !== undefined) throw new DiagnosticError("ATTACHMENT_REFERENCE_FORMAT_CONFLICT");
   const declared = multiple === undefined ? single === undefined ? [] : [single] : multiple;
-  if (!Array.isArray(declared) || declared.length > MAX_MESSAGE_ATTACHMENTS || declared.some((id) => typeof id !== "string") || new Set(declared).size !== declared.length) throw new Error("附件引用格式无效");
+  if (!Array.isArray(declared) || declared.length > MAX_MESSAGE_ATTACHMENTS || declared.some((id) => typeof id !== "string") || new Set(declared).size !== declared.length) throw new DiagnosticError("ATTACHMENT_REFERENCES_INVALID");
   const actual = messageAttachments(payload).map((part) => part.attachment.id);
   if ((actual.length > 0) !== (eventType === "message.file") || actual.length !== declared.length || actual.some((id, index) => id !== declared[index])) {
-    throw new Error("加密附件内容与服务器引用不一致");
+    throw new DiagnosticError("ATTACHMENT_REFERENCE_ENVELOPE_MISMATCH");
   }
 }
 
 export function assertMessageEnvelope(payload: MessagePayload, event: { event_id: string; room_id: string; type: string; metadata: Record<string, unknown> }): void {
-  if (payload.message_id !== event.event_id || payload.deleted || !payload.parts.length) throw new Error("消息内容与事件不一致");
+  if (payload.message_id !== event.event_id || payload.deleted || !payload.parts.length) throw new DiagnosticError("MESSAGE_EVENT_ENVELOPE_MISMATCH");
   const attachments = messageAttachments(payload); const contacts = messageContacts(payload);
   if (event.type === "message.text") {
-    if (attachments.length || contacts.length) throw new Error("文字消息包含不支持的内容");
+    if (attachments.length || contacts.length) throw new DiagnosticError("TEXT_MESSAGE_PARTS_INVALID");
   } else if (event.type === "message.file") {
-    if (!attachments.length || contacts.length) throw new Error("附件消息内容无效");
+    if (!attachments.length || contacts.length) throw new DiagnosticError("ATTACHMENT_MESSAGE_PARTS_INVALID");
   } else if (event.type === "message.contact") {
-    if (!contacts.length || contacts.length !== payload.parts.length) throw new Error("联系人消息内容无效");
-  } else throw new Error("不支持的可见消息类型");
-  if (payload.relation?.target.room_id !== undefined && payload.relation.target.room_id !== event.room_id) throw new Error("消息引用跨越了当前对话");
-  if (payload.saved_from && !payload.forwarded) throw new Error("保存来源缺少转发标记");
+    if (!contacts.length || contacts.length !== payload.parts.length) throw new DiagnosticError("CONTACT_MESSAGE_PARTS_INVALID");
+  } else throw new DiagnosticError("VISIBLE_MESSAGE_TYPE_UNSUPPORTED");
+  if (payload.relation?.target.room_id !== undefined && payload.relation.target.room_id !== event.room_id) throw new DiagnosticError("MESSAGE_RELATION_ROOM_MISMATCH");
+  if (payload.saved_from && !payload.forwarded) throw new DiagnosticError("MESSAGE_SAVED_SOURCE_FORWARD_FLAG_MISSING");
   const senderKind = event.metadata.sender_kind; const botId = event.metadata.bot_id;
   if (payload.origin) {
-    if (senderKind !== "bot" || botId !== payload.origin.bot_id) throw new Error("Bot 来源与服务器授权不一致");
-  } else if (senderKind !== undefined || botId !== undefined) throw new Error("事件包含未认证的 Bot 来源");
+    if (senderKind !== "bot" || botId !== payload.origin.bot_id) throw new DiagnosticError("BOT_ORIGIN_AUTHORIZATION_MISMATCH");
+  } else if (senderKind !== undefined || botId !== undefined) throw new DiagnosticError("BOT_ORIGIN_UNAUTHENTICATED");
   assertMessageAttachmentReferences(payload, event.type, event.metadata);
 }
 

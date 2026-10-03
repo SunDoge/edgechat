@@ -1,3 +1,5 @@
+import { UserFacingError } from "./user-facing-error";
+
 const DIRECTORY_NAME = "edgechat-account-export-staging-v1";
 const ACCOUNT_SUFFIX = ".ndjson";
 const CONVERSATION_SUFFIX = ".txt";
@@ -23,7 +25,7 @@ function assertProfileId(profileId: string): void {
 
 function defaultRootProvider(): Promise<FileSystemDirectoryHandle> {
   const storage = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
-  if (!storage?.getDirectory) throw new Error("当前浏览器不能安全暂存大型导出文件");
+  if (!storage?.getDirectory) throw UserFacingError.localized("workspace.feedback.exportLocalStorageError");
   return storage.getDirectory();
 }
 
@@ -49,7 +51,7 @@ function createBoundedExportBuffer(mimeType: string, maxBytes = MAX_MEMORY_ACCOU
   return {
     write(line) {
       const bytes = encoder.encode(line);
-      if (byteCount + bytes.byteLength > maxBytes) throw new Error("导出内容较大，当前浏览器无法安全保存。请更新当前浏览器，或改用新版桌面浏览器重试");
+      if (byteCount + bytes.byteLength > maxBytes) throw UserFacingError.localized("workspace.feedback.exportLocalStorageError");
       parts.push(bytes.slice().buffer as ArrayBuffer); byteCount += bytes.byteLength;
     },
     blob: () => new Blob(parts, { type: mimeType }),
