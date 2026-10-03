@@ -157,4 +157,48 @@ describe("real browser local database", () => {
       await afterRestart.close();
     }
   });
+
+  it("recovers byte-exact outgoing MLS staging across a storage worker restart", async () => {
+    const profileId = crypto.randomUUID();
+    profiles.add(profileId);
+    const roomId = "!browser-mls-staging:example.com" as RoomId;
+    const event = {
+      event_id: "$browser-mls-staging-event:example.com",
+      room_id: roomId,
+      sender: "@alice:example.com",
+      device_id: "browser-device",
+      type: "message.text",
+      created_at: Date.now(),
+      ciphertext: "single-use-mls-ciphertext",
+      metadata: { mls_epoch: 7 },
+      signature: "stable-device-signature",
+    } satisfies ClientEvent;
+    const payload = { version: 2, kind: "message", message_id: "$browser-mls-staging-message:example.com",
+      parts: [{ part_id: "staging:text", kind: "text", text: "durable exact admission" }] };
+    const previous = new Uint8Array([1, 2, 3]);
+    const next = new Uint8Array([4, 5, 6]);
+
+    const beforeRestart = new LocalDatabase(profileId);
+    try {
+      await beforeRestart.stageOutgoingEvent(event, "durable exact admission", payload, previous, next);
+      await expect(beforeRestart.stageOutgoingEvent(event, "durable exact admission", payload, previous, next)).resolves.toBeUndefined();
+      await expect(beforeRestart.stageOutgoingEvent({ ...event, ciphertext: "collision" }, "durable exact admission", payload, previous, next))
+        .rejects.toThrow("conflicts with different staged ciphertext or MLS state");
+    } finally { await beforeRestart.close(); }
+
+    const afterRestart = new LocalDatabase(profileId);
+    try {
+      const [staged] = await afterRestart.stagedOutgoingEvents();
+      expect(staged.event).toEqual(event);
+      expect(staged.plaintext).toBe("durable exact admission");
+      expect(staged.payload).toEqual(payload);
+      expect(Array.from(staged.previous_mls_state)).toEqual(Array.from(previous));
+      expect(Array.from(staged.next_mls_state)).toEqual(Array.from(next));
+
+      await afterRestart.promoteStagedOutgoingEvent(event.event_id);
+      expect(await afterRestart.stagedOutgoingEvents()).toEqual([]);
+      expect(await afterRestart.hasExactOutbox(event, "durable exact admission", payload)).toBe(true);
+      expect((await afterRestart.outbox(roomId))[0]?.event).toEqual(event);
+    } finally { await afterRestart.close(); }
+  });
 });
