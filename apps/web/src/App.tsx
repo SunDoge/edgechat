@@ -34,7 +34,7 @@ import { PendingMessageBubble } from "./components/PendingMessageBubble";
 import { RoomListItem } from "./components/RoomListItem";
 import { Avatar, Brand, Dialog, IconButton } from "./components/primitives";
 import { EncryptedRoomAvatar } from "./components/EncryptedRoomAvatar";
-import { AccountDeletionDialog, BackupDialog, DevicesDialog, type DeviceRevocationProgress, type DeviceRow } from "./components/UtilityDialogs";
+import { AccountDeletionDialog, DevicesDialog, type DeviceRevocationProgress, type DeviceRow } from "./components/UtilityDialogs";
 import { SearchDialog, searchRoomForScope, type LocalSearchResult, type SearchScope, type SearchStatus } from "./components/SearchDialog";
 import { ForwardDialog } from "./components/ForwardDialog";
 import { avatarColor, initials, memberName, roomTitle as baseRoomTitle, userName } from "./presenters";
@@ -105,6 +105,7 @@ import { operationErrorMessage, UserFacingError } from "./operation-errors";
 const AuthScreen = lazy(() => import("./components/AuthScreen").then((module) => ({ default: module.AuthScreen })));
 const DeviceLinkApprovalDialog = lazy(() => import("./components/DeviceLinkApprovalDialog").then((module) => ({ default: module.DeviceLinkApprovalDialog })));
 const PasskeyDialog = lazy(() => import("./components/PasskeyDialog").then((module) => ({ default: module.PasskeyDialog })));
+const BackupDialog = lazy(() => import("./components/BackupDialog").then((module) => ({ default: module.BackupDialog })));
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -2750,7 +2751,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     } finally { if (conversationExportAbort === controller) conversationExportAbort = null; setConversationExportBusy(false); }
   }
 
-  async function exportPortableBackup(password: string): Promise<void> {
+  async function exportPortableBackup(password: string, includeCachedMedia: boolean): Promise<void> {
     const prepared = await mutateMls(async () => {
       const currentSession = session(); const currentMls = mlsRef; const currentIdentity = identityRef;
       if (!currentSession || !currentIdentity || !currentMls) throw new UserFacingError(t("workspace.feedback.deviceCryptoNotReady"));
@@ -2768,8 +2769,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       return { databaseSnapshot, identity: portableIdentity, userId: currentSession.user_id,
         serverOrigin: location.origin, backupCheckpoint, password };
     });
-    const input = prepared;
-    const { databaseSnapshot } = prepared;
+    const canReadPersistentCaches = Boolean((navigator.storage as unknown as { getDirectory?: unknown })?.getDirectory);
+    const { createPortableBackupHistory } = await import("./portable-backup-content");
+    const packed = await createPortableBackupHistory(prepared.databaseSnapshot, includeCachedMedia && canReadPersistentCaches, attachmentCache, archiveSegmentCache);
+    const { databaseSnapshot: _, ...metadata } = prepared;
+    const input = { ...metadata, historyBundle: packed.historyBundle };
+    const { historyBundle } = input;
     const filename = `edgechat-backup-${new Date().toISOString().slice(0, 10)}.edgechat-backup`;
     const pickerWindow = window as ExportPickerWindow;
     let writable: ExportWritable | null = null;
@@ -2791,11 +2796,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             backup = staged.file; stagedCleanup = staged.cleanup;
           } catch (cause) {
             if (!isPortableBackupStorageError(cause)) throw cause;
-            if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new UserFacingError(t("backup.error.saveStorage"));
+            if (!canCreateMemoryPortableBackup(historyBundle.size)) throw new UserFacingError(t("backup.error.saveStorage"));
             backup = await createPortableBackupBlob(input);
           }
         } else {
-          if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new UserFacingError(t("backup.error.saveBrowser"));
+          if (!canCreateMemoryPortableBackup(historyBundle.size)) throw new UserFacingError(t("backup.error.saveBrowser"));
           backup = await createPortableBackupBlob(input);
         }
         const url = URL.createObjectURL(backup); const anchor = document.createElement("a");
@@ -2810,7 +2815,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       } catch (cause) {
         console.warn(JSON.stringify({ message: "local backup health record failed", error: cause instanceof Error ? cause.message : String(cause) }));
       }
-      setNotice(delivery === "confirmed_file" ? t("workspace.feedback.backupSaved") : t("workspace.feedback.backupDownloadStarted"));
+      setNotice(delivery === "confirmed_file"
+        ? t("workspace.feedback.backupSavedWithMedia", { attachments: packed.attachmentCount, segments: packed.segmentCount })
+        : t("workspace.feedback.backupDownloadStartedWithMedia", { attachments: packed.attachmentCount, segments: packed.segmentCount }));
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined);
       await stagedCleanup?.().catch(() => undefined);
@@ -2832,6 +2839,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!stagedBackup && !canCreateMemoryPortableBackup(file.size)) throw new UserFacingError(t("backup.error.restoreBrowser"));
     const contents = stagedBackup ?? await readPortableBackup(file, password, location.origin);
     try {
+      const { openPortableBackupHistory, restorePortableBackupMedia } = await import("./portable-backup-content");
+      const history = await openPortableBackupHistory(contents.historyBundle);
       const restoredIdentity = await core.importPortableIdentity(contents.identity);
       let validation: OpenMlsMessagingCore | null = null;
       try { validation = await OpenMlsMessagingCore.create(restoredIdentity.deviceId, restoredIdentity.mlsState); }
@@ -2842,6 +2851,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         user_id: contents.userId, password: restoredIdentity.accountCredential, device_id: restoredIdentity.deviceId,
         backup_checkpoint: contents.backupCheckpoint, ...publicKeys,
       });
+      await restorePortableBackupMedia(history.attachments, history.segments, attachmentCache, archiveSegmentCache);
       const previousIdentity = await loadIdentity(profileId);
       sessionStorage.setItem(restorePhaseKey, "preparing");
       sessionStorage.setItem(restoreUserKey, contents.userId);
@@ -2850,7 +2860,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       try {
         await saveIdentity(profileId, restoredIdentity);
         const restoreDatabase = db.unavailable ? new LocalDatabase(profileId) : db;
-        try { await restoreDatabase.stageRestoreSnapshot(contents.databaseSnapshot, contents.userId); }
+        try { await restoreDatabase.stageRestoreSnapshot(history.databaseSnapshot, contents.userId); }
         finally { if (restoreDatabase !== db) await restoreDatabase.close(); }
         staged = true;
         await clearLocalProfileToken(profileId); api.setToken(null);
@@ -3700,7 +3710,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={contactInviteOpen() && profile()}>{(currentProfile) => <ContactInviteDialog profile={currentProfile()} origin={location.origin} onClose={() => setContactInviteOpen(false)}/>}</Show>
       <Show when={profileOpen() && profile()}>{(currentProfile) => <ProfileDialog profile={currentProfile()} onSave={updateProfile} onClose={() => setProfileOpen(false)}/>}</Show>
       <Show when={deviceLinkOpen()}><Suspense fallback={<DeferredDialog id="device-link-loading" onClose={() => setDeviceLinkOpen(false)}/>}><DeviceLinkApprovalDialog api={api} onApprove={(linkId) => executeDeviceLink(linkId)} onCancelLink={cancelApprovedDeviceLink} onClose={() => setDeviceLinkOpen(false)}/></Suspense></Show>
-      <Show when={backupOpen()}><BackupDialog onCreate={exportPortableBackup} onClose={() => setBackupOpen(false)}/></Show>
+      <Show when={backupOpen()}><Suspense fallback={<DeferredDialog id="backup-loading" onClose={() => setBackupOpen(false)}/>}><BackupDialog onCreate={exportPortableBackup} onClose={() => setBackupOpen(false)}/></Suspense></Show>
       <Show when={passwordChangeOpen()}><PasswordChangeDialog onChange={changeAccountPassword} onClose={() => setPasswordChangeOpen(false)}/></Show>
       <Show when={passkeysOpen()}><Suspense fallback={<DeferredDialog id="passkeys-loading" onClose={() => setPasskeysOpen(false)}/>}><PasskeyDialog api={api} accountCredential={identity()?.accountCredential} onClose={() => setPasskeysOpen(false)}/></Suspense></Show>
       <Show when={accountDeletionOpen()}><AccountDeletionDialog accountCredential={identity()?.accountCredential} onDelete={deleteAccount} onClose={() => setAccountDeletionOpen(false)}/></Show>

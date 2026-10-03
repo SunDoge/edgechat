@@ -3,7 +3,7 @@ import { UserFacingError } from "./user-facing-error";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const MAGIC = encoder.encode("EDGEBK01");
+const MAGIC = encoder.encode("EDGEBK02");
 const DEFAULT_CHUNK_BYTES = 1024 * 1024;
 const DEFAULT_PBKDF2_ITERATIONS = 600_000;
 const MAX_BACKUP_BYTES = 2_147_483_648;
@@ -11,7 +11,7 @@ const MAX_HEADER_BYTES = 16_384;
 
 type BackupHeader = {
   format: "edgechat-portable-backup";
-  version: 1;
+  version: 2;
   created_at: number;
   kdf: { name: "PBKDF2-SHA-256"; salt: string; iterations: number };
   cipher: "AES-256-GCM-chunks";
@@ -21,11 +21,11 @@ type BackupHeader = {
 };
 
 type BackupMetadata = {
-  version: 1;
+  version: 2;
   user_id: string;
   server_origin: string;
-  database_format: "pglite-datadir-gzip-v1";
-  database_bytes: number;
+  payload_format: "edgechat-device-history-bundle-v3";
+  payload_bytes: number;
   backup_checkpoint: string;
   identity: PortableDeviceIdentity;
 };
@@ -34,14 +34,14 @@ export type PortableBackupContents = {
   userId: string;
   serverOrigin: string;
   identity: PortableDeviceIdentity;
-  databaseSnapshot: Blob;
+  historyBundle: Blob;
   createdAt: number;
   backupCheckpoint: string;
 };
 
 type BackupOptions = { chunkBytes?: number; iterations?: number };
 type ByteWriter = (bytes: Uint8Array) => Promise<void>;
-export type PortableBackupDatabaseContents = Omit<PortableBackupContents, "databaseSnapshot"> & { databaseBytes: number };
+export type PortableBackupPayloadContents = Omit<PortableBackupContents, "historyBundle"> & { payloadBytes: number };
 
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
@@ -73,7 +73,7 @@ async function deriveKey(password: string, salt: Uint8Array, iterations: number)
 function validateHeader(value: unknown): BackupHeader {
   if (!value || typeof value !== "object") throw UserFacingError.localized("backup.error.invalidFile");
   const header = value as Partial<BackupHeader>;
-  if (header.format !== "edgechat-portable-backup" || header.version !== 1 || header.cipher !== "AES-256-GCM-chunks"
+  if (header.format !== "edgechat-portable-backup" || header.version !== 2 || header.cipher !== "AES-256-GCM-chunks"
     || header.kdf?.name !== "PBKDF2-SHA-256" || typeof header.kdf.salt !== "string"
     || !Number.isSafeInteger(header.kdf.iterations) || Number(header.kdf.iterations) < 100_000 || Number(header.kdf.iterations) > 2_000_000
     || !Number.isSafeInteger(header.chunk_bytes) || Number(header.chunk_bytes) < 64 * 1024 || Number(header.chunk_bytes) > 2 * 1024 * 1024
@@ -87,8 +87,8 @@ function validateMetadata(value: unknown, expectedOrigin?: string): BackupMetada
   if (!value || typeof value !== "object") throw UserFacingError.localized("backup.error.invalidContents");
   const metadata = value as Partial<BackupMetadata>;
   const portableIdentity = metadata.identity as Partial<PortableDeviceIdentity> | undefined;
-  if (metadata.version !== 1 || metadata.database_format !== "pglite-datadir-gzip-v1"
-    || !Number.isSafeInteger(metadata.database_bytes) || Number(metadata.database_bytes) <= 0 || Number(metadata.database_bytes) > MAX_BACKUP_BYTES
+  if (metadata.version !== 2 || metadata.payload_format !== "edgechat-device-history-bundle-v3"
+    || !Number.isSafeInteger(metadata.payload_bytes) || Number(metadata.payload_bytes) <= 0 || Number(metadata.payload_bytes) > MAX_BACKUP_BYTES
     || typeof metadata.user_id !== "string" || typeof metadata.server_origin !== "string"
     || typeof metadata.backup_checkpoint !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(metadata.backup_checkpoint) || !portableIdentity
     || typeof portableIdentity.device_id !== "string" || portableIdentity.device_id.length === 0
@@ -100,31 +100,31 @@ function validateMetadata(value: unknown, expectedOrigin?: string): BackupMetada
 }
 
 export async function writePortableBackup(
-  input: { databaseSnapshot: Blob; identity: PortableDeviceIdentity; userId: string; serverOrigin: string; backupCheckpoint: string; password: string },
+  input: { historyBundle: Blob; identity: PortableDeviceIdentity; userId: string; serverOrigin: string; backupCheckpoint: string; password: string },
   write: ByteWriter,
   options: BackupOptions = {},
 ): Promise<{ createdAt: number; bytes: number }> {
   const chunkBytes = options.chunkBytes ?? DEFAULT_CHUNK_BYTES;
   const iterations = options.iterations ?? DEFAULT_PBKDF2_ITERATIONS;
   if (input.password.length < 12) throw UserFacingError.localized("backup.error.passwordTooShort");
-  if (input.databaseSnapshot.size === 0 || input.databaseSnapshot.size > MAX_BACKUP_BYTES) throw UserFacingError.localized("backup.error.databaseInvalid");
+  if (input.historyBundle.size === 0 || input.historyBundle.size > MAX_BACKUP_BYTES) throw UserFacingError.localized("backup.error.payloadInvalid");
   if (chunkBytes < 64 * 1024 || chunkBytes > 2 * 1024 * 1024 || iterations < 100_000 || iterations > 2_000_000) throw new Error("Invalid backup parameters");
 
   const metadata = encoder.encode(JSON.stringify({
-    version: 1,
+    version: 2,
     user_id: input.userId,
     server_origin: input.serverOrigin,
-    database_format: "pglite-datadir-gzip-v1",
-    database_bytes: input.databaseSnapshot.size,
+    payload_format: "edgechat-device-history-bundle-v3",
+    payload_bytes: input.historyBundle.size,
     backup_checkpoint: input.backupCheckpoint,
     identity: input.identity,
   } satisfies BackupMetadata));
-  const payload = new Blob([ownedBuffer(u32(metadata.length)), ownedBuffer(metadata), input.databaseSnapshot]);
-  if (payload.size > MAX_BACKUP_BYTES) throw UserFacingError.localized("backup.error.databaseTooLarge");
+  const payload = new Blob([ownedBuffer(u32(metadata.length)), ownedBuffer(metadata), input.historyBundle]);
+  if (payload.size > MAX_BACKUP_BYTES) throw UserFacingError.localized("backup.error.payloadTooLarge");
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const createdAt = Date.now();
   const header: BackupHeader = {
-    format: "edgechat-portable-backup", version: 1, created_at: createdAt,
+    format: "edgechat-portable-backup", version: 2, created_at: createdAt,
     kdf: { name: "PBKDF2-SHA-256", salt: encodeBase64Url(salt), iterations },
     cipher: "AES-256-GCM-chunks", chunk_bytes: chunkBytes,
     chunk_count: Math.ceil(payload.size / chunkBytes), plaintext_bytes: payload.size,
@@ -152,12 +152,12 @@ export async function createPortableBackupBlob(
   return new Blob(parts, { type: "application/vnd.edgechat.backup" });
 }
 
-export async function streamPortableBackupDatabase(
+export async function streamPortableBackupPayload(
   file: Blob,
   password: string,
   write: ByteWriter,
   expectedOrigin?: string,
-): Promise<PortableBackupDatabaseContents> {
+): Promise<PortableBackupPayloadContents> {
   if (file.size < MAGIC.length + 4 || file.size > MAX_BACKUP_BYTES + 2 * 1024 * 1024) throw UserFacingError.localized("backup.error.invalidFile");
   const prefix = new Uint8Array(await file.slice(0, MAGIC.length + 4).arrayBuffer());
   if (!MAGIC.every((byte, index) => prefix[index] === byte)) throw UserFacingError.localized("backup.error.invalidFile");
@@ -176,7 +176,7 @@ export async function streamPortableBackupDatabase(
   let bufferedMetadataBytes = 0;
   let metadataLength: number | null = null;
   let metadata: BackupMetadata | null = null;
-  let databaseBytes = 0;
+  let payloadBytes = 0;
   for (let index = 0; index < header.chunk_count; index += 1) {
     if (offset + 16 > file.size) throw UserFacingError.localized("backup.error.passwordOrDamage");
     const record = new Uint8Array(await file.slice(offset, offset + 16).arrayBuffer());
@@ -208,25 +208,25 @@ export async function streamPortableBackupDatabase(
         try { parsed = JSON.parse(decoder.decode(metadataBytes.subarray(4, 4 + metadataLength))); }
         catch { throw UserFacingError.localized("backup.error.invalidContents"); }
         metadata = validateMetadata(parsed, expectedOrigin);
-        const databaseStart = 4 + metadataLength;
-        if (metadataBytes.byteLength > databaseStart) {
-          const bytes = metadataBytes.subarray(databaseStart);
-          await write(bytes); databaseBytes += bytes.byteLength;
+        const payloadStart = 4 + metadataLength;
+        if (metadataBytes.byteLength > payloadStart) {
+          const bytes = metadataBytes.subarray(payloadStart);
+          await write(bytes); payloadBytes += bytes.byteLength;
         }
         metadataParts = []; bufferedMetadataBytes = 0;
       }
     } else {
-      await write(plaintext); databaseBytes += plaintext.byteLength;
+      await write(plaintext); payloadBytes += plaintext.byteLength;
     }
   }
   if (offset !== file.size || plaintextBytes !== header.plaintext_bytes) throw UserFacingError.localized("backup.error.incompleteFile");
-  if (!metadata || databaseBytes !== metadata.database_bytes) throw UserFacingError.localized("backup.error.invalidContents");
-  return { userId: metadata.user_id, serverOrigin: metadata.server_origin, identity: metadata.identity, databaseBytes, createdAt: header.created_at, backupCheckpoint: metadata.backup_checkpoint };
+  if (!metadata || payloadBytes !== metadata.payload_bytes) throw UserFacingError.localized("backup.error.invalidContents");
+  return { userId: metadata.user_id, serverOrigin: metadata.server_origin, identity: metadata.identity, payloadBytes, createdAt: header.created_at, backupCheckpoint: metadata.backup_checkpoint };
 }
 
 export async function readPortableBackup(file: Blob, password: string, expectedOrigin?: string): Promise<PortableBackupContents> {
   const parts: BlobPart[] = [];
-  const contents = await streamPortableBackupDatabase(file, password, async (bytes) => { parts.push(ownedBuffer(bytes)); }, expectedOrigin);
-  const { databaseBytes: _, ...metadata } = contents;
-  return { ...metadata, databaseSnapshot: new Blob(parts) };
+  const contents = await streamPortableBackupPayload(file, password, async (bytes) => { parts.push(ownedBuffer(bytes)); }, expectedOrigin);
+  const { payloadBytes: _, ...metadata } = contents;
+  return { ...metadata, historyBundle: new Blob(parts) };
 }

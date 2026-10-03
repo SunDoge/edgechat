@@ -17,7 +17,7 @@ const identity: PortableDeviceIdentity = {
 
 function backupInput(bytes = 150_000) {
   return {
-    databaseSnapshot: new Blob([new Uint8Array(bytes).fill(7)]),
+    historyBundle: new Blob([new Uint8Array(bytes).fill(7)]),
     identity,
     userId: "@alice:example.com",
     serverOrigin: "https://chat.example.com",
@@ -83,7 +83,7 @@ describe("portable backup OPFS staging", () => {
     const staged = await stagePortableBackup(PROFILE, backupInput(), { rootProvider: async () => opfs.root, backupOptions: { chunkBytes: 64 * 1024, iterations: 100_000 } });
     expect(opfs.writes()).toBeGreaterThan(6);
     const restored = await readPortableBackup(staged.file, PASSWORD, "https://chat.example.com");
-    expect(restored.databaseSnapshot.size).toBe(150_000);
+    expect(restored.historyBundle.size).toBe(150_000);
     expect(restored.userId).toBe("@alice:example.com");
     await staged.cleanup();
     expect([...opfs.directories.values()][0]?.size).toBe(0);
@@ -100,8 +100,8 @@ describe("portable backup OPFS staging", () => {
     const opfs = fakeOpfs();
     const staged = await stagePortableBackupRestore(PROFILE, encrypted, PASSWORD, "https://chat.example.com", { rootProvider: async () => opfs.root });
     expect(opfs.writes()).toBeGreaterThan(2);
-    expect(staged.databaseSnapshot.size).toBe(150_000);
-    expect(new Uint8Array(await staged.databaseSnapshot.slice(0, 3).arrayBuffer())).toEqual(new Uint8Array([7, 7, 7]));
+    expect(staged.historyBundle.size).toBe(150_000);
+    expect(new Uint8Array(await staged.historyBundle.slice(0, 3).arrayBuffer())).toEqual(new Uint8Array([7, 7, 7]));
     await staged.cleanup();
     expect([...opfs.directories.values()][0]?.size).toBe(0);
   });

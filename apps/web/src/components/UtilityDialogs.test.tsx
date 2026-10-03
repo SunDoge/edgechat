@@ -1,6 +1,7 @@
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AccountDeletionDialog, BackupDialog, DevicesDialog } from "./UtilityDialogs";
+import { AccountDeletionDialog, DevicesDialog } from "./UtilityDialogs";
+import { BackupDialog } from "./BackupDialog";
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); });
@@ -38,7 +39,20 @@ describe("account safety dialogs", () => {
   it("states that a portable backup does not duplicate messages into cloud storage", () => {
     dispose = render(() => <BackupDialog onCreate={vi.fn()} onClose={vi.fn()}/>, root());
     expect(document.body.textContent).toContain("服务器仅保存一个不含消息内容的防回滚检查点");
-    expect(document.body.textContent).toContain("不复制消息或附件");
+    expect(document.body.textContent).toContain("不会上传备份或复制云端对象");
+    expect(document.querySelector<HTMLInputElement>("#backup-cached-media")?.checked).toBe(true);
+  });
+
+  it("allows a smaller database-only backup only through an explicit choice", async () => {
+    const onCreate = vi.fn(async () => undefined);
+    dispose = render(() => <BackupDialog onCreate={onCreate} onClose={vi.fn()}/>, root());
+    const include = document.querySelector<HTMLInputElement>("#backup-cached-media")!;
+    include.click();
+    for (const [selector, value] of [["#backup-password", "correct horse battery"], ["#backup-confirmation", "correct horse battery"]] as const) {
+      const input = document.querySelector<HTMLInputElement>(selector)!; input.value = value; input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    }
+    document.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    await vi.waitFor(() => expect(onCreate).toHaveBeenCalledWith("correct horse battery", false));
   });
 
   it("keeps cloud object usage separate and itemized", () => {

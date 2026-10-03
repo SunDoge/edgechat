@@ -1,10 +1,10 @@
-import { streamPortableBackupDatabase, writePortableBackup, type PortableBackupContents } from "./portable-backup";
+import { streamPortableBackupPayload, writePortableBackup, type PortableBackupContents } from "./portable-backup";
 import { UserFacingError } from "./user-facing-error";
 
 const EXPORT_DIRECTORY_NAME = "edgechat-portable-backup-staging-v1";
 const RESTORE_DIRECTORY_NAME = "edgechat-portable-backup-restore-v1";
 const BACKUP_SUFFIX = ".edgechat-backup";
-const RESTORE_SUFFIX = ".pglite-gzip";
+const RESTORE_SUFFIX = ".history-bundle";
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
 
@@ -106,17 +106,17 @@ export async function stagePortableBackupRestore(
   const writable = await handle.createWritable();
   let closed = false;
   try {
-    const contents = await streamPortableBackupDatabase(
+    const contents = await streamPortableBackupPayload(
       encryptedBackup,
       password,
       async (bytes) => writable.write(bytes.slice().buffer as ArrayBuffer),
       expectedOrigin,
     );
     await writable.close(); closed = true;
-    const databaseSnapshot = await handle.getFile();
-    if (databaseSnapshot.size !== contents.databaseBytes) throw UserFacingError.localized("backup.error.invalidContents");
-    const { databaseBytes: _, ...metadata } = contents;
-    return { ...metadata, databaseSnapshot, cleanup: () => removeExact(directory, filename) };
+    const historyBundle = await handle.getFile();
+    if (historyBundle.size !== contents.payloadBytes) throw UserFacingError.localized("backup.error.invalidContents");
+    const { payloadBytes: _, ...metadata } = contents;
+    return { ...metadata, historyBundle, cleanup: () => removeExact(directory, filename) };
   } catch (cause) {
     if (!closed) await writable.abort(cause).catch(() => undefined);
     await removeExact(directory, filename).catch(() => undefined);
