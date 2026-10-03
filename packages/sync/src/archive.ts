@@ -1,4 +1,4 @@
-import type { RoomEvent, RoomId } from "@edgechat/protocol";
+import { isRoomEventEnvelope, type RoomEvent, type RoomId } from "@edgechat/protocol";
 import { compress as zstdCompress, decompress as zstdDecompress, init as initZrip } from "@paddor/zrip";
 
 const MAGIC = new Uint8Array([0x45, 0x43, 0x41, 0x52]); // ECAR
@@ -78,6 +78,7 @@ export async function buildSegment(
   if (keyEnvelope.length < 64 || keyEnvelope.length > MAX_KEY_ENVELOPE_BYTES) throw new Error("Invalid archive key envelope length");
   for (let index = 0; index < events.length; index++) {
     const event = events[index];
+    if (!isRoomEventEnvelope(event)) throw new Error("Archive input contains an invalid room event envelope");
     if (event.room_id !== roomId || !Number.isSafeInteger(event.seq) || event.seq < 1 || event.seq > 0xffff_ffff || (index > 0 && event.seq !== events[index - 1].seq + 1)) {
       throw new Error("Archive events must be a contiguous sequence for one room");
     }
@@ -193,7 +194,9 @@ export async function decodeSegmentIndex(roomId: RoomId, segmentId: string, encr
 export async function decodeSegmentChunk(roomId: RoomId, segmentId: string, chunkIndex: number, encrypted: Uint8Array<ArrayBuffer>, segmentKey: Uint8Array<ArrayBuffer>, uncompressedLength: number): Promise<RoomEvent[]> {
   const key = await deriveKey(segmentKey, chunkIndex, ["decrypt"]);
   const plaintext = decoder.decode(await decompress(await decryptRecord(key, encrypted, aad(roomId, segmentId, chunkIndex)), uncompressedLength, MAX_CHUNK_BYTES));
-  return plaintext.split("\n").filter(Boolean).map((line) => JSON.parse(line) as RoomEvent);
+  const events = plaintext.split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown);
+  if (!events.every(isRoomEventEnvelope)) throw new Error("Archive chunk contains an invalid room event envelope");
+  return events;
 }
 
 export function rangesForSequences(index: SegmentIndex, sequences: number[], dataOffset = 0): Array<{ chunk: number; offset: number; length: number }> {

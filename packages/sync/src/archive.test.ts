@@ -60,6 +60,13 @@ describe("range-decodable archive segments", () => {
     await expect(buildSegment(roomId, "segment-5", broken, key, keyEnvelope)).rejects.toThrow("contiguous sequence");
   });
 
+  it("rejects a malformed signed-event envelope before archive upload", async () => {
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const malformed = [{ ...events[0], event_id: "local-only" }] as unknown as RoomEvent[];
+    await expect(buildSegment(roomId, "segment-invalid-envelope", malformed, key, keyEnvelope))
+      .rejects.toThrow("invalid room event envelope");
+  });
+
   it("cross-checks chunk layout, sequence mappings, and object size", async () => {
     const key = crypto.getRandomValues(new Uint8Array(32));
     const built = await buildSegment(roomId, "segment-6", events, key, keyEnvelope, 180);

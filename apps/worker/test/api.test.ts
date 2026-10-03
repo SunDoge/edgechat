@@ -1022,8 +1022,11 @@ describe("single-server durable delivery", () => {
     expect(retryLeaseResponse.status).toBe(201);
     const retryLease = await retryLeaseResponse.json() as { token: string; generation: number };
 
+    const remoteRepairEventId = eventId("remote.test");
     const remoteRepair = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/repair/events`, {
-      method: "POST", headers, body: JSON.stringify({ token: retryLease.token, generation: retryLease.generation, events: [{ ...accepted, event_id: eventId("remote.test") }] }),
+      method: "POST", headers, body: JSON.stringify({ token: retryLease.token, generation: retryLease.generation, events: [{
+        ...accepted, event_id: remoteRepairEventId, acceptance_receipt: { ...accepted.acceptance_receipt, event_id: remoteRepairEventId },
+      }] }),
     });
     expect(remoteRepair.status).toBe(400);
     expect(await remoteRepair.json()).toMatchObject({ code: "federation_disabled" });
@@ -1741,6 +1744,13 @@ describe("single-server durable delivery", () => {
     const remoteEventId = await submitWithEventId(eventId("remote.test"));
     expect(remoteEventId.status).toBe(400);
     expect(await remoteEventId.json()).toMatchObject({ code: "federation_disabled" });
+    const nestedMetadataUnsigned = { ...unsigned, event_id: eventId(), metadata: { nested: { plaintext: "must-not-be-stored" } } } as unknown as Omit<ClientEvent, "signature">;
+    const nestedMetadataSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(nestedMetadataUnsigned)));
+    const nestedMetadata = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, {
+      method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...nestedMetadataUnsigned, signature: nestedMetadataSignature }),
+    });
+    expect(nestedMetadata.status).toBe(400);
+    expect(await nestedMetadata.json()).toMatchObject({ code: "invalid_event" });
     expect(await env.DB.prepare("SELECT count(*) AS count FROM room_events WHERE room_id = ?").bind(roomId).first()).toEqual({ count: 0 });
     expect((await env.ARCHIVE.list()).objects).toHaveLength(objectsBeforeRejectedEvents);
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(unsigned)));

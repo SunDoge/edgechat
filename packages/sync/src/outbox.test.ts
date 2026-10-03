@@ -62,6 +62,18 @@ describe("OutboxEngine", () => {
     expect(db.calls).toEqual(["sending", "saved", "removed"]);
   });
 
+  it("fails closed when server acceptance differs from the signed outbox envelope", async () => {
+    const db = database([item]);
+    const sendEvent = vi.fn(async () => ({ event: { ...event, seq: 7, ciphertext: "server-substituted-ciphertext" } as RoomEvent }));
+    const engine = new OutboxEngine({ sendEvent }, db.value, () => true);
+    await engine.start(); engine.stop();
+
+    expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
+    expect(db.value.removeOutbox).not.toHaveBeenCalled();
+    expect(db.value.deferOutbox).toHaveBeenCalledWith(item.event_id, "Server acceptance did not match the signed outbox envelope", null);
+    expect(db.calls).toEqual(["sending", "deferred"]);
+  });
+
   it("defers network failures but leaves authorization failures for manual retry", async () => {
     const transientDb = database([item]);
     const transient = new OutboxEngine({ sendEvent: vi.fn(async () => { throw new Error("offline"); }) }, transientDb.value, () => true);

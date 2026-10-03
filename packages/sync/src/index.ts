@@ -1,5 +1,5 @@
 import type { LocalDatabase } from "@edgechat/db";
-import { assertCompatibleServerProtocol, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserProfile } from "@edgechat/protocol";
+import { assertCompatibleServerProtocol, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserProfile } from "@edgechat/protocol";
 import { decodeSegmentChunk, decodeSegmentHeader, decodeSegmentIndex, rangesForSequences, SEGMENT_HEADER_BYTES } from "./archive";
 
 export class ApiError extends Error {
@@ -628,6 +628,13 @@ export class LocalProjectionPersistenceError extends Error {
   }
 }
 
+export class InvalidRoomEventEnvelopeError extends Error {
+  constructor() {
+    super("Received an invalid room event envelope");
+    this.name = "InvalidRoomEventEnvelopeError";
+  }
+}
+
 export class SyncEngine extends EventTarget {
   private running = false;
   private startTask: Promise<void> | null = null;
@@ -1018,6 +1025,7 @@ export class SyncEngine extends EventTarget {
   }
 
   private async ingestOne(event: RoomEvent): Promise<void> {
+    if (!isRoomEventEnvelope(event)) throw new InvalidRoomEventEnvelopeError();
     let sequence = await this.db.roomSequenceState(event.room_id);
     if (!sequence && this.prepareRoom) {
       await this.prepareRoom(event.room_id);

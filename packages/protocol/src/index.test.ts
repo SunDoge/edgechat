@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
+import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -63,6 +63,17 @@ describe("federation-ready identifiers", () => {
     expect(new TextDecoder().decode(canonicalSignedEventBytes(event))).toContain('\"signature\":\"signature\"');
     const receipt = { version: 1 as const, key_id: "v1", room_id: event.room_id, seq: 7, event_id: event.event_id, event_hash: "hash", retention_generation: 2, accepted_at: 3 };
     expect(JSON.parse(new TextDecoder().decode(canonicalAcceptanceReceiptBytes(receipt)))).toEqual(receipt);
+  });
+
+  it("validates an ordered ciphertext envelope and binds its optional acceptance receipt", () => {
+    const event = { event_id: "$01234567:example.com", room_id: "!0123456789abcdef:example.com", seq: 7, sender: "@alice:example.com", device_id: "phone", type: "message.text", created_at: 1, ciphertext: "cipher", metadata: { mls_epoch: 1, attachment_ids: ["opaque"] }, signature: "signature" } as const;
+    expect(isClientEventEnvelope(event)).toBe(true);
+    expect(isRoomEventEnvelope(event)).toBe(true);
+    expect(isRoomEventEnvelope({ ...event, event_id: "local-only" })).toBe(false);
+    expect(isRoomEventEnvelope({ ...event, room_id: "!short:example.com" })).toBe(false);
+    expect(isRoomEventEnvelope({ ...event, metadata: { nested: { plaintext: true } } })).toBe(false);
+    expect(isRoomEventEnvelope({ ...event, acceptance_receipt: { version: 1, key_id: "v1", room_id: event.room_id, seq: 8, event_id: event.event_id, event_hash: "hash", retention_generation: 1, accepted_at: 2, mac: "mac" } })).toBe(false);
+    expect(isRoomEventEnvelope({ ...event, acceptance_receipt: { version: 1, key_id: "v1", room_id: event.room_id, seq: event.seq, event_id: event.event_id, event_hash: "hash", retention_generation: 1, accepted_at: 2, mac: "mac" } })).toBe(true);
   });
 });
 

@@ -326,6 +326,48 @@ export function isNamespacedEventId(value: string): value is EventId {
 export function isNamespacedMessageId(value: string): value is MessageId {
   return isNamespacedEventId(value);
 }
+
+function isEventMetadata(value: unknown): value is ClientEvent["metadata"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length > 64) return false;
+  return entries.every(([key, item]) => key.length > 0 && key.length <= 96 && (
+    item === null || typeof item === "boolean"
+    || (typeof item === "number" && Number.isSafeInteger(item))
+    || (typeof item === "string" && item.length <= 4_096)
+    || (Array.isArray(item) && item.length <= 128 && item.every((entry) => typeof entry === "string" && entry.length <= 256))
+  ));
+}
+
+export function isClientEventEnvelope(value: unknown): value is ClientEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const event = value as Partial<ClientEvent>;
+  if (typeof event.event_id !== "string" || event.event_id.length > 96 || !isNamespacedEventId(event.event_id)
+    || typeof event.room_id !== "string" || event.room_id.length > 255 || !isNamespacedRoomId(event.room_id)
+    || typeof event.sender !== "string" || event.sender.length > 255 || !isNamespacedUserId(event.sender)
+    || typeof event.device_id !== "string" || event.device_id.length < 1 || event.device_id.length > 96
+    || !roomEventTypes.includes(event.type as RoomEventType)
+    || !Number.isSafeInteger(event.created_at) || Number(event.created_at) < 0
+    || typeof event.ciphertext !== "string" || event.ciphertext.length > 200_000
+    || typeof event.signature !== "string" || event.signature.length < 1 || event.signature.length > 1_024
+    || !isEventMetadata(event.metadata)) return false;
+  return true;
+}
+
+export function isRoomEventEnvelope(value: unknown): value is RoomEvent {
+  if (!isClientEventEnvelope(value)) return false;
+  const event = value as RoomEvent;
+  if (!Number.isSafeInteger(event.seq) || event.seq < 1) return false;
+  if (event.acceptance_receipt === undefined) return true;
+  const receipt = event.acceptance_receipt as Partial<EventAcceptanceReceipt>;
+  return receipt.version === 1 && receipt.room_id === event.room_id && receipt.event_id === event.event_id && receipt.seq === event.seq
+    && typeof receipt.key_id === "string" && receipt.key_id.length > 0 && receipt.key_id.length <= 64
+    && typeof receipt.event_hash === "string" && receipt.event_hash.length > 0 && receipt.event_hash.length <= 1_024
+    && Number.isSafeInteger(receipt.retention_generation) && Number(receipt.retention_generation) >= 1
+    && Number.isSafeInteger(receipt.accepted_at) && Number(receipt.accepted_at) >= 0
+    && typeof receipt.mac === "string" && receipt.mac.length > 0 && receipt.mac.length <= 1_024;
+}
+
 export function isMessageDeletePayload(value: unknown): value is MessageDeletePayload {
   if (!value || typeof value !== "object") return false;
   const payload = value as Partial<MessageDeletePayload>;
