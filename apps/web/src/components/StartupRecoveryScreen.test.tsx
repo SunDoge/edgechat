@@ -2,7 +2,7 @@ import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BackupRestoreForm } from "./BackupRestoreForm";
 import { StartupRecoveryScreen } from "./StartupRecoveryScreen";
-import { INTERRUPTED_RESTORE_FAILURE } from "../startup-recovery";
+import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE } from "../startup-recovery";
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); });
@@ -12,7 +12,7 @@ describe("StartupRecoveryScreen", () => {
     const retry = vi.fn(); const manage = vi.fn();
     const root = document.createElement("div"); document.body.append(root);
     dispose = render(() => <StartupRecoveryScreen
-      failure={{ kind: "local-database", code: "LOCAL_DATABASE_UNAVAILABLE", title: "本机消息库未能安全打开", summary: "你的本机记录没有被自动删除。", primaryAction: "重新尝试打开", primaryIntent: "retry" }}
+      failure={describeStartupFailure(new Error("OPFS access denied"))}
       profileName="Alice" onRetry={retry} onManageProfiles={manage} onRestoreBackup={vi.fn()}/>, root);
     expect(root.textContent).toContain("你的本机记录没有被自动删除");
     expect(root.textContent).toContain("不要通过清除浏览器数据来尝试修复");
@@ -26,7 +26,7 @@ describe("StartupRecoveryScreen", () => {
   it("explains that backup validation happens before replacement", () => {
     const root = document.createElement("div"); document.body.append(root);
     dispose = render(() => <StartupRecoveryScreen
-      failure={{ kind: "unknown", code: "STARTUP_UNEXPECTED_FAILURE", title: "暂时无法打开", summary: "本机数据仍保留。", primaryAction: "重试", primaryIntent: "retry" }}
+      failure={describeStartupFailure(new Error("unknown startup problem"))}
       profileName="Alice" onRetry={vi.fn()} onManageProfiles={vi.fn()} onRestoreBackup={vi.fn()}/>, root);
     [...root.querySelectorAll("button")].find((button) => button.textContent?.includes("从加密备份恢复"))?.click();
     expect(root.textContent).toContain("备份会先在新的本机存储区中完整验证");

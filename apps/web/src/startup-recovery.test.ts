@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { describeStartupFailure, INTERRUPTED_RESTORE_FAILURE } from "./startup-recovery";
+import { translate } from "./i18n";
 
 describe("startup recovery classification", () => {
   it("requires an update instead of attempting to downgrade a newer local schema", () => {
     expect(describeStartupFailure(new Error("Local database schema 4 is newer than this client supports (3)"))).toEqual({
       kind: "newer-client-required",
       code: "LOCAL_SCHEMA_NEWER",
-      title: "需要更新 EdgeChat",
-      summary: "这份本机记录由更新版本的应用写入。当前版本没有尝试降级或修改它，请更新后重新打开。",
-      primaryAction: "检查更新并重试",
+      titleKey: "startupRecovery.schema.title",
+      summaryKey: "startupRecovery.schema.summary",
+      primaryActionKey: "startupRecovery.action.update",
       primaryIntent: "retry",
     });
   });
@@ -22,9 +23,9 @@ describe("startup recovery classification", () => {
     expect(describeStartupFailure(new Error("Local database startup timed out"))).toEqual({
       kind: "local-database",
       code: "LOCAL_DATABASE_STARTUP_TIMEOUT",
-      title: "打开本机消息库用时过长",
-      summary: "浏览器没有在预期时间内完成安全检查。后台数据库任务已停止，现有本机记录没有被删除。",
-      primaryAction: "重新打开应用",
+      titleKey: "startupRecovery.timeout.title",
+      summaryKey: "startupRecovery.timeout.summary",
+      primaryActionKey: "startupRecovery.action.reopen",
       primaryIntent: "retry",
     });
   });
@@ -38,7 +39,7 @@ describe("startup recovery classification", () => {
   it("never copies an unknown raw error into user-facing recovery text", () => {
     const secret = "private-path/secret-token";
     const failure = describeStartupFailure(new Error(secret));
-    expect(JSON.stringify(failure)).not.toContain(secret);
+    expect(`${translate(failure.titleKey)} ${translate(failure.summaryKey)} ${translate(failure.primaryActionKey)}`).not.toContain(secret);
     expect(failure.code).toBe("STARTUP_UNEXPECTED_FAILURE");
   });
 
@@ -46,7 +47,7 @@ describe("startup recovery classification", () => {
     expect(INTERRUPTED_RESTORE_FAILURE).toMatchObject({
       code: "LOCAL_RESTORE_INTERRUPTED",
       primaryIntent: "restore",
-      primaryAction: "重新选择备份",
+      primaryActionKey: "startupRecovery.action.selectBackup",
     });
   });
 });

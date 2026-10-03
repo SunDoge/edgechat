@@ -980,7 +980,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (selectedRef) await refreshRoomProjection(selectedRef);
         await Promise.all([refreshUnreadCounts(), refreshRoomListActivities()]);
         if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-        if (showNotice) setNotice(`已从这台设备清理 ${deleted} 条到期消息`);
+        if (showNotice) setNotice(t("workspace.feedback.expiredMessagesPurged", { count: deleted }));
       }
       return deleted;
     }).finally(() => { retentionRun = null; });
@@ -994,7 +994,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (selectedRef) await refreshRoomProjection(selectedRef);
         await Promise.all([refreshUnreadCounts(), refreshRoomListActivities()]);
         if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-        if (showNotice) setNotice(`已从这台设备移除 ${deleted} 条到期消息`);
+        if (showNotice) setNotice(t("workspace.feedback.retentionMessagesPurged", { count: deleted }));
       }
       return deleted;
     }).finally(() => { messageExpiryRun = null; });
@@ -1167,7 +1167,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await Promise.all([enforceLocalRetention(true), enforceMessageExpiry(false)]);
         if (!offlineBootstrap) { await resumeRoomMembershipChanges(); await resumeDeviceLinks(currentMls); await resumeDeviceRevocations(currentMls); await resumeAccountRemovals(); }
       } catch (cause) {
-        if (cause instanceof ApiError && cause.code === "account_deletion_pending") await clearLocalAccount("账户已在其他设备上停用；本机消息和密钥已清除");
+        if (cause instanceof ApiError && cause.code === "account_deletion_pending") await clearLocalAccount(t("workspace.feedback.accountDisabledElsewhere"));
         else if (cause instanceof ApiError && cause.status === 401) {
           const stored = await loadIdentity(profileId);
           const cached = stored ? cachedSessionForDevice(await db.cachedSession<SessionIdentity>(), stored.deviceId) : null;
@@ -1203,15 +1203,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setRooms((current) => current.map((room) => room.room_id === event.room_id ? { ...room, current_seq: Math.max(room.current_seq, event.seq) } : room));
       if (event.type === "control.message-expiry") {
         void refreshMessageExpiryPolicies();
-        if (event.sender !== currentSession.user_id) setNotice("这段对话的自动消失设置已更新");
+        if (event.sender !== currentSession.user_id) setNotice(t("workspace.feedback.expiryPolicyUpdated"));
       }
       if (event.type === "control.room.profile") {
         void refreshRoomProfile(event.room_id);
-        if (event.sender !== currentSession.user_id) setNotice("群聊资料已更新");
+        if (event.sender !== currentSession.user_id) setNotice(t("workspace.feedback.roomProfileUpdated"));
       }
       if (event.type === "control.owner.transfer") {
         void loadRooms(currentMls);
-        if (event.sender !== currentSession.user_id) setNotice("群主已变更");
+        if (event.sender !== currentSession.user_id) setNotice(t("workspace.feedback.roomOwnerUpdated"));
       }
       if (["control.device.add", "control.device.revoke", "control.member.add", "control.member.remove", "control.group.commit"].includes(event.type)) void refreshRoomIdentityTrust(event.room_id);
       if (event.type.startsWith("message.")) void refreshRoomListActivities();
@@ -1242,8 +1242,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       void resumeAccountRemovals();
       void resumeRoomMembershipChanges();
     };
-    const accountDeletion = () => { void clearLocalAccount("账户已停用；本机消息和密钥已清除"); };
-    const deviceRevoked = () => { void clearLocalAccount("这台设备已被撤销；本机消息和密钥已清除"); };
+    const accountDeletion = () => { void clearLocalAccount(t("workspace.feedback.accountDisabled")); };
+    const deviceRevoked = () => { void clearLocalAccount(t("workspace.feedback.deviceRevoked")); };
     const sessionExpired = () => requireFreshSession();
     const unavailableRoom = () => { void loadRooms(currentMls).catch(() => setConnectionState("offline")); };
     const deviceEvent = (received: Event) => {
@@ -1267,7 +1267,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (detail.pending) {
         mlsProjectionBarrier.add(detail.eventId);
         setLocalProjectionRecoveries((current) => ({ ...current, [detail.eventId]: detail.roomId }));
-        if (!wasPending) setNotice("本机记录暂时无法写入；已暂停新的加密操作并自动重试");
+        if (!wasPending) setNotice(t("workspace.feedback.localWritePaused"));
         return;
       }
       mlsProjectionBarrier.settle(detail.eventId);
@@ -1275,7 +1275,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (!(detail.eventId in current)) return current;
         const next = { ...current }; delete next[detail.eventId]; return next;
       });
-      if (wasPending) setNotice("本机记录已恢复，可以继续发送消息");
+      if (wasPending) setNotice(t("workspace.feedback.localWriteRecovered"));
       if (!mlsProjectionBarrier.isBlocked() && needsRemoteRoomRefresh && navigator.onLine && mlsRef) {
         needsRemoteRoomRefresh = false;
         void loadRooms(mlsRef).catch(() => { needsRemoteRoomRefresh = true; });
@@ -1288,7 +1288,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       peerRecoveryNeeds.set(roomId, { processedThrough: detail.processedThrough, requiredThrough: detail.requiredThrough });
       setHistoryRecoveryRooms((current) => new Set(current).add(roomId));
       setHistoryRecoveryState(roomId, { phase: "requesting" });
-      setNotice("正在等待另一台仍有记录的设备补齐此对话；其他对话会继续同步");
+      setNotice(t("workspace.feedback.historyRecoveryWaiting"));
       void requestPeerRecovery(roomId, detail.processedThrough, detail.requiredThrough).catch((cause) => {
         const message = historyRecoveryError(cause);
         setHistoryRecoveryState(roomId, { phase: "failed", message });
@@ -1299,7 +1299,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const roomId = (received as CustomEvent<{ roomId: RoomId }>).detail.roomId;
       setHistoryRecoveryRooms((current) => { const next = new Set(current); next.delete(roomId); return next; });
       setHistoryRecoveryState(roomId, null); peerRecoveryNeeds.delete(roomId); peerRecoveryByRoom.delete(roomId);
-      setNotice("对话历史已恢复，可以继续收发消息");
+      setNotice(t("workspace.feedback.historyRecoveryComplete"));
     };
     engine.addEventListener("synced", resumeRemovals);
     engine.addEventListener("account-deletion", accountDeletion);
@@ -1353,7 +1353,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const detail = (received as CustomEvent<{ event: RoomEvent; error: unknown }>).detail;
       console.warn(JSON.stringify({ message: "encrypted room event quarantined", room_id: detail.event.room_id,
         event_id: detail.event.event_id, error: detail.error instanceof Error ? detail.error.message : String(detail.error) }));
-      setNotice("一条无法验证的加密消息已隔离，后续消息仍会继续同步");
+      setNotice(t("workspace.feedback.eventQuarantined"));
     });
     const resumeVisibleSession = () => {
       if (document.visibilityState !== "visible" || !navigator.onLine || foregroundResumePending) return;
@@ -1419,7 +1419,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!currentMls || !currentSession || connectionState() !== "online") return;
     const run = () => { void replenishKeyPackages(currentMls).catch((error) => {
       console.error(JSON.stringify({ message: "MLS KeyPackage replenishment failed", error: error instanceof Error ? error.message : String(error) }));
-      setNotice("这台设备暂时无法接收新的对话邀请，将自动重试");
+      setNotice(t("workspace.feedback.keyPackagesUnavailable"));
     }); };
     run();
     const timer = window.setInterval(run, 30 * 60_000);
@@ -1463,7 +1463,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const builder = new ArchiveSegmentBuilder();
     const coordinator = new ArchiveCoordinator(api, db, builder, wrapArchiveKey, archiveSegmentCache); archiveRef = coordinator;
     void coordinator.reconcilePendingUploads().then(() => coordinator.reconcileRetentionAcks()).catch(() => undefined);
-    const timers = roomIds.split("|").map((roomId, index) => window.setTimeout(() => void coordinator.compact(roomId as RoomId).catch((error) => setNotice(error instanceof Error ? `历史归档失败：${error.message}` : "历史归档失败")), 2_000 + index * 500));
+    const timers = roomIds.split("|").map((roomId, index) => window.setTimeout(() => void coordinator.compact(roomId as RoomId).catch(() => setNotice(t("workspace.feedback.archiveRetry"))), 2_000 + index * 500));
     onCleanup(() => { timers.forEach(window.clearTimeout); if (archiveRef === coordinator) archiveRef = null; coordinator.close(); });
   });
 
@@ -1503,7 +1503,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (!messages().some((message) => message.message_id === boundary.messageId)) {
           const page = await db.messageWindow(roomId, boundary.seq);
           if (!canApplyHistoryNavigation(selectionRevision, timelineNavigationRevision, roomId, selectedRef)) return;
-          if (!page.messages.some((message) => message.message_id === boundary.messageId)) throw new Error("无法打开第一条未读消息");
+          if (!page.messages.some((message) => message.message_id === boundary.messageId)) throw new Error(t("workspace.feedback.firstUnreadUnavailable"));
           setMessages(page.messages);
           setOlderMessagesState(page.hasOlder ? "idle" : "end");
           setHistoryFocus({ roomId, messageId: boundary.messageId, status: "ready", hasNewer: page.hasNewer });
@@ -1519,7 +1519,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       timelineOpeningRoom = null;
       await markRoomRead(roomId);
-    })().catch((cause) => { if (selectedRef === roomId) timelineOpeningRoom = null; setNotice(cause instanceof Error ? cause.message : "无法打开对话"); });
+    })().catch((cause) => { if (selectedRef === roomId) timelineOpeningRoom = null; setNotice(cause instanceof Error ? cause.message : t("workspace.feedback.openConversationError")); });
     void refreshRoomIdentityTrust(roomId);
     void db.coverage(roomId).then((value) => setCoverageComplete(value.history_complete));
     void syncRef?.connectRoom(roomId);
@@ -3392,14 +3392,14 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     try {
       setPushStatus("repairing");
       const status = await reconcilePush(api, session()?.vapid_public_key, true); setPushStatus(status);
-      if (status === "on") setNotice("离线通知已开启");
-      else if (status === "blocked") setNotice("浏览器已阻止通知，请在站点设置中重新允许");
-      else if (status === "unsupported") setNotice("当前浏览器不支持 Web Push");
-    } catch (cause) { setPushStatus("error"); setNotice(cause instanceof Error ? cause.message : "无法开启通知"); }
+      if (status === "on") setNotice(t("workspace.feedback.pushEnabled"));
+      else if (status === "blocked") setNotice(t("workspace.feedback.pushBlocked"));
+      else if (status === "unsupported") setNotice(t("workspace.feedback.pushUnsupported"));
+    } catch (cause) { setPushStatus("error"); setNotice(cause instanceof Error ? cause.message : t("workspace.feedback.pushEnableError")); }
   }
   async function turnOffPush() {
-    try { setPushStatus("repairing"); await disablePush(api); setPushStatus("off"); setNotice("离线通知已关闭"); }
-    catch (cause) { setPushStatus("error"); setNotice(cause instanceof Error ? cause.message : "无法关闭通知"); }
+    try { setPushStatus("repairing"); await disablePush(api); setPushStatus("off"); setNotice(t("workspace.feedback.pushDisabled")); }
+    catch (cause) { setPushStatus("error"); setNotice(cause instanceof Error ? cause.message : t("workspace.feedback.pushDisableError")); }
   }
   async function downloadAttachment(attachment: AttachmentMetadata) {
     try {

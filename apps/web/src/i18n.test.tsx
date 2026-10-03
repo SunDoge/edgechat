@@ -21,6 +21,8 @@ describe("local message catalog", () => {
     expect(translate("workspace.selection.selected", { count: 3 })).toBe("已选择 3 条");
     expect(translate("workspace.roomPreview.group", { count: 5 })).toBe("5 人群聊");
     expect(translate("workspace.historyRecovery.waiting.title")).toBe("等待另一台设备");
+    expect(translate("startupRecovery.interrupted.title")).toBe("本机恢复尚未完成");
+    expect(translate("workspace.feedback.expiredMessagesPurged", { count: 3 })).toBe("已从这台设备清理 3 条到期消息");
     expect(translate("secondaryTab.description.denied")).toContain("完成或取消");
     expect(translate("newRoom.createGroup", { count: 4 })).toBe("创建 4 人群聊");
     expect(translate("roomList.actions", { title: "家人" })).toBe("家人的对话操作");
