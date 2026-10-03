@@ -648,6 +648,8 @@ export class SyncEngine extends EventTarget {
   private disconnectedRooms = new Set<RoomId>();
   private historyBlockedRooms = new Set<RoomId>();
   private projectionRetries = new Map<RoomId, RoomEvent>();
+  private projectionRetryAttempts = new Map<RoomId, number>();
+  private projectionRetryTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
   private ingestQueue: Promise<void> = Promise.resolve();
   private pendingIngests = 0;
   private catchUpTask: Promise<void> | null = null;
@@ -726,6 +728,9 @@ export class SyncEngine extends EventTarget {
     this.networkEvents?.removeEventListener("online", this.onlineHandler);
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
+    for (const timer of this.projectionRetryTimers.values()) clearTimeout(timer);
+    this.projectionRetryTimers.clear();
+    this.projectionRetryAttempts.clear();
     this.connecting.clear();
     this.desiredRooms.clear();
     for (const [roomId, probe] of [...this.socketProbes]) this.finishSocketProbe(roomId, probe.socket, false);
@@ -1023,7 +1028,7 @@ export class SyncEngine extends EventTarget {
         if (retry) {
           attempted = retry;
           await this.ingestOne(retry);
-          this.projectionRetries.delete(event.room_id);
+          this.clearProjectionRetry(event.room_id);
           if (retry.event_id === event.event_id) return;
           attempted = event;
         }
@@ -1031,12 +1036,36 @@ export class SyncEngine extends EventTarget {
       }
       catch (error) {
         if (error instanceof RoomHistoryTransferRequiredError) await this.db.deferRoomEvent(event);
-        if (error instanceof LocalProjectionPersistenceError) this.projectionRetries.set(event.room_id, attempted);
+        if (error instanceof LocalProjectionPersistenceError) {
+          this.projectionRetries.set(event.room_id, attempted);
+          this.scheduleProjectionRetry(event.room_id);
+        }
         throw error;
       }
     });
     this.ingestQueue = task.catch(() => undefined);
     return task.finally(() => { this.pendingIngests -= 1; });
+  }
+
+  private clearProjectionRetry(roomId: RoomId): void {
+    this.projectionRetries.delete(roomId);
+    this.projectionRetryAttempts.delete(roomId);
+    const timer = this.projectionRetryTimers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.projectionRetryTimers.delete(roomId);
+  }
+
+  private scheduleProjectionRetry(roomId: RoomId): void {
+    if (!this.running || this.projectionRetryTimers.has(roomId) || !this.projectionRetries.has(roomId)) return;
+    const attempt = (this.projectionRetryAttempts.get(roomId) ?? 0) + 1;
+    this.projectionRetryAttempts.set(roomId, attempt);
+    const timer = setTimeout(() => {
+      this.projectionRetryTimers.delete(roomId);
+      const event = this.projectionRetries.get(roomId);
+      if (!this.running || !event) return;
+      void this.ingest(event).catch((error) => this.connectionError(error));
+    }, reconnectDelay(attempt));
+    this.projectionRetryTimers.set(roomId, timer);
   }
 
   private async ingestOne(event: RoomEvent): Promise<void> {

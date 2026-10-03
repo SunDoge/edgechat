@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
+import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -363,6 +363,71 @@ describe("SyncEngine event ingestion", () => {
     expect(writes).toEqual([first.event_id, first.event_id, second.event_id]);
     expect(through).toBe(2);
     expect(staged).toBe(false);
+  });
+
+  it("automatically retries the final failed local projection without waiting for another event", async () => {
+    vi.useFakeTimers();
+    const roomId = "!projection-auto-retry:example.com" as const;
+    const event = { event_id: "$projection-auto-retry:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+      type: "message.text" as const, created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    let through = 0; let staged = true; let writes = 0;
+    const db = {
+      getCursor: async () => 0, setCursor: async () => undefined,
+      roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: through }),
+      stagedDecryptedEvent: async () => staged ? ({ event }) : null,
+      hasMessage: async () => false,
+      markProcessed: async () => { through = 1; },
+      saveDecryptedEvent: async () => { if (++writes === 1) throw new Error("temporary OPFS failure"); },
+      removeStagedDecryptedEvent: async () => { staged = false; },
+    } as unknown as LocalDatabase;
+    const api = { sync: async () => ({ next_cursor: 0, has_more: false, items: [] }) } as unknown as ApiClient;
+    const process = vi.fn(async () => ({ plaintext: "recovered", payload: {} }));
+    const engine = new SyncEngine(api, db, process, undefined, null);
+    const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
+
+    try {
+      await engine.start();
+      await expect(ingest(event)).rejects.toBeInstanceOf(LocalProjectionPersistenceError);
+      expect(process).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(reconnectDelay(1));
+
+      expect(process).toHaveBeenCalledTimes(2);
+      expect(writes).toBe(2);
+      expect(staged).toBe(false);
+    } finally {
+      engine.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending local projection retry when the sync engine stops", async () => {
+    vi.useFakeTimers();
+    const roomId = "!projection-stop-retry:example.com" as const;
+    const event = { event_id: "$projection-stop-retry:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+      type: "message.text" as const, created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    const db = {
+      getCursor: async () => 0, setCursor: async () => undefined,
+      roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: 0 }),
+      stagedDecryptedEvent: async () => ({ event }), hasMessage: async () => false,
+      markProcessed: async () => undefined,
+      saveDecryptedEvent: async () => { throw new Error("persistent OPFS failure"); },
+    } as unknown as LocalDatabase;
+    const api = { sync: async () => ({ next_cursor: 0, has_more: false, items: [] }) } as unknown as ApiClient;
+    const process = vi.fn(async () => ({ plaintext: "not persisted", payload: {} }));
+    const engine = new SyncEngine(api, db, process, undefined, null);
+    const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
+
+    try {
+      await engine.start();
+      await expect(ingest(event)).rejects.toBeInstanceOf(LocalProjectionPersistenceError);
+      engine.stop();
+      await vi.advanceTimersByTimeAsync(reconnectDelay(6));
+      expect(process).toHaveBeenCalledOnce();
+    } finally {
+      engine.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("never quarantines or advances an event whose authentication fails before MLS processing", async () => {
