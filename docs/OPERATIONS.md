@@ -205,6 +205,30 @@ reviewed lifecycle rule for hidden/old versions. Until that lifecycle is proven,
 application quota reclamation may precede physical B2 byte reclamation and B2
 must not be presented as immediate physical erasure.
 
+Use a disposable private staging bucket and credentials scoped to that bucket.
+The live probe imports the same `S3ObjectStore` class used by the Worker and is
+excluded from every normal `pnpm test`/`pnpm check` run. The confirmation value
+is bound to the exact bucket name:
+
+```sh
+export S3_ENDPOINT='https://s3.<region>.backblazeb2.com'
+export S3_REGION='<region>'
+export S3_BUCKET='<disposable-staging-bucket>'
+export S3_ACCESS_KEY_ID='<staging-key-id>'
+export S3_SECRET_ACCESS_KEY='<staging-application-key>'
+export EDGECHAT_LIVE_S3_CONFIRM="write-and-delete:${S3_BUCKET}"
+pnpm test:object-store:live
+```
+
+The successful path makes exactly seven provider requests: three PUTs (one must
+return the conditional conflict and one must reject a bad digest), one HEAD, one
+strict Range GET, one batch DELETE, and one deletion-verification HEAD. It never
+lists the bucket or downloads the complete test object. Failure cleanup may add
+one exact-key batch DELETE. Record the UTC time, revision, provider/region,
+staging bucket, test output, lifecycle rule and resulting empty
+`edgechat-contract/` prefix; never record credentials. A passing probe does not
+verify lifecycle removal of hidden B2 versions.
+
 The offline D1-ledger audit also supports this provider. Use a separate list-only
 application key and an explicit request cap:
 

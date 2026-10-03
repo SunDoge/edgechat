@@ -1,5 +1,5 @@
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 const migrations = await readD1Migrations("./migrations");
 
@@ -15,6 +15,7 @@ export default defineConfig({
     } },
   })],
   test: {
+    exclude: [...configDefaults.exclude, "test/**/*.live.test.ts"],
     setupFiles: ["./test/setup.ts"],
   },
 });

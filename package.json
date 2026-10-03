@@ -15,6 +15,7 @@
     "build:core": "pnpm --filter @edgechat/messaging-core build",
     "typecheck": "pnpm -r --if-present run typecheck",
     "test": "pnpm -r --if-present run test",
+    "test:object-store:live": "pnpm --filter @edgechat/worker test:object-store:live",
     "test:browser": "pnpm --filter @edgechat/web test:browser",
     "browser:install:firefox": "pnpm --filter @edgechat/web browser:install:firefox",
     "browser:install:webkit": "pnpm --filter @edgechat/web browser:install:webkit",

@@ -43,6 +43,11 @@ The Durable Object is the serialization authority. It persists an accepted event
 
 Worker object-plane code depends on a narrow provider-neutral `ObjectStore` contract: exact-key put/get/head/delete, normalized byte ranges, metadata, SHA-256 verification, and create-if-absent writes. The default adapter uses the native R2 binding; a path-style SigV4 adapter supports deployment against Backblaze B2, AWS S3, or MinIO-compatible endpoints. The contract deliberately exposes no bucket listing, so normal request paths cannot become catalog scans. D1 remains authoritative for object keys, byte/object accounting, digests, retention, and repair jobs. One deployment selects one object provider; mirroring or dual writes are not the default. Live B2 staging validation and hidden-version lifecycle verification remain release gates; see [`docs/OPERATIONS.md`](docs/OPERATIONS.md#selecting-an-s3-compatible-provider).
 
+`pnpm test:object-store:live` is the explicit staging-provider gate. It reuses
+the production S3 adapter, requires a bucket-bound write/delete confirmation,
+uses seven requests on success, performs no LIST or full-object GET, and is never
+included in ordinary test or release commands.
+
 ## Repository
 
 ```text
