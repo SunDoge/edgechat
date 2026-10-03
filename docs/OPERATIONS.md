@@ -55,7 +55,15 @@ by EdgeChat and should not be enabled merely to build this dashboard.
 
 ## Before a schema or protocol rollout
 
-1. Confirm the Worker build and full test suite pass from the exact revision.
+1. Install the pinned non-Chromium browser runtimes once with
+   `pnpm browser:install:matrix`, then run `pnpm check:release` from the exact
+   revision. This composes migration/type generation verification, TypeScript
+   and Rust/OpenMLS tests, production builds, the high-severity production
+   dependency audit, and the Chromium/Firefox/WebKit database, tab handoff,
+   rendered update/recovery, and offline PWA gates. The PWA gate reuses the
+   exact production build created by `pnpm check`; it does not rebuild a
+   different artifact. Apart from the package-registry audit, the browser gates
+   use only a loopback server and make no Worker, D1, R2, or S3 request.
 2. Run `pnpm run db:migrations:check`. Every recorded migration must retain its
    exact SHA-256 digest and filenames must form one contiguous zero-padded
    sequence. Never edit a recorded migration; add the next file instead.
