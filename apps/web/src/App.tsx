@@ -2002,6 +2002,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (change.kind === "remove") avatar = null;
       else if (change.kind === "replace") {
         const plaintext = await change.blob.arrayBuffer();
+        const preview = (await prepareImageMetadata(change.blob)).preview ?? undefined;
         const encrypted = await core.encryptAttachment(plaintext);
         uploadedId = createAttachmentId();
         const uploaded = await api.uploadAttachment(roomId, encrypted.ciphertext, uploadedId);
@@ -2009,7 +2010,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           await attachmentLoader.acknowledgeCached(uploaded.attachment_id, encrypted.ciphertext).catch(() => undefined);
         }
         avatar = { attachment_id: uploaded.attachment_id, mime_type: "image/webp", plaintext_bytes: change.blob.size,
-          key: encrypted.key, nonce: encrypted.nonce };
+          key: encrypted.key, nonce: encrypted.nonce, preview };
       }
       await updateRoomProfile(roomId, name, true, false, avatar);
     } catch (cause) {

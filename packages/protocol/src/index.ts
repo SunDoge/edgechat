@@ -164,6 +164,16 @@ export type RoomProfileAvatar = {
   plaintext_bytes: number;
   key: string;
   nonce: string;
+  preview?: RoomProfileAvatarPreview;
+};
+
+export const MAX_ROOM_PROFILE_AVATAR_PREVIEW_BYTES = 8 * 1024;
+export const MAX_ROOM_PROFILE_AVATAR_PREVIEW_EDGE = 256;
+export type RoomProfileAvatarPreview = {
+  type: "image/webp" | "image/jpeg";
+  data: string;
+  width: number;
+  height: number;
 };
 
 export const roomEventTypes = [
@@ -422,12 +432,22 @@ export function isRoomProfilePayload(value: unknown): value is RoomProfilePayloa
   if (!value || typeof value !== "object") return false;
   const payload = value as Partial<RoomProfilePayload>;
   const avatar = payload.avatar as Partial<RoomProfileAvatar> | null | undefined;
+  const preview = avatar && typeof avatar === "object" ? avatar.preview as Partial<RoomProfileAvatarPreview> | undefined : undefined;
+  const validPreview = preview === undefined || Boolean(preview && typeof preview === "object"
+    && (preview.type === "image/webp" || preview.type === "image/jpeg")
+    && typeof preview.data === "string" && preview.data.length > 0
+    && preview.data.length <= Math.ceil(MAX_ROOM_PROFILE_AVATAR_PREVIEW_BYTES * 4 / 3)
+    && preview.data.length % 4 !== 1 && /^[A-Za-z0-9_-]+$/.test(preview.data)
+    && Math.floor(preview.data.length * 3 / 4) <= MAX_ROOM_PROFILE_AVATAR_PREVIEW_BYTES
+    && Number.isSafeInteger(preview.width) && Number(preview.width) >= 1 && Number(preview.width) <= MAX_ROOM_PROFILE_AVATAR_PREVIEW_EDGE
+    && Number.isSafeInteger(preview.height) && Number(preview.height) >= 1 && Number(preview.height) <= MAX_ROOM_PROFILE_AVATAR_PREVIEW_EDGE);
   const validAvatar = avatar === null || Boolean(avatar && typeof avatar === "object"
     && typeof avatar.attachment_id === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(avatar.attachment_id)
     && avatar.mime_type === "image/webp"
     && Number.isSafeInteger(avatar.plaintext_bytes) && Number(avatar.plaintext_bytes) >= 1 && Number(avatar.plaintext_bytes) <= 128 * 1024
     && typeof avatar.key === "string" && /^[A-Za-z0-9_-]{43}$/.test(avatar.key)
-    && typeof avatar.nonce === "string" && /^[A-Za-z0-9_-]{16}$/.test(avatar.nonce));
+    && typeof avatar.nonce === "string" && /^[A-Za-z0-9_-]{16}$/.test(avatar.nonce)
+    && validPreview);
   return payload.version === 1 && payload.kind === "room.profile" && typeof payload.name === "string"
     && payload.name === payload.name.trim() && payload.name.length >= 1 && payload.name.length <= 100
     && !/[\u0000-\u001f\u007f]/u.test(payload.name)

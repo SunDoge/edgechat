@@ -1,6 +1,7 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { RoomProfileAvatar } from "@edgechat/protocol";
 import { Avatar } from "./primitives";
+import { embeddedImagePreviewUrl } from "../media";
 
 export function EncryptedRoomAvatar(props: {
   avatar: RoomProfileAvatar | null | undefined;
@@ -8,6 +9,7 @@ export function EncryptedRoomAvatar(props: {
   color: string;
   class?: string;
   load: (avatar: RoomProfileAvatar) => Promise<ArrayBuffer>;
+  loadOriginal?: boolean;
 }) {
   const [visible, setVisible] = createSignal(typeof IntersectionObserver === "undefined");
   const [src, setSrc] = createSignal<string | null>(null);
@@ -34,6 +36,8 @@ export function EncryptedRoomAvatar(props: {
     const avatar = props.avatar; const shouldLoad = visible(); const currentGeneration = ++generation;
     clearUrl();
     if (!avatar || !shouldLoad) return;
+    if (avatar.preview) setSrc(embeddedImagePreviewUrl(avatar.preview));
+    if (avatar.preview && !props.loadOriginal) return;
     void props.load(avatar).then((plaintext) => {
       if (currentGeneration !== generation) return;
       objectUrl = URL.createObjectURL(new Blob([plaintext], { type: avatar.mime_type })); setSrc(objectUrl);

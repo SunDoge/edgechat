@@ -122,8 +122,12 @@ it("validates the bounded encrypted message-expiry policy", () => {
 it("validates bounded encrypted room profiles", () => {
   const avatar = { attachment_id: "avatar-0123456789", mime_type: "image/webp", plaintext_bytes: 1024,
     key: "A".repeat(43), nonce: "B".repeat(16) };
+  const preview = { type: "image/webp", data: "AQID", width: 64, height: 64 };
   expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "Weekend plans", avatar: null, updated_at: 10 })).toBe(true);
   expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "Weekend plans", avatar, updated_at: 10 })).toBe(true);
+  expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "Weekend plans", avatar: { ...avatar, preview }, updated_at: 10 })).toBe(true);
+  expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "Weekend plans", avatar: { ...avatar, preview: { ...preview, data: "A".repeat(10_924) } }, updated_at: 10 })).toBe(false);
+  expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "Weekend plans", avatar: { ...avatar, preview: { ...preview, width: 257 } }, updated_at: 10 })).toBe(false);
   expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "Weekend plans", avatar: { ...avatar, plaintext_bytes: 128 * 1024 + 1 }, updated_at: 10 })).toBe(false);
   expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: " padded ", avatar: null, updated_at: 10 })).toBe(false);
   expect(isRoomProfilePayload({ version: 1, kind: "room.profile", name: "x".repeat(101), avatar: null, updated_at: 10 })).toBe(false);

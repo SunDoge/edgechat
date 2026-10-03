@@ -357,7 +357,7 @@ function base64Url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
 }
 
-export async function prepareImageMetadata(file: File, previewBudget = MAX_EMBEDDED_IMAGE_PREVIEW_BYTES): Promise<PreparedImageMetadata> {
+export async function prepareImageMetadata(file: Blob, previewBudget = MAX_EMBEDDED_IMAGE_PREVIEW_BYTES): Promise<PreparedImageMetadata> {
   if (!isPreviewableImage(file.type) || file.size > MAX_INLINE_IMAGE_BYTES || typeof createImageBitmap !== "function") {
     return { dimensions: null, preview: null };
   }

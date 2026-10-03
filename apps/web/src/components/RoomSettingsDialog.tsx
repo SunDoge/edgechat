@@ -219,7 +219,7 @@ export function RoomSettingsDialog(props: {
       <div class="flex items-start justify-between gap-3"><div class="min-w-0"><h3 id="group-members-title" class="text-sm font-semibold text-ink">{t("roomSettings.members.title")}</h3><p class="mt-1 text-xs/5 text-muted">{t("roomSettings.members.description")}</p></div><span class="shrink-0 text-xs tabular-nums text-muted">{t("roomSettings.members.count", { count: props.members.length + 1 })}</span></div>
       <form class="mt-4 grid gap-3" onSubmit={submitRoomProfile}>
         <div class="flex items-center gap-3">
-          <Show when={avatarPreview()} fallback={<EncryptedRoomAvatar class="size-16" avatar={avatarChange().kind === "remove" ? null : props.roomAvatar} label={initials(roomName() || props.roomTitle)} color={avatarColor("room-profile")} load={props.decryptRoomAvatar}/>}>{(src) =>
+          <Show when={avatarPreview()} fallback={<EncryptedRoomAvatar class="size-16" avatar={avatarChange().kind === "remove" ? null : props.roomAvatar} label={initials(roomName() || props.roomTitle)} color={avatarColor("room-profile")} load={props.decryptRoomAvatar} loadOriginal/>}>{(src) =>
             <Avatar class="size-16" src={src()} group label={initials(roomName() || props.roomTitle)} color={avatarColor("room-profile")}/>
           }</Show>
           <div class="flex min-w-0 flex-1 flex-wrap gap-2">
