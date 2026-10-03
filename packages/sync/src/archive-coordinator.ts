@@ -30,6 +30,7 @@ export class ArchiveCoordinator extends EventTarget {
     this.active.add(roomId);
     let lease: CompactionLease | null = null;
     let cached = false; let uploaded = false;
+    let cacheRemovalConfirmed = false;
     try {
       try { lease = await this.api.acquireCompactionLease(roomId); }
       catch (error) { if (error && typeof error === "object" && "code" in error && error.code === "compaction_busy") return false; throw error; }
@@ -53,8 +54,23 @@ export class ArchiveCoordinator extends EventTarget {
         cached = await this.cache.put(lease.segment_id, body);
         if (!cached) throw new Error("Unable to preserve the archive segment on this device");
       }
-      await this.api.uploadSegment(roomId, lease.segment_id, lease.token, lease.start_seq, lease.end_seq, body);
-      uploaded = true;
+      try {
+        await this.api.uploadSegment(roomId, lease.segment_id, lease.token, lease.start_seq, lease.end_seq, body);
+        uploaded = true;
+      } catch (uploadError) {
+        // Both upload responses may be lost after D1 commits. Resolve the exact
+        // ID/range/bytes before discarding the local repair copy. If no commit
+        // exists, the Worker marks the pending claim cancelled and exact-deletes
+        // its object; a late PUT observes that marker and deletes itself.
+        let resolution: Awaited<ReturnType<ApiClient["cancelArchiveSegmentUpload"]>> | null = null;
+        try { resolution = await this.api.cancelArchiveSegmentUpload(roomId, lease.segment_id, lease.token, lease.start_seq, lease.end_seq, body); }
+        catch { /* Keep the local ciphertext when server state is unknowable. */ }
+        if (resolution?.state === "committed") uploaded = true;
+        else {
+          cacheRemovalConfirmed = resolution?.state === "abandoned" || resolution?.state === "absent";
+          throw uploadError;
+        }
+      }
       await this.job(lease, "uploaded");
       if (cached) await this.api.acknowledgeArchiveSegmentRetention(lease.segment_id);
       await this.job(lease, "complete"); this.emit(roomId, "complete");
@@ -66,7 +82,7 @@ export class ArchiveCoordinator extends EventTarget {
         if (!uploaded) await this.api.releaseCompactionLease(roomId, lease.token).catch(() => undefined);
         this.emit(roomId, "failed", detail);
       }
-      if (lease && cached && !uploaded && this.cache) await this.cache.remove(lease.segment_id).catch(() => undefined);
+      if (lease && cached && !uploaded && cacheRemovalConfirmed && this.cache) await this.cache.remove(lease.segment_id).catch(() => undefined);
       throw error;
     } finally {
       this.active.delete(roomId);

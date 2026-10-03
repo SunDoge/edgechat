@@ -1722,6 +1722,40 @@ describe("single-server durable delivery", () => {
       method: "POST", headers, body: JSON.stringify({ ...unsigned, signature }),
     })).status).toBe(201);
 
+    const cancelledSegmentId = "archive_segment_cancel_0001"; const cancelledLeaseToken = "archive_compaction_cancel_0001";
+    const cancelledCiphertext = archiveV3Ciphertext(account.device_id, 1, 1); const cancelledDigest = await ciphertextDigest(cancelledCiphertext);
+    expect((await env.ROOMS.getByName(roomId).acquireCompactionLease({
+      token: cancelledLeaseToken, device_id: account.device_id, segment_id: cancelledSegmentId, start_seq: 1, end_seq: 1, expires_at: Date.now() + 60_000,
+    }, Date.now())).acquired).toBe(true);
+    const prefixLength = 40 + new DataView(cancelledCiphertext.buffer).getUint32(12);
+    let releaseCancelledTail!: () => void; let cancelledPull = 0;
+    const cancelledTailGate = new Promise<void>((resolve) => { releaseCancelledTail = resolve; });
+    const delayedArchiveBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      async pull(controller) {
+        if (cancelledPull === 0) { cancelledPull += 1; controller.enqueue(cancelledCiphertext.slice(0, prefixLength)); return; }
+        if (cancelledPull === 1) { cancelledPull += 1; await cancelledTailGate; controller.enqueue(cancelledCiphertext.slice(prefixLength)); controller.close(); }
+      },
+    });
+    const lateArchiveUpload = SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
+      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-segment-id": cancelledSegmentId, "x-compaction-token": cancelledLeaseToken,
+        "x-start-seq": "1", "x-end-seq": "1", "content-length": String(cancelledCiphertext.byteLength), "x-content-sha256": cancelledDigest }, body: delayedArchiveBody,
+    });
+    const cancelledObjectKey = `rooms/${encodeURIComponent(roomId)}/segments/000000000001-${cancelledSegmentId}.bin`;
+    await vi.waitFor(async () => expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(cancelledObjectKey).first()).toEqual({ object_key: cancelledObjectKey }));
+    const cancelled = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${cancelledSegmentId}/upload`, {
+      method: "DELETE", headers: { authorization: `Bearer ${account.access_token}`, "x-compaction-token": cancelledLeaseToken,
+        "x-start-seq": "1", "x-end-seq": "1", "x-ciphertext-bytes": String(cancelledCiphertext.byteLength), "x-content-sha256": cancelledDigest },
+    });
+    expect(await cancelled.json()).toEqual({ segment_id: cancelledSegmentId, state: "abandoned" });
+    releaseCancelledTail();
+    const cancelledUploadResult = await lateArchiveUpload;
+    expect(cancelledUploadResult.status).toBe(409);
+    expect(await cancelledUploadResult.json()).toMatchObject({ code: "archive_upload_cancelled" });
+    expect(await env.DB.prepare("SELECT segment_id FROM archive_segments WHERE segment_id = ?").bind(cancelledSegmentId).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(cancelledObjectKey).first()).toBeNull();
+    expect(await env.ARCHIVE.get(cancelledObjectKey)).toBeNull();
+    expect(await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual({ archive_bytes: 0, archive_objects: 0 });
+
     const segmentId = "archive_segment_repair_0001"; const leaseToken = "archive_compaction_lease_0001";
     const lease = await env.ROOMS.getByName(roomId).acquireCompactionLease({
       token: leaseToken, device_id: account.device_id, segment_id: segmentId, start_seq: 1, end_seq: 1, expires_at: Date.now() + 60_000,
@@ -1763,6 +1797,13 @@ describe("single-server durable delivery", () => {
     expect(await idempotentRetry.json()).toMatchObject({ segment_id: segmentId, byte_size: ciphertext.byteLength });
     expect(await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageAfterUpload);
     expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
+    const committedResolution = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${segmentId}/upload`, {
+      method: "DELETE", headers: { authorization: `Bearer ${account.access_token}`, "x-compaction-token": leaseToken,
+        "x-start-seq": "1", "x-end-seq": "1", "x-ciphertext-bytes": String(ciphertext.byteLength), "x-content-sha256": archiveDigest },
+    });
+    expect(await committedResolution.json()).toEqual({ segment_id: segmentId, state: "committed" });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
+    expect(await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageAfterUpload);
     const conflictingRetry = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
       method: "POST", headers: { ...uploadHeaders, "x-content-sha256": b64url(new Uint8Array(32).buffer) }, body: ciphertext,
     });

@@ -394,6 +394,12 @@ export class ApiClient {
       return upload();
     }
   }
+  async cancelArchiveSegmentUpload(roomId: RoomId, segmentId: string, leaseToken: string, startSeq: number, endSeq: number, bytes: ArrayBuffer) {
+    const digest = base64Url(await crypto.subtle.digest("SHA-256", bytes));
+    return this.request<{ segment_id: string; state: "committed" | "abandoned" | "absent" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${encodeURIComponent(segmentId)}/upload`, {
+      method: "DELETE", headers: { "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq), "x-ciphertext-bytes": String(bytes.byteLength), "x-content-sha256": digest },
+    });
+  }
   async segmentRange(roomId: RoomId, segmentId: string, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>> {
     const maximumRangeBytes = 16 * 1024 * 1024;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > maximumRangeBytes || !Number.isSafeInteger(offset + length - 1)) {

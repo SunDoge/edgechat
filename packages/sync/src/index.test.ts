@@ -1054,6 +1054,25 @@ describe("ApiClient attachment uploads", () => {
       )).rejects.toMatchObject({ code: "invalid_segment_response" });
     } finally { vi.unstubAllGlobals(); }
   });
+
+  it("binds archive upload cancellation to the exact range, size, and ciphertext digest", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ segment_id: "expected-segment", state: "abandoned" }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const ciphertext = new Uint8Array([11, 22, 33, 44]).buffer;
+      await new ApiClient("https://edgechat.test", "token").cancelArchiveSegmentUpload(
+        "!room-000000000001:example.com", "expected-segment", "lease-1", 1, 4, ciphertext,
+      );
+      const [url, init] = fetchMock.mock.calls[0]!; const headers = new Headers(init?.headers);
+      expect(url).toContain("/segments/expected-segment/upload");
+      expect(init?.method).toBe("DELETE");
+      expect(headers.get("x-start-seq")).toBe("1");
+      expect(headers.get("x-end-seq")).toBe("4");
+      expect(headers.get("x-ciphertext-bytes")).toBe("4");
+      expect(headers.get("x-content-sha256")).toBe("vb3OMS9XYlcfqhfz9HgCNe0sVPlmwPYNrOHN3SY09PM");
+      expect(init?.body).toBeUndefined();
+    } finally { vi.unstubAllGlobals(); }
+  });
 });
 
 describe("ApiClient archive ranges", () => {

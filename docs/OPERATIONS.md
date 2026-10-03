@@ -184,7 +184,11 @@ segment ID and byte-identical ciphertext. The Worker binds an already committed
 ID to its room, sequence range, size and digest; a lost-response retry is served
 from D1 before object-store access, while conflicting reuse is rejected. This
 preserves the device's OPFS repair copy without paying for a second PUT, HEAD or
-LIST after a successful commit.
+LIST after a successful commit. If both responses fail, the client resolves the
+same ID/range/size/digest: an existing D1 row is treated as committed, while an
+in-flight claim is marked cancelled before one exact DELETE. The upload checks
+that marker after PUT and removes a late object itself. An unresolvable request
+retains the local repair copy, and committed metadata is never deleted.
 
 EdgeChat does not make a second R2/S3 copy by default, does not store plaintext backups, and does not
 enable lifecycle deletion on committed `attachments/` or `rooms/` prefixes.

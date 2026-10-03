@@ -314,13 +314,19 @@ function pendingR2WriteMatches(existing: PendingR2Write, expected: PendingR2Writ
 }
 
 async function stageIdempotentR2Write(env: Env, item: PendingR2Write): Promise<boolean> {
+  const cancelled = () => item.kind === "archive"
+    ? new HttpError(409, "Archive upload was cancelled", "archive_upload_cancelled")
+    : new HttpError(409, "Attachment upload was cancelled", "attachment_upload_cancelled");
+  const conflict = () => item.kind === "archive"
+    ? new HttpError(409, "Segment ID is already in use", "segment_conflict")
+    : new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
   const findExisting = () => createDatabase(env.DB).selectFrom("pending_r2_writes")
     .select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
     .where("object_key", "=", item.object_key).executeTakeFirst();
   const existing = await findExisting();
   if (existing) {
-    if (existing.cancelled_at !== null) throw new HttpError(409, "Attachment upload was cancelled", "attachment_upload_cancelled");
-    if (!pendingR2WriteMatches(existing as PendingR2Write, item)) throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
+    if (existing.cancelled_at !== null) throw cancelled();
+    if (!pendingR2WriteMatches(existing as PendingR2Write, item)) throw conflict();
     return false;
   }
   try {
@@ -331,7 +337,7 @@ async function stageIdempotentR2Write(env: Env, item: PendingR2Write): Promise<b
     // reservation insert. stageR2Write has already released the losing quota
     // reservation, so only adopt the winner when every bound field matches.
     const raced = await findExisting();
-    if (raced?.cancelled_at !== null && raced?.cancelled_at !== undefined) throw new HttpError(409, "Attachment upload was cancelled", "attachment_upload_cancelled");
+    if (raced?.cancelled_at !== null && raced?.cancelled_at !== undefined) throw cancelled();
     if (raced && pendingR2WriteMatches(raced as PendingR2Write, item)) return false;
     throw error;
   }
@@ -4322,7 +4328,7 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
   }
   const pending = { object_key: key, owner_user_id: auth.userId, kind: "attachment" as const, expected_bytes: declaredSize, room_id: roomId, content_sha256: suppliedDigest.text };
   const reservationCreated = await stageIdempotentR2Write(env, pending);
-  let objectReady = false;
+  let releaseReservation = false;
   const createdAt = Date.now();
   try {
     const limited = exactLengthUploadStream(request.body, declaredSize);
@@ -4334,20 +4340,19 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
     try {
       stored = (await Promise.all([put, limited.completed]))[0];
     } catch (error) {
-      if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Attachment digest mismatch", "invalid_attachment_digest");
-      if (isFixedLengthMismatch(error)) throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length");
+      if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Attachment digest mismatch", "invalid_attachment_digest"); }
+      if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length"); }
       throw error;
     }
-    if (stored) objectReady = true;
     if (!stored || stored.size !== declaredSize) {
       if (stored) throw new HttpError(400, "Attachment length or digest mismatch", "invalid_attachment_digest");
       const recovered = await objectStore(env).head(key);
       if (!recovered || recovered.size !== declaredSize || recovered.metadata.roomId !== roomId
         || recovered.metadata.uploaderUserId !== auth.userId || recovered.metadata.sha256 !== suppliedDigest.text) {
+        releaseReservation = true;
         throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
       }
     }
-    objectReady = true;
     const liveClaim = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
       .where("object_key", "=", key).executeTakeFirst();
     if (!liveClaim) {
@@ -4380,11 +4385,10 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
       .where("attachment_id", "=", id).executeTakeFirst();
     if (!committed || !matchesUpload(committed)) throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
   } catch (error) {
-    // Once the object is known to exist, retain the reservation so the same
-    // client ID can finish D1 finalization without another object write. The
-    // bounded pending-write janitor remains the crash fallback. Before that
-    // point no valid object was created, so release only this new reservation.
-    if (reservationCreated && !objectReady) await finalizePendingR2Cleanup(env, [pending]);
+    // Provider/transport errors are ambiguous: retain the exact intent so a
+    // retry or cancellation can reconcile the known key. Only checksum,
+    // length, or verified-key conflicts prove this reservation can roll back.
+    if (reservationCreated && releaseReservation) await finalizePendingR2Cleanup(env, [pending]);
     throw error;
   }
   return json({ attachment_id: id, ciphertext_bytes: declaredSize }, 201);
@@ -4695,33 +4699,128 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
   try { validateArchiveV3Envelope(prefix.bytes, declaredSize, start, end, auth.deviceId, new Set(activeDevices.map((device) => device.device_id))); }
   catch (error) { await prefix.body.cancel().catch(() => undefined); throw error; }
   const objectKey = `rooms/${encodeURIComponent(roomId)}/segments/${String(start).padStart(12, "0")}-${id}.bin`;
-  const pending = { object_key: objectKey, owner_user_id: owner.created_by, kind: "archive" as const, expected_bytes: declaredSize };
-  try { await stageR2Write(env, pending); }
+  const pending = { object_key: objectKey, owner_user_id: owner.created_by, kind: "archive" as const, expected_bytes: declaredSize, room_id: roomId, content_sha256: suppliedDigest.text };
+  let reservationCreated: boolean;
+  try { reservationCreated = await stageIdempotentR2Write(env, pending); }
   catch (error) { await prefix.body.cancel().catch(() => undefined); throw error; }
+  let releaseReservation = false;
+  const createdAt = Date.now();
+  const matchesCommitted = (row: { start_seq: number; end_seq: number; byte_size: number; ciphertext_sha256: string | null }): boolean => (
+    row.start_seq === start && row.end_seq === end && row.byte_size === declaredSize && row.ciphertext_sha256 === suppliedDigest.text
+  );
   try {
     const limited = exactLengthUploadStream(prefix.body, declaredSize);
     let stored: ObjectStoreObject | null;
     try {
       stored = (await Promise.all([
-        objectStore(env).put(objectKey, limited.body, { expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream", metadata: { roomId, start: String(start), end: String(end), sha256: suppliedDigest.text } }),
+        objectStore(env).put(objectKey, limited.body, { ifAbsent: true, expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream", metadata: { roomId, segmentId: id, start: String(start), end: String(end), sha256: suppliedDigest.text } }),
         limited.completed,
       ]))[0];
     } catch (error) {
-      if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");
-      if (isFixedLengthMismatch(error)) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
+      if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest"); }
+      if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length"); }
       throw error;
     }
-    if (!stored || stored.size !== declaredSize) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
+    if (!stored || stored.size !== declaredSize) {
+      if (stored) throw new HttpError(400, "Archive segment length or digest mismatch", "invalid_archive_digest");
+      const recovered = await objectStore(env).head(objectKey);
+      if (!recovered || recovered.size !== declaredSize || recovered.metadata.roomId !== roomId
+        || recovered.metadata.segmentId !== id || recovered.metadata.start !== String(start)
+        || recovered.metadata.end !== String(end) || recovered.metadata.sha256 !== suppliedDigest.text) {
+        releaseReservation = true;
+        throw new HttpError(409, "Segment ID is already in use", "segment_conflict");
+      }
+    }
+    const liveClaim = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+      .where("object_key", "=", objectKey).executeTakeFirst();
+    if (!liveClaim) {
+      const landed = await db.selectFrom("archive_segments").select(["start_seq", "end_seq", "byte_size", "ciphertext_sha256"])
+        .where("segment_id", "=", id).where("room_id", "=", roomId).executeTakeFirst();
+      if (landed && matchesCommitted(landed)) {
+        await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
+        return json({ segment_id: id, start_seq: start, end_seq: end, byte_size: declaredSize });
+      }
+      await objectStore(env).delete(objectKey);
+      throw new HttpError(409, "Archive upload was cancelled", "archive_upload_cancelled");
+    }
+    if (liveClaim.cancelled_at !== null) {
+      await objectStore(env).delete(objectKey);
+      await finalizePendingR2Cleanup(env, [liveClaim as PendingR2Write]);
+      throw new HttpError(409, "Archive upload was cancelled", "archive_upload_cancelled");
+    }
     await batch(env.DB, [
-      db.insertInto("archive_segments").values({ segment_id: id, room_id: roomId, start_seq: start, end_seq: end, object_key: objectKey, byte_size: declaredSize, ciphertext_sha256: suppliedDigest.text, created_at: Date.now() }),
-      db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey),
+      db.insertInto("archive_segments")
+        .columns(["segment_id", "room_id", "start_seq", "end_seq", "object_key", "byte_size", "ciphertext_sha256", "created_at"])
+        .expression((eb) => eb.selectFrom("pending_r2_writes").select([
+          eb.val(id).as("segment_id"), eb.val(roomId).as("room_id"), eb.val(start).as("start_seq"), eb.val(end).as("end_seq"),
+          eb.val(objectKey).as("object_key"), eb.val(declaredSize).as("byte_size"), eb.val(suppliedDigest.text).as("ciphertext_sha256"), eb.val(createdAt).as("created_at"),
+        ]).where("object_key", "=", objectKey).where("owner_user_id", "=", owner.created_by).where("kind", "=", "archive")
+          .where("room_id", "=", roomId).where("content_sha256", "=", suppliedDigest.text).where("expected_bytes", "=", declaredSize)
+          .where("cancelled_at", "is", null))
+        .onConflict((conflict) => conflict.column("segment_id").doNothing()),
+      db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey).where("cancelled_at", "is", null),
     ]);
+    const committed = await db.selectFrom("archive_segments").select(["start_seq", "end_seq", "byte_size", "ciphertext_sha256"])
+      .where("segment_id", "=", id).where("room_id", "=", roomId).executeTakeFirst();
+    if (!committed || !matchesCommitted(committed)) throw new HttpError(409, "Segment ID is already in use", "segment_conflict");
   } catch (error) {
-    await abandonPendingR2Write(env, pending);
+    if (reservationCreated && releaseReservation) await finalizePendingR2Cleanup(env, [pending]);
     throw error;
   }
   await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
   return json({ segment_id: id, start_seq: start, end_seq: end, byte_size: declaredSize }, 201);
+}
+
+async function cancelArchiveSegmentUpload(request: Request, env: Env, auth: AuthContext, roomId: RoomId, segmentId: string): Promise<Response> {
+  requireArchiveCompaction(env);
+  if ((await memberRole(env, roomId, auth.userId)) !== "owner") throw new HttpError(403, "Only the room owner may cancel compaction", "forbidden");
+  const start = Number(request.headers.get("x-start-seq"));
+  const end = Number(request.headers.get("x-end-seq"));
+  const declaredSize = Number(request.headers.get("x-ciphertext-bytes"));
+  const suppliedDigest = requestContentSha256(request, "invalid_archive_digest");
+  const leaseToken = request.headers.get("x-compaction-token") ?? "";
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start
+    || !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > MAX_SEGMENT
+    || !suppliedDigest || !/^[A-Za-z0-9_-]{16,128}$/.test(leaseToken)) {
+    throw new HttpError(400, "Invalid archive upload cancellation", "invalid_segment");
+  }
+  const db = createDatabase(env.DB);
+  const committedState = async () => db.selectFrom("archive_segments").select(["start_seq", "end_seq", "byte_size", "ciphertext_sha256"])
+    .where("segment_id", "=", segmentId).where("room_id", "=", roomId).executeTakeFirst();
+  const matchesCommitted = (row: { start_seq: number; end_seq: number; byte_size: number; ciphertext_sha256: string | null }): boolean => (
+    row.start_seq === start && row.end_seq === end && row.byte_size === declaredSize && row.ciphertext_sha256 === suppliedDigest.text
+  );
+  let committed = await committedState();
+  if (committed) {
+    if (!matchesCommitted(committed)) throw new HttpError(409, "Segment ID was committed for different ciphertext", "segment_conflict");
+    return json({ segment_id: segmentId, state: "committed" });
+  }
+  if (!(await env.ROOMS.getByName(roomId).validateCompactionLease(leaseToken, auth.deviceId, segmentId, start, end, Date.now()))) {
+    committed = await committedState();
+    if (committed && matchesCommitted(committed)) return json({ segment_id: segmentId, state: "committed" });
+    throw new HttpError(409, "Compaction lease is missing or expired", "invalid_compaction_lease");
+  }
+  const room = await db.selectFrom("rooms").select("created_by").where("room_id", "=", roomId).executeTakeFirstOrThrow();
+  const objectKey = `rooms/${encodeURIComponent(roomId)}/segments/${String(start).padStart(12, "0")}-${segmentId}.bin`;
+  const now = Date.now();
+  await db.updateTable("pending_r2_writes").set({ cancelled_at: now })
+    .where("object_key", "=", objectKey).where("owner_user_id", "=", room.created_by).where("kind", "=", "archive").where("room_id", "=", roomId)
+    .where("expected_bytes", "=", declaredSize).where("content_sha256", "=", suppliedDigest.text).execute();
+  const pending = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+    .where("object_key", "=", objectKey).where("owner_user_id", "=", room.created_by).where("kind", "=", "archive")
+    .where("room_id", "=", roomId).where("expected_bytes", "=", declaredSize).where("content_sha256", "=", suppliedDigest.text)
+    .where("cancelled_at", "is not", null).executeTakeFirst();
+  if (!pending) {
+    committed = await committedState();
+    if (committed && matchesCommitted(committed)) return json({ segment_id: segmentId, state: "committed" });
+    await objectStore(env).delete(objectKey);
+    await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
+    return json({ segment_id: segmentId, state: "absent" });
+  }
+  await objectStore(env).delete(objectKey);
+  await finalizePendingR2Cleanup(env, [pending as PendingR2Write]);
+  await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
+  return json({ segment_id: segmentId, state: "abandoned" });
 }
 
 async function acknowledgeArchiveSegmentRetention(env: Env, auth: AuthContext, segmentId: string): Promise<Response> {
@@ -5204,6 +5303,13 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   }
   const segmentUpload = path.match(/^\/api\/v1\/rooms\/([^/]+)\/segments$/);
   if (segmentUpload && request.method === "POST") { requireUser(auth); const id = decodeURIComponent(segmentUpload[1]); if (!isNamespacedRoomId(id)) throw new HttpError(400, "Invalid room ID", "invalid_room"); return uploadSegment(request, env, auth, id); }
+  const segmentUploadCancellation = path.match(/^\/api\/v1\/rooms\/([^/]+)\/segments\/([^/]+)\/upload$/);
+  if (segmentUploadCancellation && request.method === "DELETE") {
+    requireUser(auth); const roomId = decodeURIComponent(segmentUploadCancellation[1]); const segmentId = segmentUploadCancellation[2];
+    if (!isNamespacedRoomId(roomId)) throw new HttpError(400, "Invalid room ID", "invalid_room");
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(segmentId)) throw new HttpError(400, "Invalid segment ID", "invalid_segment");
+    return cancelArchiveSegmentUpload(request, env, auth, roomId, segmentId);
+  }
   if (path === "/api/v1/archive-repair/jobs" && request.method === "GET") { requireUser(auth); return archiveRepairJobs(request, env, auth); }
   const archiveRepairLease = path.match(/^\/api\/v1\/archive-segments\/([^/]+)\/repair\/lease$/);
   if (archiveRepairLease && (request.method === "POST" || request.method === "DELETE")) {
