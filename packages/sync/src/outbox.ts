@@ -1,5 +1,5 @@
 import type { LocalDatabase, OutboxItem } from "@edgechat/db";
-import { canonicalSignedEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, type ClientEvent, type RoomEvent, type RoomId } from "@edgechat/protocol";
+import { acceptedEventMatchesClientEvent, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, type ClientEvent, type RoomEvent, type RoomId } from "@edgechat/protocol";
 
 type OutboxApi = { sendEvent(roomId: RoomId, event: ClientEvent): Promise<{ event: RoomEvent }> };
 
@@ -9,10 +9,6 @@ function permanent(error: unknown): boolean {
 
 function retryDelay(attempts: number): number {
   return Math.min(5 * 60_000, 1_000 * 2 ** Math.min(8, Math.max(0, attempts)));
-}
-
-function sameBytes(left: Uint8Array<ArrayBuffer>, right: Uint8Array<ArrayBuffer>): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 export class AcceptedEventEnvelopeMismatchError extends Error {
@@ -112,8 +108,7 @@ export class OutboxEngine extends EventTarget {
     this.changed();
     try {
       const result = await this.api.sendEvent(item.room_id, item.event);
-      if (!isRoomEventEnvelope(result.event) || result.event.room_id !== item.room_id
-        || !sameBytes(canonicalSignedEventBytes(result.event), canonicalSignedEventBytes(item.event))) {
+      if (!acceptedEventMatchesClientEvent(result.event, item.event, item.room_id)) {
         throw new AcceptedEventEnvelopeMismatchError();
       }
       if (result.event.type === "message.delete" && isMessageDeletePayload(item.payload)) {

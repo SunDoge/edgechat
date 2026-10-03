@@ -18,7 +18,7 @@ import {
 } from "@tabler/icons-solidjs";
 import { LocalDatabase, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomAttachmentCursor, type LocalRoomListActivity, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
-import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
+import { acceptedEventMatchesClientEvent, canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
 import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
@@ -97,6 +97,13 @@ type UnreadBoundary = { roomId: RoomId; messageId: string; seq: number };
 type RoomIdentityTrust = { status: DeviceTrustState; verified: number; total: number };
 type ExportWritable = { write(data: string | ArrayBuffer | Blob): Promise<void>; close(): Promise<void>; abort(reason?: unknown): Promise<void> };
 type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<{ createWritable(): Promise<ExportWritable> }> };
+
+function requireMatchingAcceptedEvent(accepted: unknown, submitted: ClientEvent, roomId: RoomId): RoomEvent {
+  if (!acceptedEventMatchesClientEvent(accepted, submitted, roomId)) {
+    throw new Error("服务器确认与本机已签名事件不一致，已保留待发送操作");
+  }
+  return accepted;
+}
 
 export function App(props: { localProfile: LocalProfile; localProfiles: LocalProfile[]; accessToken: string | null }) {
   const profileId = props.localProfile.profile_id;
@@ -2695,7 +2702,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           });
         }
         try {
-          await api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state);
+          const result = await api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state);
+          requireMatchingAcceptedEvent(result.event, queued.event, room.room_id);
           await db.removeDeviceLinkOutbox(linkId, room.room_id);
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
@@ -2784,7 +2792,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         }
         await reconcileQueuedState(queued, room.expected_epoch);
         try {
-          job = await api.commitDeviceRevocation(job.revocation_id, room.room_id, queued.event);
+          const result = await api.commitDeviceRevocation(job.revocation_id, room.room_id, queued.event);
+          requireMatchingAcceptedEvent(result.event, queued.event, room.room_id);
+          job = result;
           await db.removeDeviceRevocationOutbox(job.revocation_id, room.room_id);
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
@@ -2894,10 +2904,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     await reconcileRoomMembershipState(queued);
     const expectedEpoch = Number(queued.event.metadata.mls_epoch);
     try {
-      if (queued.operation === "add") {
-        await api.addMember(roomId, { user_id: queued.target_user_id, event: queued.event, mls_welcome: queued.mls_welcome,
-          mls_ratchet_tree: queued.mls_ratchet_tree, mls_recipients: queued.target_device_ids, mls_claim_ids: queued.mls_claim_ids });
-      } else await api.removeMember(roomId, queued.target_user_id, { event: queued.event });
+      const result = queued.operation === "add"
+        ? await api.addMember(roomId, { user_id: queued.target_user_id, event: queued.event, mls_welcome: queued.mls_welcome,
+          mls_ratchet_tree: queued.mls_ratchet_tree, mls_recipients: queued.target_device_ids, mls_claim_ids: queued.mls_claim_ids })
+        : await api.removeMember(roomId, queued.target_user_id, { event: queued.event });
+      requireMatchingAcceptedEvent(result.event, queued.event, roomId);
       await db.removeRoomMembershipOutbox(roomId);
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === "membership_reconciliation_conflict") {
@@ -3073,7 +3084,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           }
         }
         try {
-          await api.commitAccountRemoval(task.deletion_id, task.room_id, queued.event);
+          const result = await api.commitAccountRemoval(task.deletion_id, task.room_id, queued.event);
+          requireMatchingAcceptedEvent(result.event, queued.event, task.room_id);
           await db.removeAccountRemovalOutbox(task.deletion_id, task.room_id);
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {

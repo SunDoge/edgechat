@@ -1541,6 +1541,13 @@ describe("single-server durable delivery", () => {
       body: JSON.stringify({ event: { ...unsigned, signature }, encrypted_state: JSON.stringify({ version: 1, welcome: "opaque-welcome", ratchet_tree: "opaque-tree" }) }),
     });
     expect(committed.status, await committed.clone().text()).toBe(200);
+    expect(await committed.json()).toMatchObject({ event: { event_id: unsigned.event_id, seq: 1, signature } });
+    const committedRetry = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/rooms/${encodeURIComponent(roomId)}`, {
+      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ event: { ...unsigned, signature }, encrypted_state: JSON.stringify({ version: 1, welcome: "opaque-welcome", ratchet_tree: "opaque-tree" }) }),
+    });
+    expect(committedRetry.status, await committedRetry.clone().text()).toBe(200);
+    expect(await committedRetry.json()).toMatchObject({ event: { event_id: unsigned.event_id, seq: 1, signature } });
     expect(await env.DB.prepare("SELECT joined_epoch, joined_seq FROM room_devices WHERE room_id = ? AND device_id = ?").bind(roomId, linkedDevice.id).first()).toMatchObject({ joined_epoch: 2, joined_seq: 1 });
     const complete = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
     expect(await complete.json()).toMatchObject({ status: "complete", user_id: account.user_id, history_transfer_ready: true, history_transfer_bytes: 4096, history_source_device_id: account.device_id, rooms: [{ room_id: roomId, status: "complete" }] });
@@ -1666,9 +1673,11 @@ describe("single-server durable delivery", () => {
     });
     const committed = await commitRequest();
     expect(committed.status, await committed.clone().text()).toBe(200);
-    expect(await committed.json()).toMatchObject({ status: "complete", target_device_id: secondary.device_id, rooms: [{ room_id: roomId, expected_epoch: 2, status: "complete", event_id: unsigned.event_id }] });
+    expect(await committed.json()).toMatchObject({ status: "complete", target_device_id: secondary.device_id, rooms: [{ room_id: roomId, expected_epoch: 2, status: "complete", event_id: unsigned.event_id }], event: { event_id: unsigned.event_id, seq: 2, signature } });
     expect(await closed).toEqual({ code: 4004, reason: "device revoked" });
-    expect((await commitRequest()).status).toBe(200);
+    const retry = await commitRequest();
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ event: { event_id: unsigned.event_id, seq: 2, signature } });
     expect((await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { authorization: `Bearer ${secondary.access_token}` } })).status).toBe(401);
     expect(await env.DB.prepare("SELECT mls_epoch FROM rooms WHERE room_id = ?").bind(roomId).first()).toMatchObject({ mls_epoch: 2 });
     expect(await env.DB.prepare("SELECT removed_epoch, removed_at FROM room_devices WHERE room_id = ? AND device_id = ?").bind(roomId, secondary.device_id).first()).toMatchObject({ removed_epoch: 2 });
@@ -2427,6 +2436,11 @@ describe("single-server durable delivery", () => {
     });
     expect(committedRemoval.status, await committedRemoval.clone().text()).toBe(200);
     expect(await committedRemoval.json()).toMatchObject({ deletion: { status: "complete", rooms: { pending: 0, complete: 1 } }, event: { event_id: removalUnsigned.event_id, seq: 2 } });
+    const removalRetry = await SELF.fetch(`https://edgechat.test/api/v1/account-removals/${deletionJob.deletion_id}/rooms/${encodeURIComponent(roomId)}`, {
+      method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ event: { ...removalUnsigned, signature: removalSignature } }),
+    });
+    expect(removalRetry.status, await removalRetry.clone().text()).toBe(200);
+    expect(await removalRetry.json()).toMatchObject({ event: { event_id: removalUnsigned.event_id, seq: 2, signature: removalSignature } });
     expect((await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { authorization: `Bearer ${alice.access_token}` } })).status).toBe(401);
     expect(await env.DB.prepare("SELECT display_name, deleted_at FROM users WHERE user_id = ?").bind(alice.user_id).first()).toMatchObject({ display_name: "Deleted user" });
     expect(await env.DB.prepare("SELECT created_by FROM rooms WHERE room_id = ?").bind(roomId).first()).toEqual({ created_by: bob.user_id });

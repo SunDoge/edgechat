@@ -1867,7 +1867,11 @@ async function commitDeviceLinkRoom(request: Request, env: Env, auth: AuthContex
   if (!link || link.user_id !== auth.userId) throw new HttpError(404, "Device link not found", "not_found");
   const task = await db.selectFrom("device_link_rooms").selectAll().where("link_id", "=", linkId).where("room_id", "=", roomId).executeTakeFirst();
   if (!task) throw new HttpError(404, "Device link room not found", "not_found");
-  if (task.status === "complete") return json({ link_id: linkId, room_id: roomId, status: "complete", event_id: task.event_id });
+  if (task.status === "complete") {
+    const stored = task.event_id ? await db.selectFrom("room_events").select("event_json").where("event_id", "=", task.event_id).executeTakeFirst() : null;
+    if (!stored) throw new HttpError(503, "Committed device-link event is temporarily unavailable", "committed_event_unavailable");
+    return json({ link_id: linkId, room_id: roomId, status: "complete", event: JSON.parse(stored.event_json) as RoomEvent });
+  }
   const body = await readJson(request, 800_000);
   const encryptedState = stringField(body, "encrypted_state", 300_000);
   const eventBody = body.event;
@@ -2126,7 +2130,8 @@ async function commitDeviceRevocation(request: Request, env: Env, auth: AuthCont
   if (!roomJob) throw new HttpError(404, "Revocation room not found", "not_found");
   if (roomJob.status === "complete") {
     const stored = roomJob.event_id ? await db.selectFrom("room_events").select("event_json").where("event_id", "=", roomJob.event_id).executeTakeFirst() : null;
-    return json({ ...(await finalizeDeviceRevocation(env, revocationId)), event: stored ? JSON.parse(stored.event_json) as RoomEvent : null });
+    if (!stored) throw new HttpError(503, "Committed device-revocation event is temporarily unavailable", "committed_event_unavailable");
+    return json({ ...(await finalizeDeviceRevocation(env, revocationId)), event: JSON.parse(stored.event_json) as RoomEvent });
   }
   if (job.status !== "pending") throw new HttpError(409, "Device revocation is already finalizing", "revocation_finalizing");
   const body = await readJson(request, 512_000);
@@ -2161,7 +2166,8 @@ async function commitAccountRemoval(request: Request, env: Env, auth: AuthContex
   if (!task || task.successor_user_id !== auth.userId) throw new HttpError(404, "Account removal task not found", "not_found");
   if (task.status === "complete") {
     const stored = task.event_id ? await db.selectFrom("room_events").select("event_json").where("event_id", "=", task.event_id).executeTakeFirst() : null;
-    return json({ deletion: await completeAccountRoomRemoval(env, deletionId, roomId, task.event_id ?? "", task.expected_epoch ?? 0, Date.now()), event: stored ? JSON.parse(stored.event_json) as RoomEvent : null });
+    if (!stored) throw new HttpError(503, "Committed account-removal event is temporarily unavailable", "committed_event_unavailable");
+    return json({ deletion: await completeAccountRoomRemoval(env, deletionId, roomId, task.event_id!, task.expected_epoch ?? 0, Date.now()), event: JSON.parse(stored.event_json) as RoomEvent });
   }
   const body = await readJson(request, 512_000);
   const eventBody = body.event && typeof body.event === "object" ? body.event as Record<string, unknown> : body;

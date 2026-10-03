@@ -191,8 +191,8 @@ export class ApiClient {
   mlsKeyPackageStatus() { return this.request<MlsKeyPackageStatus>("/api/v1/mls/key-packages"); }
   uploadMlsKeyPackages(packages: string[]) { return this.request<MlsKeyPackageStatus & { uploaded: number }>("/api/v1/mls/key-packages", { method: "POST", body: JSON.stringify({ mls_key_packages: packages }) }); }
   claimMlsKeyPackages(userIds: string[], roomId: RoomId) { return this.request<{ key_packages: ClaimedMlsKeyPackage[] }>("/api/v1/mls/key-packages/claim", { method: "POST", body: JSON.stringify({ user_ids: userIds, room_id: roomId }) }); }
-  addMember(roomId: RoomId, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members`, { method: "POST", body: JSON.stringify(payload) }); }
-  removeMember(roomId: RoomId, userId: string, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE", body: JSON.stringify(payload) }); }
+  addMember(roomId: RoomId, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number; event: RoomEvent }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members`, { method: "POST", body: JSON.stringify(payload) }); }
+  removeMember(roomId: RoomId, userId: string, payload: Record<string, unknown>) { return this.request<{ room_id: RoomId; user_id: string; epoch: number; event: RoomEvent }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE", body: JSON.stringify(payload) }); }
   requestRoomLeave(roomId: RoomId) { return this.request<{ request_id: string; room_id: RoomId; status: "pending" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/leave`, { method: "POST" }); }
   cancelRoomLeave(roomId: RoomId) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/leave`, { method: "DELETE" }); }
   roomLeaveTasks() { return this.request<{ tasks: RoomLeaveTask[] }>("/api/v1/room-leave-tasks"); }
@@ -205,11 +205,11 @@ export class ApiClient {
   activeDeviceRevocations() { return this.request<{ revocations: DeviceRevocation[] }>("/api/v1/device-revocations"); }
   prepareDeviceRevocation(deviceId: string) { return this.request<DeviceRevocation>(`/api/v1/devices/${encodeURIComponent(deviceId)}/revocations`, { method: "POST" }); }
   commitDeviceRevocation(revocationId: string, roomId: RoomId, event: ClientEvent) {
-    return this.request<DeviceRevocation & { event: RoomEvent | null }>(`/api/v1/device-revocations/${encodeURIComponent(revocationId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify(event) });
+    return this.request<DeviceRevocation & { event: RoomEvent }>(`/api/v1/device-revocations/${encodeURIComponent(revocationId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify(event) });
   }
   accountRemovalTasks() { return this.request<{ tasks: AccountRemovalTask[] }>("/api/v1/account-removals"); }
   commitAccountRemoval(deletionId: string, roomId: RoomId, event: ClientEvent) {
-    return this.request<{ deletion: AccountDeletionProgress; event: RoomEvent | null }>(`/api/v1/account-removals/${encodeURIComponent(deletionId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify({ event }) });
+    return this.request<{ deletion: AccountDeletionProgress; event: RoomEvent }>(`/api/v1/account-removals/${encodeURIComponent(deletionId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify({ event }) });
   }
   accountExport() { return this.request<Record<string, unknown>>("/api/v1/account/export"); }
   accountExportRooms(cursor?: string) { return this.request<AccountExportPage<{ rooms: Array<Record<string, unknown>> }>>(`/api/v1/account/export/rooms?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
+import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -63,6 +63,16 @@ describe("federation-ready identifiers", () => {
     expect(new TextDecoder().decode(canonicalSignedEventBytes(event))).toContain('\"signature\":\"signature\"');
     const receipt = { version: 1 as const, key_id: "v1", room_id: event.room_id, seq: 7, event_id: event.event_id, event_hash: "hash", retention_generation: 2, accepted_at: 3 };
     expect(JSON.parse(new TextDecoder().decode(canonicalAcceptanceReceiptBytes(receipt)))).toEqual(receipt);
+  });
+
+  it("only accepts server ordering for the exact submitted signed envelope", () => {
+    const submitted: ClientEvent = { event_id: "$01234567:example.com", room_id: "!0123456789abcdef:example.com", sender: "@alice:example.com", device_id: "phone", type: "control.group.commit", created_at: 1, ciphertext: "commit", metadata: { mls_epoch: 2 }, signature: "signature" };
+    const accepted = { ...submitted, seq: 7 };
+    expect(acceptedEventMatchesClientEvent(accepted, submitted)).toBe(true);
+    expect(acceptedEventMatchesClientEvent({ ...accepted, acceptance_receipt: { version: 1, key_id: "v1", room_id: submitted.room_id, seq: 7, event_id: submitted.event_id, event_hash: "hash", retention_generation: 1, accepted_at: 2, mac: "mac" } }, submitted)).toBe(true);
+    expect(acceptedEventMatchesClientEvent({ ...accepted, ciphertext: "substituted" }, submitted)).toBe(false);
+    expect(acceptedEventMatchesClientEvent({ ...accepted, signature: "substituted" }, submitted)).toBe(false);
+    expect(acceptedEventMatchesClientEvent(null, submitted)).toBe(false);
   });
 
   it("validates an ordered ciphertext envelope and binds its optional acceptance receipt", () => {

@@ -445,6 +445,19 @@ export function canonicalSignedEventBytes(event: ClientEvent): Uint8Array<ArrayB
   return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
 }
 
+function equalBytes(left: Uint8Array<ArrayBuffer>, right: Uint8Array<ArrayBuffer>): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * Verifies that a server acceptance only adds authoritative ordering/receipt data
+ * to the exact client-signed envelope that was submitted.
+ */
+export function acceptedEventMatchesClientEvent(accepted: unknown, submitted: ClientEvent, roomId: RoomId = submitted.room_id): accepted is RoomEvent {
+  return isRoomEventEnvelope(accepted) && accepted.room_id === roomId
+    && equalBytes(canonicalSignedEventBytes(accepted), canonicalSignedEventBytes(submitted));
+}
+
 export function draftEnvelopeAadBytes(envelope: Omit<DraftEnvelope, "ciphertext" | "signature">): Uint8Array<ArrayBuffer> {
   const ordered = {
     version: envelope.version, room_id: envelope.room_id, source_device_id: envelope.source_device_id,
