@@ -173,9 +173,13 @@ Normal attachment upload uses one client-chosen 192-bit opaque ID and one
 conditional PUT. D1 binds that ID to the uploader, room, size and ciphertext
 digest. Retrying after an ambiguous response returns the committed D1 row with
 zero object-store requests. Only the crash window after PUT but before D1
-finalization repeats the conditional PUT and performs one exact-key HEAD to
-validate the existing object; it never creates a second key or uses LIST. The
-client records the ID before its first request, so a terminal or downstream
+finalization retains an exact write intent. A byte-identical retry first uses
+one exact-key HEAD: matching size and bound metadata commits the existing object
+without reading it or retransmitting ciphertext; a missing object falls through
+to one conditional PUT. A conflicting object is rejected. This recovery never
+creates a second key or uses GET/LIST, and a normal first attempt still uses one
+PUT without a discovery HEAD. The client records the ID before its first
+request, so a terminal or downstream
 failure can cancel the exact claim. Cancellation marks the D1 intent first and
 uses one exact-key DELETE; a concurrently finishing PUT rechecks that marker and
 deletes the same key itself. It performs no discovery HEAD/LIST and returns the

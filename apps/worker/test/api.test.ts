@@ -1164,8 +1164,15 @@ describe("single-server durable delivery", () => {
       env.DB.prepare("UPDATE user_storage_usage SET attachment_bytes = attachment_bytes + 1, attachment_objects = attachment_objects + 1 WHERE user_id = ?").bind(alice.user_id),
     ]);
     await env.ARCHIVE.put(`attachments/${crashId}`, crashBody, { customMetadata: { roomId, uploaderUserId: alice.user_id, sha256: crashDigest } });
-    const crashRetry = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": crashId, "content-length": "1", "x-content-sha256": crashDigest }, body: crashBody });
+    let retryBodyCancelled = false;
+    const crashRetryBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) { controller.enqueue(new Uint8Array([100])); },
+      cancel() { retryBodyCancelled = true; },
+    });
+    const crashRetry = await SELF.fetch("https://edgechat.test/api/v1/attachments", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": crashId, "content-length": "1", "x-content-sha256": crashDigest }, body: crashRetryBody });
     expect(crashRetry.status, await crashRetry.clone().text()).toBe(201);
+    expect(retryBodyCancelled).toBe(true);
+    expect([...new Uint8Array(await (await env.ARCHIVE.get(`attachments/${crashId}`))!.arrayBuffer())]).toEqual([99]);
     expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(`attachments/${crashId}`).first()).toBeNull();
     expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(alice.user_id).first()).toEqual({ attachment_bytes: 1, attachment_objects: 1 });
     expect(await (await SELF.fetch("https://edgechat.test/api/v1/attachments/abandon", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ attachment_ids: [crashId] }) })).json()).toEqual({ abandoned: 1 });

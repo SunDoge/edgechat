@@ -4508,18 +4508,34 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
   let releaseReservation = false;
   const createdAt = Date.now();
   try {
-    const limited = exactLengthUploadStream(request.body, declaredSize);
-    const put = objectStore(env).put(key, limited.body, {
-      ifAbsent: true, expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream",
-      metadata: { roomId, uploaderUserId: auth.userId, sha256: suppliedDigest.text },
-    });
     let stored: ObjectStoreObject | null;
-    try {
-      stored = (await Promise.all([put, limited.completed]))[0];
-    } catch (error) {
-      if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Attachment digest mismatch", "invalid_attachment_digest"); }
-      if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length"); }
-      throw error;
+    if (!reservationCreated) {
+      // A matching D1 intent means an earlier response may have been lost after
+      // the object landed. Reconcile with one exact HEAD before paying for a
+      // second streamed PUT plus its conflict HEAD. A missing object still
+      // falls through to one PUT, and a first attempt never gains a HEAD.
+      const recovered = await objectStore(env).head(key);
+      if (recovered && (recovered.size !== declaredSize || recovered.metadata.roomId !== roomId
+        || recovered.metadata.uploaderUserId !== auth.userId || recovered.metadata.sha256 !== suppliedDigest.text)) {
+        await request.body.cancel().catch(() => undefined);
+        throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
+      }
+      stored = recovered;
+      if (stored) await request.body.cancel().catch(() => undefined);
+    } else stored = null;
+    if (!stored) {
+      const limited = exactLengthUploadStream(request.body, declaredSize);
+      const put = objectStore(env).put(key, limited.body, {
+        ifAbsent: true, expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream",
+        metadata: { roomId, uploaderUserId: auth.userId, sha256: suppliedDigest.text },
+      });
+      try {
+        stored = (await Promise.all([put, limited.completed]))[0];
+      } catch (error) {
+        if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Attachment digest mismatch", "invalid_attachment_digest"); }
+        if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Attachment length mismatch", "invalid_attachment_length"); }
+        throw error;
+      }
     }
     if (!stored || stored.size !== declaredSize) {
       if (stored) throw new HttpError(400, "Attachment length or digest mismatch", "invalid_attachment_digest");
