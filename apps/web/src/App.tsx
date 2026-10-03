@@ -18,7 +18,7 @@ import {
 } from "@tabler/icons-solidjs";
 import { LocalDatabase, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomAttachmentCursor, type LocalRoomListActivity, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
-import { acceptedEventMatchesClientEvent, canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
 import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
@@ -84,6 +84,7 @@ import { clearAccountExportStaging, createAccountExportStaging, createBoundedAcc
 import { startsNewMessageDay } from "./message-date";
 import { formatRoomActivityPreview } from "./room-list-preview";
 import { conversationExportFilename, streamConversationTranscript } from "./conversation-export";
+import { commitAcceptedControlEvent } from "./control-event-ack";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -97,13 +98,6 @@ type UnreadBoundary = { roomId: RoomId; messageId: string; seq: number };
 type RoomIdentityTrust = { status: DeviceTrustState; verified: number; total: number };
 type ExportWritable = { write(data: string | ArrayBuffer | Blob): Promise<void>; close(): Promise<void>; abort(reason?: unknown): Promise<void> };
 type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<{ createWritable(): Promise<ExportWritable> }> };
-
-function requireMatchingAcceptedEvent(accepted: unknown, submitted: ClientEvent, roomId: RoomId): RoomEvent {
-  if (!acceptedEventMatchesClientEvent(accepted, submitted, roomId)) {
-    throw new Error("服务器确认与本机已签名事件不一致，已保留待发送操作");
-  }
-  return accepted;
-}
 
 export function App(props: { localProfile: LocalProfile; localProfiles: LocalProfile[]; accessToken: string | null }) {
   const profileId = props.localProfile.profile_id;
@@ -2646,7 +2640,22 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         }
       }
       if (view.status === "complete" || view.status === "claimed") {
-        for (const room of view.rooms) await db.removeDeviceLinkOutbox(linkId, room.room_id);
+        for (const room of view.rooms) {
+          const queued = await db.deviceLinkOutbox(linkId, room.room_id);
+          if (!queued) continue;
+          const localEpoch = activeMls.epoch(room.room_id);
+          if (localEpoch < room.expected_epoch) {
+            if (localEpoch !== room.expected_epoch - 1) throw new Error(`房间 ${room.room_id} 的设备链接状态无法恢复`);
+            await mutateMls(async () => {
+              const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued.mls_state);
+              if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new Error("设备链接快照无效"); }
+              const previous = activeMls; activeMls = restored; mlsRef = restored; setMls(restored); await persistMls(restored); if (previous !== restored) previous.destroy();
+            });
+          }
+          await commitAcceptedControlEvent(queued.event, room.room_id,
+            () => api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state),
+            () => db.removeDeviceLinkOutbox(linkId, room.room_id));
+        }
         await db.removeDeviceLinkJob(linkId); setDevices((await api.devices()).devices); scheduleDraftSync(0);
         await deviceHistoryStaging.clearLink(linkId);
         setNotice(`新设备已安全加入现有加密对话${historyTransferWarning}`); setDeviceLinkOpen(false); return;
@@ -2656,14 +2665,21 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       for (const room of view.rooms) {
         let queued = await db.deviceLinkOutbox(linkId, room.room_id);
         if (room.status === "complete") {
-          if (queued && activeMls.epoch(room.room_id) === room.expected_epoch - 1) {
+          if (queued && activeMls.epoch(room.room_id) < room.expected_epoch) {
+            if (activeMls.epoch(room.room_id) !== room.expected_epoch - 1) throw new Error(`房间 ${room.room_id} 的设备链接状态无法恢复`);
             await mutateMls(async () => {
               const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, queued!.mls_state);
               if (restored.epoch(room.room_id) !== room.expected_epoch) { restored.destroy(); throw new Error("设备链接快照无效"); }
               const previous = activeMls; activeMls = restored; mlsRef = restored; setMls(restored); await persistMls(restored); if (previous !== restored) previous.destroy();
             });
           }
-          await db.removeDeviceLinkOutbox(linkId, room.room_id); continue;
+          if (queued) {
+            const completed = queued;
+            await commitAcceptedControlEvent(completed.event, room.room_id,
+              () => api.commitDeviceLinkRoom(linkId, room.room_id, completed.event, completed.encrypted_state),
+              () => db.removeDeviceLinkOutbox(linkId, room.room_id));
+          }
+          continue;
         }
         if (queued && Number(queued.event.metadata.mls_epoch) !== room.expected_epoch) {
           activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备链接提交");
@@ -2702,9 +2718,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           });
         }
         try {
-          const result = await api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state);
-          requireMatchingAcceptedEvent(result.event, queued.event, room.room_id);
-          await db.removeDeviceLinkOutbox(linkId, room.room_id);
+          await commitAcceptedControlEvent(queued.event, room.room_id,
+            () => api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state),
+            () => db.removeDeviceLinkOutbox(linkId, room.room_id));
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
             activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备链接提交");
@@ -2752,7 +2768,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       for (const room of job.rooms.filter((item) => item.status === "complete")) {
         const queued = await db.deviceRevocationOutbox(job.revocation_id, room.room_id);
         await reconcileQueuedState(queued, room.expected_epoch);
-        await db.removeDeviceRevocationOutbox(job.revocation_id, room.room_id);
+        if (queued) {
+          await commitAcceptedControlEvent(queued.event, room.room_id,
+            () => api.commitDeviceRevocation(job.revocation_id, room.room_id, queued.event),
+            () => db.removeDeviceRevocationOutbox(job.revocation_id, room.room_id));
+        }
       }
       for (const room of job.rooms.filter((item) => item.status === "pending")) {
         let queued = await db.deviceRevocationOutbox(job.revocation_id, room.room_id);
@@ -2792,10 +2812,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         }
         await reconcileQueuedState(queued, room.expected_epoch);
         try {
-          const result = await api.commitDeviceRevocation(job.revocation_id, room.room_id, queued.event);
-          requireMatchingAcceptedEvent(result.event, queued.event, room.room_id);
+          const result = await commitAcceptedControlEvent(queued.event, room.room_id,
+            () => api.commitDeviceRevocation(job.revocation_id, room.room_id, queued.event),
+            () => db.removeDeviceRevocationOutbox(job.revocation_id, room.room_id));
           job = result;
-          await db.removeDeviceRevocationOutbox(job.revocation_id, room.room_id);
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
             activeMls = await restoreMlsBeforeQueuedCommit(room.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "设备撤销提交");
@@ -2903,13 +2923,14 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
     await reconcileRoomMembershipState(queued);
     const expectedEpoch = Number(queued.event.metadata.mls_epoch);
+    const membershipChange = queued;
     try {
-      const result = queued.operation === "add"
-        ? await api.addMember(roomId, { user_id: queued.target_user_id, event: queued.event, mls_welcome: queued.mls_welcome,
-          mls_ratchet_tree: queued.mls_ratchet_tree, mls_recipients: queued.target_device_ids, mls_claim_ids: queued.mls_claim_ids })
-        : await api.removeMember(roomId, queued.target_user_id, { event: queued.event });
-      requireMatchingAcceptedEvent(result.event, queued.event, roomId);
-      await db.removeRoomMembershipOutbox(roomId);
+      await commitAcceptedControlEvent(membershipChange.event, roomId,
+        () => membershipChange.operation === "add"
+          ? api.addMember(roomId, { user_id: membershipChange.target_user_id, event: membershipChange.event, mls_welcome: membershipChange.mls_welcome,
+            mls_ratchet_tree: membershipChange.mls_ratchet_tree, mls_recipients: membershipChange.target_device_ids, mls_claim_ids: membershipChange.mls_claim_ids })
+          : api.removeMember(roomId, membershipChange.target_user_id, { event: membershipChange.event }),
+        () => db.removeRoomMembershipOutbox(roomId));
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === "membership_reconciliation_conflict") {
         const latest = (await api.room(roomId)).room;
@@ -3084,9 +3105,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           }
         }
         try {
-          const result = await api.commitAccountRemoval(task.deletion_id, task.room_id, queued.event);
-          requireMatchingAcceptedEvent(result.event, queued.event, task.room_id);
-          await db.removeAccountRemovalOutbox(task.deletion_id, task.room_id);
+          const removal = queued;
+          await commitAcceptedControlEvent(removal.event, task.room_id,
+            () => api.commitAccountRemoval(task.deletion_id, task.room_id, removal.event),
+            () => db.removeAccountRemovalOutbox(task.deletion_id, task.room_id));
         } catch (cause) {
           if (cause instanceof ApiError && cause.code === "stale_epoch") {
             activeMls = await restoreMlsBeforeQueuedCommit(task.room_id, Number(queued.event.metadata.mls_epoch), queued.previous_mls_state, "账户移除提交");
