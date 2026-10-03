@@ -82,6 +82,10 @@ function assertCleanBrowserRun() {
   if (failures.length) throw new Error(`browser reported ${failures.length} unexpected failure(s)`);
 }
 
+function timelineMessage(page, text) {
+  return page.getByRole("list", { name: "消息", exact: true }).getByText(text, { exact: true });
+}
+
 async function register(page, account) {
   await page.goto(browserUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
   const displayName = page.getByLabel("显示名称");
@@ -157,7 +161,7 @@ async function main() {
     await alicePage.getByRole("dialog").waitFor({ state: "hidden", timeout: 120_000 });
     await alicePage.getByRole("textbox", { name: "消息", exact: true }).fill(firstMessage);
     await alicePage.getByRole("button", { name: "发送", exact: true }).click();
-    await alicePage.getByText(firstMessage, { exact: true }).waitFor({ timeout: 120_000 });
+    await timelineMessage(alicePage, firstMessage).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "alice-sent" }));
 
     await bobPage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
@@ -166,8 +170,17 @@ async function main() {
     // recipient accepts. Seeing the request after a reload proves durable
     // sync; accepting then projects/decrypts the event locally.
     await bobPage.getByText("接受后才能回复", { exact: true }).waitFor({ timeout: 120_000 });
+    const requestAcceptance = bobPage.waitForResponse((response) => response.request().method() === "POST"
+      && new URL(response.url()).pathname === `/api/v1/rooms/${encodeURIComponent(roomId)}/request/accept`, { timeout: 120_000 });
     await bobPage.getByRole("button", { name: "接受", exact: true }).click();
-    await bobPage.getByText(firstMessage, { exact: true }).waitFor({ timeout: 120_000 });
+    const acceptanceResponse = await requestAcceptance;
+    if (!acceptanceResponse.ok()) throw new Error(`message-request acceptance failed with ${acceptanceResponse.status()}: ${(await acceptanceResponse.text()).slice(0, 1_000)}`);
+    // The plaintext was already rendered in the request preview, so waiting
+    // for it cannot prove that the asynchronous acceptance and room reload
+    // completed. Wait for the request gate itself to disappear before any
+    // attachment or reply that the server must reject while still pending.
+    await bobPage.getByText("接受后才能回复", { exact: true }).waitFor({ state: "hidden", timeout: 120_000 });
+    await timelineMessage(bobPage, firstMessage).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "bob-synced-and-decrypted" }));
 
     await verifyIdempotentAttachment(alice, roomId);
@@ -182,14 +195,14 @@ async function main() {
     await bobComposer.waitFor({ state: "visible", timeout: 120_000 });
     await bobComposer.fill(reply, { timeout: 120_000 });
     await bobPage.getByRole("button", { name: "发送", exact: true }).click();
-    await bobPage.getByText(reply, { exact: true }).waitFor({ timeout: 120_000 });
+    await timelineMessage(bobPage, reply).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "bob-replied" }));
 
-    try { await alicePage.getByText(reply, { exact: true }).waitFor({ timeout: 15_000 }); }
+    try { await timelineMessage(alicePage, reply).waitFor({ timeout: 15_000 }); }
     catch {
       await alicePage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
       await alicePage.getByText(bob.name, { exact: true }).first().click();
-      await alicePage.getByText(reply, { exact: true }).waitFor({ timeout: 120_000 });
+      await timelineMessage(alicePage, reply).waitFor({ timeout: 120_000 });
     }
     console.log(JSON.stringify({ step: "alice-received" }));
 
@@ -211,7 +224,7 @@ async function main() {
     const aliceComposer = alicePage.getByRole("textbox", { name: "消息", exact: true });
     await aliceComposer.fill(savedMessage, { timeout: 120_000 });
     await alicePage.getByRole("button", { name: "发送", exact: true }).click();
-    await alicePage.getByText(savedMessage, { exact: true }).waitFor({ timeout: 120_000 });
+    await timelineMessage(alicePage, savedMessage).waitFor({ timeout: 120_000 });
     await alicePage.getByText(/· 已发送$/).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "saved-message-sent" }));
     assertCleanBrowserRun();
