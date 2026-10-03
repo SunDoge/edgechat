@@ -2,6 +2,7 @@ import { Show, children, createEffect, createSignal, onCleanup, onMount, splitPr
 import { Portal } from "solid-js/web";
 import { IconBookmark, IconMessageCircle, IconUsers, IconX } from "@tabler/icons-solidjs";
 import clsx from "clsx";
+import { useI18n } from "../i18n";
 
 const dialogStack: symbol[] = [];
 let modalIsolationCount = 0;
@@ -58,6 +59,7 @@ export function IconButton(props: JSX.ButtonHTMLAttributes<HTMLButtonElement> & 
 }
 
 export function Dialog(props: { id: string; title: string; description?: string; onClose: () => void; children: JSX.Element; footer?: JSX.Element; class?: string }) {
+  const { t } = useI18n();
   let dialog: HTMLElement | undefined;
   const token = Symbol(props.id);
   const content = children(() => props.children);
@@ -88,7 +90,7 @@ export function Dialog(props: { id: string; title: string; description?: string;
   });
   return <Portal><div class="fixed inset-0 z-20 grid items-end bg-black/35 p-0 backdrop-blur-[2px] sm:place-items-center sm:p-5" onPointerDown={(event) => event.target === event.currentTarget && dialogStack.at(-1) === token && props.onClose()}>
     <section ref={dialog} tabindex={-1} role="dialog" aria-modal="true" aria-labelledby={`${props.id}-title`} aria-describedby={props.description ? `${props.id}-description` : undefined} class={clsx("max-h-[88dvh] w-full overflow-auto rounded-t-2xl bg-white shadow-xl outline-none sm:max-w-lg sm:rounded-xl", props.class)}>
-      <header class="flex items-center justify-between border-b border-black/5 px-5 py-4"><div><h2 id={`${props.id}-title`} class="text-lg font-semibold text-ink">{props.title}</h2>{props.description && <p id={`${props.id}-description`} class="mt-1 text-sm text-muted">{props.description}</p>}</div><IconButton label="关闭" onClick={props.onClose}><IconX class="size-4 stroke-muted"/></IconButton></header>
+      <header class="flex items-center justify-between border-b border-black/5 px-5 py-4"><div><h2 id={`${props.id}-title`} class="text-lg font-semibold text-ink">{props.title}</h2>{props.description && <p id={`${props.id}-description`} class="mt-1 text-sm text-muted">{props.description}</p>}</div><IconButton label={t("common.close")} onClick={props.onClose}><IconX class="size-4 stroke-muted"/></IconButton></header>
       {content()}{footer()}
     </section>
   </div></Portal>;
