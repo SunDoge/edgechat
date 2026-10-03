@@ -52,6 +52,18 @@ describe("PWA share target", () => {
     expect(multi?.files).toHaveLength(2);
   });
 
+  it("reconstructs service-worker byte records as local Blobs", async () => {
+    const id = "123e4567-e89b-12d3-a456-426614174099";
+    const bytes = new TextEncoder().encode("webkit-safe");
+    const normalized = normalizeStagedShare({
+      version: 2, id, created_at: 1, title: "", text: "caption", url: "",
+      files: [{ bytes: bytes.buffer, name: "safe.txt", type: "text/plain", size: bytes.byteLength, last_modified: 2 }],
+    }, id, 2);
+    expect(normalized?.files).toHaveLength(1);
+    expect(normalized?.files[0]).toMatchObject({ name: "safe.txt", type: "text/plain", size: 11, last_modified: 2 });
+    await expect(normalized?.files[0]?.blob.text()).resolves.toBe("webkit-safe");
+  });
+
   it("rejects excessive count, individual size, and aggregate size before sending", () => {
     const id = "123e4567-e89b-12d3-a456-426614174000";
     const base = { version: 2 as const, id, created_at: 1, title: "", text: "", url: "" };

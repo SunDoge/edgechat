@@ -166,7 +166,7 @@ export type RoomProfileAvatar = {
 };
 
 export const roomEventTypes = [
-  "message.text", "message.file", "message.image", "message.contact", "message.delete", "message.edit", "message.reaction",
+  "message.text", "message.file", "message.contact", "message.delete", "message.edit", "message.reaction",
   "control.member.add", "control.member.remove", "control.device.add",
   "control.device.revoke", "control.key.update", "control.group.commit", "control.message-expiry", "control.room.profile", "control.owner.transfer",
   "receipt.read", "receipt.delivered", "typing.start", "typing.stop",

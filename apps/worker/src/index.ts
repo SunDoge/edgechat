@@ -55,7 +55,7 @@ const READINESS_BACKGROUND_WORK_SLO_MS = 24 * 60 * 60 * 1_000;
 const READINESS_APPEAL_SLO_MS = 7 * 24 * 60 * 60 * 1_000;
 const UNCOMMITTED_ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const PENDING_R2_WRITE_TTL_MS = 15 * 60 * 1_000;
-const visibleMessageEventTypes = new Set(["message.text", "message.file", "message.image", "message.contact"]);
+const visibleMessageEventTypes = new Set(["message.text", "message.file", "message.contact"]);
 
 function validateArchiveV3Envelope(bytes: Uint8Array, totalBytes: number, startSeq: number, endSeq: number, uploaderDeviceId: string, activeDeviceIds: Set<string>): void {
   const invalid = () => { throw new HttpError(400, "Invalid archive segment v3 envelope", "invalid_segment_envelope"); };

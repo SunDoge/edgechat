@@ -25,9 +25,9 @@ describe("PGlite local full-text index", () => {
     const db = new PGlite(); await db.exec(LOCAL_SCHEMA);
     const room = "!expiring:example.com";
     await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload,search_vector,expires_at)
-      VALUES ('expired-event','$expired:example.com',$1,1,'@alice:example.com','phone','message.image',1,'opaque','searchable banana','{}',to_tsvector('simple','searchable banana'),100),
+      VALUES ('expired-event','$expired:example.com',$1,1,'@alice:example.com','phone','message.file',1,'opaque','searchable banana','{}',to_tsvector('simple','searchable banana'),100),
              ('live-event','$live:example.com',$1,2,'@alice:example.com','phone','message.text',2,'opaque','keep me','{}',to_tsvector('simple','keep me'),300)`, [room]);
-    await db.query("INSERT INTO message_parts (part_id,message_id,position,kind,attachment_id,metadata) VALUES ('part','$expired:example.com',0,'image','attachment','{}')");
+    await db.query("INSERT INTO message_parts (part_id,message_id,position,kind,attachment_id,metadata) VALUES ('part','$expired:example.com',0,'attachment','attachment','{}')");
     await db.query("INSERT INTO attachments (attachment_id,room_id,event_id,message_id,part_id,mime_type,plaintext_bytes,width,height,local_status,metadata) VALUES ('attachment',$1,'expired-event','$expired:example.com','part','image/png',4,1,1,'ready','{}')", [room]);
     await db.query("INSERT INTO image_embeddings VALUES ('attachment','clip','1','1',2,$1,1)", [new Uint8Array(new Float32Array([1, 0]).buffer)]);
     await db.query("INSERT INTO message_edits VALUES ('edit','$expired:example.com',$1,3,'@alice:example.com','edited searchable',3)", [room]);
@@ -194,7 +194,7 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO room_read_state VALUES ($1,0,0,1)", [room]);
     await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload,search_vector)
       VALUES ('alice-event','$alice:example.com',$1,1,'@alice:example.com','a','message.text',1,'cipher','visible apricot','{}',to_tsvector('simple','visible apricot')),
-             ('bob-event','$bob:example.com',$1,2,'@bob:example.com','b','message.image',2,'cipher','hidden banana','{}',to_tsvector('simple','hidden banana'))`, [room]);
+             ('bob-event','$bob:example.com',$1,2,'@bob:example.com','b','message.file',2,'cipher','hidden banana','{}',to_tsvector('simple','hidden banana'))`, [room]);
     await db.query("INSERT INTO attachments (attachment_id,room_id,event_id,message_id,part_id,mime_type,plaintext_bytes,width,height,local_status,metadata) VALUES ('image-bob',$1,'bob-event','$bob:example.com','part','image/png',1,1,1,'ready',$2::jsonb)", [room, JSON.stringify({ name: "banana.png" })]);
     await db.query("INSERT INTO image_embeddings VALUES ('image-bob','clip','1','1',2,$1,1)", [new Uint8Array(new Float32Array([1, 0]).buffer)]);
     await db.query(SET_HIDDEN_ROOM_MEMBERS_SQL, [room, JSON.stringify(["@bob:example.com"]), 1]);
@@ -393,10 +393,10 @@ describe("PGlite local full-text index", () => {
     await db.exec(LOCAL_SCHEMA);
     await db.query(
       `INSERT INTO messages (event_id, message_id, room_id, seq, sender, device_id, event_type, created_at, ciphertext, plaintext, payload)
-       VALUES ('event-2','$message:example.com','!0123456789abcdef:example.com',2,'@alice:example.com','d','message.image',2,'cipher','caption','{}')`,
+       VALUES ('event-2','$message:example.com','!0123456789abcdef:example.com',2,'@alice:example.com','d','message.file',2,'cipher','caption','{}')`,
     );
     await db.query("INSERT INTO attachments (attachment_id, room_id, event_id, message_id, part_id, local_status, metadata) VALUES ('a','!0123456789abcdef:example.com','event-2','$message:example.com','part','remote','{}')");
-    await db.query("INSERT INTO message_parts (part_id, message_id, position, kind, attachment_id) VALUES ('part','$message:example.com',0,'image','a')");
+    await db.query("INSERT INTO message_parts (part_id, message_id, position, kind, attachment_id) VALUES ('part','$message:example.com',0,'attachment','a')");
     const vector = new Uint8Array(new Float32Array([1, 0, 0]).buffer);
     await db.query("INSERT INTO image_embeddings VALUES ('a','clip','v1','p1',3,$1,1)", [vector]);
     const result = await db.query<{ message_id: string; dimensions: number }>("SELECT m.message_id, e.dimensions FROM messages m JOIN attachments a USING (message_id) JOIN image_embeddings e USING (attachment_id)");
@@ -409,12 +409,12 @@ describe("PGlite local full-text index", () => {
     const room = "!0123456789abcdef:example.com";
     for (const [seq, sender, deleted] of [[1, "@alice:example.com", false], [2, "@hidden:example.com", false], [3, "@alice:example.com", true], [4, "@alice:example.com", false], [5, "@alice:example.com", false]] as const) {
       await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,payload,deleted_at)
-        VALUES ($1,$2,$3,$4,$5,'phone','message.image',$4,'cipher','{}',$6)`, [`event-${seq}`, `$message${seq}:example.com`, room, seq, sender, deleted ? seq : null]);
+        VALUES ($1,$2,$3,$4,$5,'phone','message.file',$4,'cipher','{}',$6)`, [`event-${seq}`, `$message${seq}:example.com`, room, seq, sender, deleted ? seq : null]);
       const partCount = seq === 4 ? 2 : 1;
       for (let position = 0; position < partCount; position += 1) {
         const attachmentId = `attachment-${seq}-${position}`; const partId = `part-${seq}-${position}`;
         await db.query("INSERT INTO attachments (attachment_id,room_id,event_id,message_id,part_id,local_status,metadata) VALUES ($1,$2,$3,$4,$5,'remote',$6::jsonb)", [attachmentId, room, `event-${seq}`, `$message${seq}:example.com`, partId, JSON.stringify({ id: attachmentId, name: `${seq}.png`, type: "image/png", size: 10, key: "key", nonce: "nonce" })]);
-        await db.query("INSERT INTO message_parts (part_id,message_id,position,kind,attachment_id) VALUES ($1,$2,$3,'image',$4)", [partId, `$message${seq}:example.com`, position, attachmentId]);
+        await db.query("INSERT INTO message_parts (part_id,message_id,position,kind,attachment_id) VALUES ($1,$2,$3,'attachment',$4)", [partId, `$message${seq}:example.com`, position, attachmentId]);
       }
     }
     await db.query("INSERT INTO room_hidden_senders VALUES ($1,'@hidden:example.com',1)", [room]);
@@ -432,8 +432,8 @@ describe("PGlite local full-text index", () => {
     const room = "!0123456789abcdef:example.com";
     const message = "$message1:example.com";
     await db.query(`INSERT INTO messages (event_id, message_id, room_id, seq, sender, device_id, event_type, created_at, ciphertext, plaintext, payload, search_vector)
-      VALUES ('event-delete-target',$1,$2,1,'@alice:example.com','d','message.image',1,'cipher','secret words','{}',to_tsvector('simple','secret words'))`, [message, room]);
-    await db.query("INSERT INTO message_parts (part_id, message_id, position, kind, attachment_id) VALUES ('part-delete',$1,0,'image','attachment-delete')", [message]);
+      VALUES ('event-delete-target',$1,$2,1,'@alice:example.com','d','message.file',1,'cipher','secret words','{}',to_tsvector('simple','secret words'))`, [message, room]);
+    await db.query("INSERT INTO message_parts (part_id, message_id, position, kind, attachment_id) VALUES ('part-delete',$1,0,'attachment','attachment-delete')", [message]);
     await db.query("INSERT INTO attachments (attachment_id, room_id, event_id, message_id, part_id, local_status, metadata) VALUES ('attachment-delete',$1,'event-delete-target',$2,'part-delete','remote','{}')", [room, message]);
     await db.query("INSERT INTO image_embeddings VALUES ('attachment-delete','clip','v1','p1',2,$1,1)", [new Uint8Array(new Float32Array([1, 0]).buffer)]);
     await db.query("INSERT INTO message_tombstones VALUES ($1,$2,'delete-event',2,'@alice:example.com',2)", [message, room]);
@@ -456,12 +456,12 @@ describe("PGlite local full-text index", () => {
   it("projects edits without changing stable part or attachment references", async () => {
     const original = { version: 2, message_id: "$message:example.com", parts: [
       { part_id: "text-part", kind: "text", text: "before" },
-      { part_id: "image-part", kind: "image", attachment: { id: "attachment" } },
+      { part_id: "image-part", kind: "attachment", attachment: { id: "attachment" } },
     ] };
     const edited = projectEditedPayload(original, original.message_id, "after");
     expect(edited.payload).toMatchObject({ parts: [
       { part_id: "text-part", kind: "text", text: "after" },
-      { part_id: "image-part", kind: "image", attachment: { id: "attachment" } },
+      { part_id: "image-part", kind: "attachment", attachment: { id: "attachment" } },
     ] });
     expect(projectEditedPayload(original, original.message_id, "").payload).toMatchObject({ parts: [{ part_id: "image-part" }] });
     expect(projectEditedPayload({ ...original, parts: original.parts.slice(1) }, original.message_id, "new caption").payload).toMatchObject({ parts: [{ kind: "text", text: "new caption" }, { part_id: "image-part" }] });
@@ -532,7 +532,7 @@ describe("PGlite local full-text index", () => {
       `INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload)
        VALUES ('a-visible','$a-visible:example.com',$1,1,'@bob:example.com','bob','message.text',10,'ciphertext','visible',$3::jsonb),
               ('a-hidden','$a-hidden:example.com',$1,2,'@mallory:example.com','mallory','message.text',20,'ciphertext','hidden',$4::jsonb),
-              ('b-visible','$b-visible:example.com',$2,1,'@bob:example.com','bob','message.image',15,'ciphertext',NULL,$5::jsonb)`,
+              ('b-visible','$b-visible:example.com',$2,1,'@bob:example.com','bob','message.file',15,'ciphertext',NULL,$5::jsonb)`,
       [roomA, roomB, JSON.stringify({ version: 2, message_id: "$a-visible:example.com", parts: [] }), JSON.stringify({ version: 2, message_id: "$a-hidden:example.com", parts: [] }), JSON.stringify({ version: 2, message_id: "$b-visible:example.com", parts: [] })],
     );
     await db.query("INSERT INTO room_hidden_senders VALUES ($1,'@mallory:example.com',20)", [roomA]);
@@ -570,9 +570,9 @@ describe("PGlite local full-text index", () => {
     const room = "!retention:example.com";
     await db.query("UPDATE sync_state SET cursor = 77, updated_at = 77 WHERE id = 1");
     await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload,search_vector)
-      VALUES ('old-event','$old:example.com',$1,1,'@alice:example.com','d','message.image',100,'cipher','expired secret','{}',to_tsvector('simple','expired secret')),
+      VALUES ('old-event','$old:example.com',$1,1,'@alice:example.com','d','message.file',100,'cipher','expired secret','{}',to_tsvector('simple','expired secret')),
              ('new-event','$new:example.com',$1,2,'@alice:example.com','d','message.text',300,'cipher','keep me','{}',to_tsvector('simple','keep me'))`, [room]);
-    await db.query("INSERT INTO message_parts (part_id,message_id,position,kind,attachment_id) VALUES ('old-part','$old:example.com',0,'image','old-attachment')");
+    await db.query("INSERT INTO message_parts (part_id,message_id,position,kind,attachment_id) VALUES ('old-part','$old:example.com',0,'attachment','old-attachment')");
     await db.query("INSERT INTO attachments (attachment_id,room_id,event_id,message_id,part_id,local_status,metadata) VALUES ('old-attachment',$1,'old-event','$old:example.com','old-part','remote','{}')", [room]);
     await db.query("INSERT INTO image_embeddings VALUES ('old-attachment','clip','v1','p1',2,$1,1)", [new Uint8Array(new Float32Array([1, 0]).buffer)]);
     await db.query("INSERT INTO message_edits VALUES ('edit','$old:example.com',$1,3,'@alice:example.com','edited',150)", [room]);

@@ -20,7 +20,7 @@ export type LocalMessageWindow = { messages: LocalMessage[]; hasOlder: boolean; 
 export type LocalRoomAttachmentCursor = { seq: number; position: number };
 export type LocalRoomAttachment = {
   attachment_id: string; message_id: string; room_id: RoomId; seq: number; sender: string;
-  created_at: number; position: number; kind: "image" | "voice" | "file";
+  created_at: number; position: number; kind: "attachment";
   metadata: Record<string, unknown>;
 };
 type LocalRoomAttachmentRow = Omit<LocalRoomAttachment, "kind" | "metadata"> & { kind: string; metadata: Record<string, unknown> | string };
@@ -63,14 +63,14 @@ export const SET_HIDDEN_ROOM_MEMBERS_SQL = `WITH desired(user_id) AS (SELECT jso
 export const ROOM_ATTACHMENTS_FIRST_PAGE_SQL = `SELECT a.attachment_id, m.message_id, m.room_id, m.seq, m.sender, m.created_at, p.position, p.kind, a.metadata
   FROM attachments a JOIN messages m ON m.message_id = a.message_id AND m.room_id = a.room_id
   JOIN message_parts p ON p.message_id = m.message_id AND p.attachment_id = a.attachment_id
-  WHERE m.room_id = $1 AND m.deleted_at IS NULL AND p.kind IN ('image','voice','file')
+  WHERE m.room_id = $1 AND m.deleted_at IS NULL AND p.kind = 'attachment'
     AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
   ORDER BY m.seq DESC, p.position DESC LIMIT $2`;
 
 export const ROOM_ATTACHMENTS_BEFORE_SQL = `SELECT a.attachment_id, m.message_id, m.room_id, m.seq, m.sender, m.created_at, p.position, p.kind, a.metadata
   FROM attachments a JOIN messages m ON m.message_id = a.message_id AND m.room_id = a.room_id
   JOIN message_parts p ON p.message_id = m.message_id AND p.attachment_id = a.attachment_id
-  WHERE m.room_id = $1 AND m.deleted_at IS NULL AND p.kind IN ('image','voice','file')
+  WHERE m.room_id = $1 AND m.deleted_at IS NULL AND p.kind = 'attachment'
     AND (m.seq < $2 OR (m.seq = $2 AND p.position < $3))
     AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
   ORDER BY m.seq DESC, p.position DESC LIMIT $4`;
@@ -99,14 +99,14 @@ export const ROOM_LIST_ACTIVITIES_SQL = `WITH latest_messages AS (
     SELECT DISTINCT ON (m.room_id) m.room_id, m.message_id, m.sender, m.event_type, m.created_at, m.plaintext, m.payload, m.deleted_at,
       NULL::text AS outbox_status, 0 AS source_priority
     FROM messages m
-    WHERE m.event_type IN ('message.text','message.file','message.image','message.contact')
+    WHERE m.event_type IN ('message.text','message.file','message.contact')
       AND NOT EXISTS (SELECT 1 FROM room_hidden_senders h WHERE h.room_id = m.room_id AND h.user_id = m.sender)
     ORDER BY m.room_id, m.seq DESC
   ), latest_outbox AS (
     SELECT DISTINCT ON (o.room_id) o.room_id, o.message_id, o.event_json->>'sender' AS sender, o.event_json->>'type' AS event_type,
       o.created_at, o.plaintext, o.payload, NULL::bigint AS deleted_at, o.status::text AS outbox_status, 1 AS source_priority
     FROM outbox o
-    WHERE o.event_json->>'type' IN ('message.text','message.file','message.image','message.contact')
+    WHERE o.event_json->>'type' IN ('message.text','message.file','message.contact')
     ORDER BY o.room_id, o.created_at DESC, o.event_id DESC
   ), candidates AS (SELECT * FROM latest_messages UNION ALL SELECT * FROM latest_outbox)
   SELECT DISTINCT ON (room_id) room_id, message_id, sender, event_type, created_at, plaintext, payload, deleted_at, outbox_status
@@ -605,7 +605,7 @@ export class LocalDatabase {
       cursor ? [roomId, cursor.seq, cursor.position, safeLimit + 1] : [roomId, safeLimit + 1],
     );
     const items = rows.slice(0, safeLimit).flatMap((row): LocalRoomAttachment[] => {
-      if (row.kind !== "image" && row.kind !== "voice" && row.kind !== "file") return [];
+      if (row.kind !== "attachment") return [];
       let metadata: unknown;
       try { metadata = jsonValue(row.metadata); } catch { return []; }
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];

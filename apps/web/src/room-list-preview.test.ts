@@ -27,8 +27,8 @@ describe("room list preview", () => {
   it("describes deleted messages and structured non-text parts", () => {
     expect(formatRoomActivityPreview(activity({ deleted_at: 2 }), "@alice:example.com", false, String)).toBe("消息已撤回");
     expect(formatRoomActivityPreview(activity({ payload: { version: 2, message_id: "$message:example.com", parts: [
-      { part_id: "one", kind: "image", attachment: { id: "one", name: "1.png", type: "image/png", size: 1, key: "k", nonce: "n" } },
-      { part_id: "two", kind: "image", attachment: { id: "two", name: "2.png", type: "image/png", size: 1, key: "k", nonce: "n" } },
+      { part_id: "one", kind: "attachment", attachment: { id: "one", name: "1.png", type: "image/png", size: 1, key: "k", nonce: "n" } },
+      { part_id: "two", kind: "attachment", attachment: { id: "two", name: "2.png", type: "image/png", size: 1, key: "k", nonce: "n" } },
     ] } }), "@alice:example.com", false, String)).toBe("2 张图片");
   });
 });

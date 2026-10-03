@@ -1,6 +1,6 @@
 import type { LocalMessage } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
-import { messageAttachments, messageContacts, messageQuote, messageText, normalizeMessagePayload, type MessagePayload } from "./media";
+import { attachmentPresentation, messageAttachments, messageContacts, messageQuote, messageText, normalizeMessagePayload, type MessagePayload } from "./media";
 
 const PAGE_SIZE = 500;
 const UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g;
@@ -66,7 +66,8 @@ export function formatConversationMessage(message: LocalMessage, displayName: (u
       if (text) lines.push(`内容：\n${indent(text)}`);
       for (const contact of messageContacts(payload)) lines.push(`联系人：${inlineText(contact.contact.display_name)} (${contact.contact.user_id})`);
       for (const part of messageAttachments(payload)) {
-        const kind = part.kind === "image" ? "图片" : part.kind === "voice" ? "语音" : "文件";
+        const presentation = attachmentPresentation(part.attachment);
+        const kind = presentation === "image" ? "图片" : presentation === "audio" ? "音频" : "文件";
         lines.push(`${kind}：${inlineText(part.attachment.name || "未命名附件")}（${byteSize(part.attachment.size)}；文件内容未包含）`);
       }
       if (!text && !messageContacts(payload).length && !messageAttachments(payload).length) lines.push("内容：[本机没有可导出的消息内容]");

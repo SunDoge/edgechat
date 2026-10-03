@@ -8,7 +8,7 @@ function message(id: string, attachment = false): LocalMessage {
   const payload = createMessagePayload(messageId, attachment ? "" : id, attachment ? { id: `${id}-file`, name: `${id}.jpg`, type: "image/jpeg", size: 4, key: "key", nonce: "nonce" } : undefined);
   return {
     event_id: id, message_id: messageId, room_id: "!0123456789abcdef:example.com", seq: 1,
-    sender: "@alice:example.com", device_id: "device", event_type: attachment ? "message.image" : "message.text",
+    sender: "@alice:example.com", device_id: "device", event_type: attachment ? "message.file" : "message.text",
     created_at: 1, ciphertext: "ciphertext", plaintext: attachment ? "" : id,
     payload: payload as unknown as Record<string, unknown>, deleted_at: null, deleted_by: null,
     delete_event_id: null, edited_at: null, edit_event_id: null, expires_at: null,

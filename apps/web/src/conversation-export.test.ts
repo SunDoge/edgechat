@@ -18,7 +18,7 @@ describe("conversation transcript export", () => {
   it("formats readable content without attachment keys, ciphertext or deleted plaintext", () => {
     const formatted = formatConversationMessage(message(1, { payload: { version: 2, message_id: "$message-1:example.com", parts: [
       { part_id: "text", kind: "text", text: "caption" },
-      { part_id: "image", kind: "image", attachment: { id: "opaque", name: "photo.png", type: "image/png", size: 2048, key: "secret-key", nonce: "secret-nonce" } },
+      { part_id: "image", kind: "attachment", attachment: { id: "opaque", name: "photo.png", type: "image/png", size: 2048, key: "secret-key", nonce: "secret-nonce" } },
     ] } }), () => "Alice");
     expect(formatted).toContain("caption"); expect(formatted).toContain("图片：photo.png（2.0 KiB；文件内容未包含）");
     expect(formatted).not.toContain("secret-key"); expect(formatted).not.toContain("server ciphertext"); expect(formatted).not.toContain("opaque");

@@ -6,12 +6,12 @@ import { ConversationMediaDialog, roomAttachmentMetadata } from "./ConversationM
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.restoreAllMocks(); });
 
-function item(kind: LocalRoomAttachment["kind"], seq: number): LocalRoomAttachment {
-  const id = `attachment-${kind}-${seq}-0123456789`;
+function item(presentation: "image" | "audio" | "file", seq: number): LocalRoomAttachment {
+  const id = `attachment-${presentation}-${seq}-0123456789`;
   return {
     attachment_id: id, message_id: `$message${seq}:example.com`, room_id: "!0123456789abcdef:example.com", seq,
-    sender: "@alice:example.com", created_at: seq, position: 0, kind,
-    metadata: { id, name: `${kind}-${seq}.bin`, type: kind === "image" ? "image/png" : "application/octet-stream", size: 1024, key: "key", nonce: "nonce" },
+    sender: "@alice:example.com", created_at: seq, position: 0, kind: "attachment",
+    metadata: { id, name: `${presentation}-${seq}.bin`, type: presentation === "image" ? "image/png" : presentation === "audio" ? "audio/ogg" : "application/octet-stream", size: 1024, key: "key", nonce: "nonce" },
   };
 }
 
@@ -25,7 +25,7 @@ describe("ConversationMediaDialog", () => {
   it("pages the local index, filters media, and opens the stable source message", async () => {
     const loadPage = vi.fn(async (cursor) => cursor
       ? { items: [item("file", 3)], next_cursor: null }
-      : { items: [item("image", 5), item("voice", 4)], next_cursor: { seq: 4, position: 0 } });
+      : { items: [item("image", 5), item("audio", 4)], next_cursor: { seq: 4, position: 0 } });
     const open = mount(loadPage);
     await vi.waitFor(() => expect(document.body.textContent).toContain("image-5.bin"));
     expect(document.body.textContent).toContain("更早的对话历史");

@@ -9,10 +9,10 @@ describe("device-local room history clear", () => {
     const room = "!clear-history:example.com";
     await db.query("INSERT INTO rooms VALUES ($1,'Room','direct',3,1)", [room]);
     await db.query(`INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload)
-      VALUES ('e1','$m1:example.com',$1,1,'@alice:example.com','d','message.image',1,'c','one','{}'),
+      VALUES ('e1','$m1:example.com',$1,1,'@alice:example.com','d','message.file',1,'c','one','{}'),
              ('e2','$m2:example.com',$1,2,'@bob:example.com','d','message.text',2,'c','two','{}'),
              ('e3','$m3:example.com',$1,3,'@bob:example.com','d','message.text',3,'c','three','{}')`, [room]);
-    await db.query("INSERT INTO message_parts VALUES ('part1','$m1:example.com',0,'image',NULL,'attachment-clear','{}')");
+    await db.query("INSERT INTO message_parts VALUES ('part1','$m1:example.com',0,'attachment',NULL,'attachment-clear','{}')");
     await db.query("INSERT INTO attachments (attachment_id,room_id,event_id,message_id,part_id,local_status,metadata) VALUES ('attachment-clear',$1,'e1','$m1:example.com','part1','ready','{}')", [room]);
     await db.query("INSERT INTO image_embeddings VALUES ('attachment-clear','model','v1','p1',1,$1,1)", [new Uint8Array(new Float32Array([1]).buffer)]);
     await db.query("INSERT INTO message_edits VALUES ('edit','$m1:example.com',$1,2,'@alice:example.com','edited',2)", [room]);

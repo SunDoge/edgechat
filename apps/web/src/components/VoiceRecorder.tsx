@@ -9,6 +9,10 @@ export function preferredVoiceMimeType(): string {
   return ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
 }
 
+export function supportsVoiceRecording(): boolean {
+  return typeof MediaRecorder !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia);
+}
+
 function extension(type: string): string { return type.includes("ogg") ? "ogg" : type.includes("mp4") ? "m4a" : "webm"; }
 function elapsedLabel(milliseconds: number): string { const seconds = Math.floor(milliseconds / 1000); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; }
 
@@ -19,7 +23,7 @@ export function VoiceRecorder(props: { contextId: string; disabled?: boolean; on
   async function start() {
     if (props.disabled || recording()) return;
     const type = preferredVoiceMimeType();
-    if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices?.getUserMedia) return props.onError("此浏览器暂不支持语音录制");
+    if (!supportsVoiceRecording()) return props.onError("此浏览器暂不支持语音录制，可通过附件按钮发送已有音频文件");
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
       chunks = []; cancelled = false; startedAt = Date.now(); recorder = new MediaRecorder(stream, { ...(type ? { mimeType: type } : {}), audioBitsPerSecond: 32_000 });

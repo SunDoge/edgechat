@@ -3,7 +3,7 @@ import { IconSearch } from "@tabler/icons-solidjs";
 import type { LocalMessage } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
 import type { ServerRoom } from "@edgechat/sync";
-import { messageAttachments, messageContacts, messageText, normalizeMessagePayload, type MessagePayload } from "../media";
+import { attachmentPresentation, messageAttachments, messageContacts, messageText, normalizeMessagePayload, type MessagePayload } from "../media";
 import { avatarColor, initials, roomTitle } from "../presenters";
 import { Avatar, Dialog } from "./primitives";
 
@@ -51,5 +51,6 @@ export function forwardSelectionSummary(messages: LocalMessage[]): string {
   const message = messages[0];
   if (!message) return "没有可转发的消息";
   const payload = normalizeMessagePayload((message.payload ?? {}) as MessagePayload, message.event_id);
-  return messageText(payload).trim() || (messageContacts(payload).length ? "联系人名片" : messageAttachments(payload)[0]?.kind === "image" ? "图片" : messageAttachments(payload)[0]?.kind === "voice" ? "语音消息" : "附件");
+  const firstAttachment = messageAttachments(payload)[0]?.attachment;
+  return messageText(payload).trim() || (messageContacts(payload).length ? "联系人名片" : firstAttachment ? attachmentPresentation(firstAttachment) === "image" ? "图片" : attachmentPresentation(firstAttachment) === "audio" ? firstAttachment.duration_ms ? "语音消息" : "音频" : "附件" : "加密消息");
 }

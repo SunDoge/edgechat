@@ -4,7 +4,7 @@ import type { LocalMessage, LocalReactionSummary } from "@edgechat/db";
 import type { MessageReference } from "@edgechat/protocol";
 import { EncryptedImage } from "./EncryptedImage";
 import { EncryptedAudio } from "./EncryptedAudio";
-import { isPreviewableImage, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextSnapshot, type AttachmentMetadata, type AttachmentPart, type ContactIdentity, type MessagePayload } from "../media";
+import { attachmentPresentation, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextSnapshot, type AttachmentMetadata, type AttachmentPart, type ContactIdentity, type MessagePayload } from "../media";
 import { outgoingReceiptLabel } from "../message-status";
 import { ContactCard } from "./ContactCard";
 import { firstMessageLink, messageTextSegments } from "../message-links";
@@ -60,7 +60,7 @@ export function MessageBubble(props: {
   const emojiMenuId = createUniqueId();
   const payload = () => normalizeMessagePayload((props.message.payload ?? {}) as MessagePayload, props.message.event_id);
   const attachments = () => messageAttachments(payload());
-  const isImageAlbum = () => attachments().length > 1 && attachments().every((part) => part.kind === "image" && isPreviewableImage(part.attachment.type));
+  const isImageAlbum = () => attachments().length > 1 && attachments().every((part) => attachmentPresentation(part.attachment) === "image");
   const relationTarget = () => payload().relation?.target.message_id ?? null;
   const quoteSnapshot = () => messageQuote(payload());
   const savedFrom = () => messageSavedFrom(payload());
@@ -102,7 +102,8 @@ export function MessageBubble(props: {
 
   function renderAttachment(part: AttachmentPart, compact = false) {
     const attachment = () => part.attachment;
-    return <Show when={part.kind === "voice"} fallback={<Show when={part.kind === "image" && isPreviewableImage(attachment().type)} fallback={
+    const presentation = () => attachmentPresentation(attachment());
+    return <Show when={presentation() === "audio"} fallback={<Show when={presentation() === "image"} fallback={
       <button type="button" class={`mt-2 flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium ${mine() ? "bg-white/10 text-white" : "bg-neutral-100 text-ink"}`} onClick={() => props.downloadAttachment(attachment())}>
         <IconPaperclip class={`size-4 shrink-0 ${mine() ? "stroke-white" : "stroke-muted"}`}/><span class="max-w-52 truncate">{attachment().name}</span><span class="text-xs opacity-70">{(attachment().size / 1024).toFixed(1)} KB</span>
       </button>

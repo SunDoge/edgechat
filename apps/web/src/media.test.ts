@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { attachmentEventType, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, isPreviewableImage, isVoiceAttachment, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
+import { attachmentEventType, attachmentEventTypeForFiles, attachmentPresentation, createContactMessagePayload, createForwardPayload, createMessagePayload, isAudioAttachment, isPreviewableImage, MAX_INLINE_IMAGE_BYTES, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
 
-describe("image message classification", () => {
-  it("uses image events only for safely previewable raster formats", () => {
-    expect(attachmentEventType({ type: "image/jpeg" })).toBe("message.image");
-    expect(attachmentEventType({ type: "image/webp" })).toBe("message.image");
+describe("unified attachment presentation", () => {
+  it("uses one attachment event and derives bounded previews locally", () => {
+    expect(attachmentEventType({ type: "image/jpeg" })).toBe("message.file");
+    expect(attachmentEventType({ type: "image/webp" })).toBe("message.file");
     expect(attachmentEventType({ type: "image/svg+xml" })).toBe("message.file");
     expect(attachmentEventType({ type: "text/html" })).toBe("message.file");
-    expect(attachmentEventTypeForFiles([{ type: "image/jpeg" }, { type: "image/png" }])).toBe("message.image");
+    expect(attachmentEventTypeForFiles([{ type: "image/jpeg" }, { type: "image/png" }])).toBe("message.file");
     expect(attachmentEventTypeForFiles([{ type: "image/jpeg" }, { type: "application/pdf" }])).toBe("message.file");
     expect(attachmentEventTypeForFiles([])).toBe("message.text");
+    expect(attachmentPresentation({ type: "image/jpeg", size: 1024, width: 800, height: 600 })).toBe("image");
+    expect(attachmentPresentation({ type: "image/jpeg", size: MAX_INLINE_IMAGE_BYTES + 1 })).toBe("file");
+    expect(attachmentPresentation({ type: "image/jpeg", size: 1024, width: 20_000, height: 100 })).toBe("file");
+    expect(attachmentPresentation({ type: "audio/mpeg", size: 1024 })).toBe("audio");
   });
 
   it("normalizes MIME casing", () => {
@@ -21,7 +25,7 @@ describe("image message classification", () => {
     expect(payload.message_id).toBe("$message:example.com");
     expect(new Set(payload.parts.map((part) => part.part_id)).size).toBe(2);
     expect(messageText(payload)).toBe("hello");
-    expect(messageAttachments(payload)[0].kind).toBe("image");
+    expect(messageAttachments(payload)[0].kind).toBe("attachment");
     expect(payload.relation?.target.message_id).toBe("$target123:example.com");
   });
 
@@ -91,19 +95,17 @@ describe("image message classification", () => {
     expect(messageAttachments(forwarded).map((part) => part.attachment.id)).toEqual(["alias-a", "alias-b"]);
   });
 
-  it("classifies bounded audio recordings as voice parts", () => {
-    expect(isVoiceAttachment({ type: "audio/webm;codecs=opus", duration_ms: 12_500 })).toBe(true);
-    expect(isVoiceAttachment({ type: "audio/webm", duration_ms: Number.NaN })).toBe(false);
-    expect(isVoiceAttachment({ type: "audio/webm", duration_ms: 600_001 })).toBe(false);
-    expect(isVoiceAttachment({ type: "application/octet-stream", duration_ms: 12_500 })).toBe(false);
+  it("treats audio as the same attachment type and keeps optional duration metadata", () => {
+    expect(isAudioAttachment({ type: "audio/webm;codecs=opus" })).toBe(true);
+    expect(isAudioAttachment({ type: "application/octet-stream" })).toBe(false);
 
     const payload = createMessagePayload("$voice:example.com", "", { id: "audio", name: "voice.webm", type: "audio/webm;codecs=opus", size: 42, key: "key", nonce: "nonce", duration_ms: 12_500 });
-    expect(messageAttachments(payload)[0]).toMatchObject({ kind: "voice", attachment: { duration_ms: 12_500 } });
+    expect(messageAttachments(payload)[0]).toMatchObject({ kind: "attachment", attachment: { duration_ms: 12_500 } });
   });
 
   it("preserves voice semantics while forwarding through a zero-copy alias", () => {
     const source = createMessagePayload("$voice-source:example.com", "", { id: "source-audio", name: "voice.ogg", type: "audio/ogg;codecs=opus", size: 42, key: "key", nonce: "nonce", duration_ms: 4_000 });
     const forwarded = createForwardPayload("$voice-forward:example.com", source, ["voice-alias"]);
-    expect(messageAttachments(forwarded)[0]).toMatchObject({ kind: "voice", attachment: { id: "voice-alias", duration_ms: 4_000 } });
+    expect(messageAttachments(forwarded)[0]).toMatchObject({ kind: "attachment", attachment: { id: "voice-alias", duration_ms: 4_000 } });
   });
 });

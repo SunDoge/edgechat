@@ -101,10 +101,15 @@ async function stageShareTarget(request) {
     else if (files.reduce((total, file) => total + file.size, 0) > SHARE_MAX_TOTAL_FILE_BYTES) error = "files_too_large";
     else if (combinedText.length > SHARE_MAX_TEXT) error = "text_too_long";
     else if (!combinedText && !files.length) error = "empty";
-    const stagedFiles = error ? [] : files.map(file => ({
-      blob: file.slice(), name: file.name.slice(0, 255), type: file.type.slice(0, 255),
+    // WebKit cannot reliably structured-clone a Blob derived from the File
+    // returned by ServiceWorker FormData into IndexedDB. Persist owned buffers
+    // and reconstruct Blobs in the page. Read sequentially to bound transient
+    // memory after the count/size checks. Bytes never leave the device or reach R2.
+    const stagedFiles = [];
+    if (!error) for (const file of files) stagedFiles.push({
+      bytes: await file.arrayBuffer(), name: file.name.slice(0, 255), type: file.type.slice(0, 255),
       size: file.size, last_modified: Number.isFinite(file.lastModified) ? file.lastModified : createdAt,
-    }));
+    });
     const db = await shareDatabase();
     try { await commitShare(db, { version: 2, id, created_at: createdAt, ...(error ? { title: "", text: "", url: "", files: [], error } : { title, text, url, files: stagedFiles }) }); }
     finally { db.close(); }

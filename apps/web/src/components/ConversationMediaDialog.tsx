@@ -1,10 +1,10 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { IconFile, IconMicrophone, IconPhoto, IconRefresh } from "@tabler/icons-solidjs";
 import type { LocalRoomAttachment, LocalRoomAttachmentCursor, LocalRoomAttachmentPage } from "@edgechat/db";
-import type { AttachmentMetadata } from "../media";
+import { attachmentPresentation, type AttachmentMetadata, type AttachmentPresentation } from "../media";
 import { Dialog } from "./primitives";
 
-type MediaFilter = "all" | LocalRoomAttachment["kind"];
+type MediaFilter = "all" | AttachmentPresentation;
 
 export function roomAttachmentMetadata(item: LocalRoomAttachment): AttachmentMetadata | null {
   const value = item.metadata;
@@ -66,13 +66,13 @@ export function ConversationMediaDialog(props: {
   onOpenMessage: (messageId: string) => void;
   onClose: () => void;
 }) {
-  const [items, setItems] = createSignal<Array<LocalRoomAttachment & { attachment: AttachmentMetadata }>>([]);
+  const [items, setItems] = createSignal<Array<LocalRoomAttachment & { attachment: AttachmentMetadata; presentation: AttachmentPresentation }>>([]);
   const [cursor, setCursor] = createSignal<LocalRoomAttachmentCursor | null>(null);
   const [hasMore, setHasMore] = createSignal(true);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   const [filter, setFilter] = createSignal<MediaFilter>("all");
-  const filtered = createMemo(() => filter() === "all" ? items() : items().filter((item) => item.kind === filter()));
+  const filtered = createMemo(() => filter() === "all" ? items() : items().filter((item) => item.presentation === filter()));
 
   async function loadMore() {
     if (loading() || !hasMore()) return;
@@ -81,7 +81,7 @@ export function ConversationMediaDialog(props: {
       const page = await props.loadPage(cursor());
       const normalized = page.items.flatMap((item) => {
         const attachment = roomAttachmentMetadata(item);
-        return attachment ? [{ ...item, attachment }] : [];
+        return attachment ? [{ ...item, attachment, presentation: attachmentPresentation(attachment) }] : [];
       });
       setItems((current) => [...current, ...normalized]);
       setCursor(page.next_cursor); setHasMore(Boolean(page.next_cursor));
@@ -91,7 +91,7 @@ export function ConversationMediaDialog(props: {
 
   onMount(() => void loadMore());
   const labels: Array<{ value: MediaFilter; label: string }> = [
-    { value: "all", label: "全部" }, { value: "image", label: "图片" }, { value: "voice", label: "语音" }, { value: "file", label: "文件" },
+    { value: "all", label: "全部" }, { value: "image", label: "图片" }, { value: "audio", label: "音频" }, { value: "file", label: "文件" },
   ];
 
   return <Dialog id="conversation-media" title="对话媒体" description={`${props.roomTitle} · 仅显示这台设备已索引的内容`} onClose={props.onClose} class="sm:max-w-3xl">
@@ -104,10 +104,10 @@ export function ConversationMediaDialog(props: {
         <Show when={filtered().length} fallback={<p class="py-16 text-center text-sm text-muted">当前分类中没有内容</p>}>
           <div class="grid grid-cols-2 gap-3 sm:grid-cols-3" role="list">
             <For each={filtered()}>{(item) => <div role="listitem" class="min-w-0"><button type="button" class="flex h-full w-full flex-col overflow-hidden rounded-xl bg-white text-left ring-1 ring-black/8 transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand motion-reduce:transform-none" onClick={() => props.onOpenMessage(item.message_id)}>
-              <Show when={item.kind === "image"} fallback={<div class="grid aspect-[4/3] place-items-center bg-neutral-100"><Show when={item.kind === "voice"} fallback={<IconFile class="size-8 stroke-neutral-400"/>}><IconMicrophone class="size-8 stroke-neutral-400"/></Show></div>}>
+              <Show when={item.presentation === "image"} fallback={<div class="grid aspect-[4/3] place-items-center bg-neutral-100"><Show when={item.presentation === "audio"} fallback={<IconFile class="size-8 stroke-neutral-400"/>}><IconMicrophone class="size-8 stroke-neutral-400"/></Show></div>}>
                 <LocalImageThumbnail attachment={item.attachment} loadCached={props.loadCachedImage}/>
               </Show>
-              <span class="block w-full min-w-0 p-2.5"><strong class="block truncate text-sm font-medium text-ink">{item.kind === "voice" ? item.attachment.duration_ms ? `语音 · ${Math.max(1, Math.round(item.attachment.duration_ms / 1000))} 秒` : "语音消息" : item.attachment.name}</strong><small class="mt-1 block truncate text-xs text-muted">{props.displayName(item.sender)} · {new Date(Number(item.created_at)).toLocaleDateString("zh-CN")} · {formatBytes(item.attachment.size)}</small></span>
+              <span class="block w-full min-w-0 p-2.5"><strong class="block truncate text-sm font-medium text-ink">{item.presentation === "audio" && item.attachment.duration_ms ? `语音 · ${Math.max(1, Math.round(item.attachment.duration_ms / 1000))} 秒` : item.attachment.name}</strong><small class="mt-1 block truncate text-xs text-muted">{props.displayName(item.sender)} · {new Date(Number(item.created_at)).toLocaleDateString("zh-CN")} · {formatBytes(item.attachment.size)}</small></span>
             </button></div>}</For>
           </div>
         </Show>

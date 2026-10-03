@@ -188,6 +188,67 @@ try {
   invariant(cached.paths.some((path) => path.endsWith(".wasm")), "Wasm bundle was not precached");
   invariant(cached.paths.some((path) => path.endsWith(".data")), "PGlite data bundle was not precached");
 
+  const shareTarget = await page.evaluate(async () => {
+    const submit = async (files) => {
+      const form = new FormData();
+      form.set("title", "PWA share title");
+      form.set("text", "PWA share body");
+      form.set("url", "https://example.test/shared");
+      for (const file of files) form.append("files", file);
+      const response = await fetch("/share-target", { method: "POST", body: form });
+      if (!response.ok) throw new Error(`Share target returned ${response.status}`);
+      if (!response.headers.get("content-type")?.startsWith("text/html")) throw new Error("Share target did not redirect to the application shell");
+    };
+    await submit([
+      new File(["first local payload"], "first.txt", { type: "text/plain", lastModified: 10 }),
+      new File(["second local payload"], "second.txt", { type: "text/plain", lastModified: 20 }),
+    ]);
+    await submit(Array.from({ length: 11 }, (_, index) => new File(["x"], `${index}.txt`, { type: "text/plain" })));
+    const database = await new Promise((resolvePromise, reject) => {
+      const request = indexedDB.open("edgechat-share-target", 1);
+      request.onsuccess = () => resolvePromise(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const readAll = () => new Promise((resolvePromise, reject) => {
+      const request = database.transaction("shares", "readonly").objectStore("shares").getAll();
+      request.onsuccess = () => resolvePromise(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const remove = (id) => new Promise((resolvePromise, reject) => {
+      const transaction = database.transaction("shares", "readwrite");
+      transaction.objectStore("shares").delete(id);
+      transaction.oncomplete = () => resolvePromise();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    try {
+      const records = await readAll();
+      const accepted = records.find((record) => record.title === "PWA share title" && !record.error);
+      const rejected = records.find((record) => record.error === "too_many_files");
+      const result = {
+        accepted: accepted && {
+          version: accepted.version, title: accepted.title, text: accepted.text, url: accepted.url, error: accepted.error,
+          files: await Promise.all(accepted.files.map(async (file) => ({
+            name: file.name, size: file.size, type: file.type,
+            body: file.blob ? await file.blob.text() : new TextDecoder().decode(file.bytes),
+          }))),
+        },
+        rejected: rejected && { error: rejected.error, files: rejected.files },
+      };
+      if (accepted?.id) await remove(accepted.id);
+      if (rejected?.id) await remove(rejected.id);
+      return { ...result, records: records.map((record) => ({ id: record.id, version: record.version, title: record.title, error: record.error, fileCount: record.files?.length })), cleaned: (await readAll()).length === 0 };
+    } finally { database.close(); }
+  });
+  invariant(shareTarget.accepted?.version === 2, `Production share target did not stage the current format: ${JSON.stringify(shareTarget)}`);
+  invariant(shareTarget.accepted.title === "PWA share title" && shareTarget.accepted.text === "PWA share body"
+    && shareTarget.accepted.url === "https://example.test/shared" && !shareTarget.accepted.error, "Production share target changed shared text or URL metadata");
+  invariant(JSON.stringify(shareTarget.accepted.files) === JSON.stringify([
+    { name: "first.txt", size: 19, type: "text/plain", body: "first local payload" },
+    { name: "second.txt", size: 20, type: "text/plain", body: "second local payload" },
+  ]), "Production share target changed staged file bytes or metadata");
+  invariant(shareTarget.rejected?.error === "too_many_files" && shareTarget.rejected.files?.length === 0, "Production share target accepted more than ten files");
+  invariant(shareTarget.cleaned, "Production share target test records were not deleted by exact identifier");
+
   const recoveryProfileId = await page.evaluate(async () => {
     const database = await new Promise((resolvePromise, reject) => {
       const request = indexedDB.open("edgechat-local-profiles");
@@ -265,7 +326,7 @@ try {
   invariant(serviceWorkerRequests >= 2, `Expected initial and update Service Worker requests, saw ${serviceWorkerRequests}`);
 
   await context.close();
-  console.log(`PWA ${requestedBrowser} rendered-update/recovery/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
+  console.log(`PWA ${requestedBrowser} share/update/recovery/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
 } finally {
   await browser?.close();
   await new Promise((resolvePromise) => server.close(resolvePromise));
