@@ -77,6 +77,7 @@ import { AttachmentCiphertextLoader } from "./attachment-loader";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
 import { createDeviceHistoryBundle } from "./device-history-bundle";
 import { openRoomPeerRecovery, RoomPeerRecoveryError, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
+import { RoomOperationError } from "./room-operation-error";
 import { historyRecoveryCopy, type HistoryRecoveryViewState } from "./history-recovery-ui";
 import { openComposerDraft, sealComposerDraft } from "./draft-sync";
 import { clearPushConfig, disablePush, reconcilePush, setActivePushProfile, suspendPush, type PushStatus } from "./push-subscription";
@@ -1109,7 +1110,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function requestPeerRecovery(roomId: RoomId, processedThrough: number, requiredThrough: number): Promise<void> {
-    if (!session() || !serverSupports(session()!.protocol, "room.peer-recovery.v1")) throw new Error("当前服务器不支持设备间历史恢复");
+    if (!session() || !serverSupports(session()!.protocol, "room.peer-recovery.v1")) throw new RoomOperationError("peer_recovery_unsupported");
     if (peerRecoveryByRoom.has(roomId)) return;
     setHistoryRecoveryState(roomId, { phase: "requesting" });
     const throughSeq = Math.min(requiredThrough, processedThrough + 500);
@@ -3124,7 +3125,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function reconcileRoomMembershipState(queued: RoomMembershipOutboxItem): Promise<void> {
     const currentIdentity = identityRef; const currentMls = mlsRef;
-    if (!currentIdentity || !currentMls) throw new Error("本机加密状态尚未就绪");
+    if (!currentIdentity || !currentMls) throw new RoomOperationError("crypto_not_ready");
     const expectedEpoch = Number(queued.event.metadata.mls_epoch);
     const localEpoch = currentMls.epoch(queued.room_id);
     if (localEpoch >= expectedEpoch) return;
@@ -3141,30 +3142,30 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function executeRoomMembershipChange(roomId: RoomId, operation?: "add" | "remove", targetUserId?: UserId, leaveRequestId?: string): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session();
-    if (!currentIdentity || !currentSession || !mlsRef) throw new Error("本机加密状态尚未就绪");
+    if (!currentIdentity || !currentSession || !mlsRef) throw new RoomOperationError("crypto_not_ready");
     let queued = await db.roomMembershipOutbox(roomId);
     if (queued && operation && (queued.operation !== operation || queued.target_user_id !== targetUserId)) {
-      throw new Error("这段群聊还有一项成员变更尚未完成，请先重试它");
+      throw new RoomOperationError("membership_busy");
     }
     if (!queued) {
       if (!operation || !targetUserId) return;
       const freshRoom = (await api.room(roomId)).room;
       const owner = freshRoom.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner");
-      if (freshRoom.kind !== "group" || freshRoom.purpose !== "chat" || !owner) throw new Error("只有群主可以管理成员");
+      if (freshRoom.kind !== "group" || freshRoom.purpose !== "chat" || !owner) throw new RoomOperationError("owner_required");
       if (!Number.isInteger(freshRoom.epoch) || !mlsRef.hasGroup(roomId) || mlsRef.epoch(roomId) !== freshRoom.epoch) {
-        await syncRef?.catchUp(); throw new Error("群聊密钥刚刚发生变化，请同步后重试");
+        await syncRef?.catchUp(); throw new RoomOperationError("keys_changed");
       }
 
       let targetDeviceIds: string[]; let claimIds: string[] = []; let keyPackages: string[] = [];
       if (operation === "add") {
         const claimed = await api.claimMlsKeyPackages([targetUserId], roomId);
-        if (!claimed.key_packages.length) throw new Error("对方没有可加入群聊的活跃设备");
+        if (!claimed.key_packages.length) throw new RoomOperationError("member_has_no_active_devices");
         targetDeviceIds = claimed.key_packages.map((item) => item.device_id);
         claimIds = claimed.key_packages.map((item) => item.claim_id);
         keyPackages = claimed.key_packages.map((item) => item.key_package);
       } else {
         targetDeviceIds = (await api.devices(targetUserId)).devices.filter((device) => device.kind === "user" && device.revoked_at === null).map((device) => device.device_id);
-        if (!targetDeviceIds.length) throw new Error("找不到该成员的活跃加密设备");
+        if (!targetDeviceIds.length) throw new RoomOperationError("member_has_no_active_devices");
       }
 
       await mutateMls(async () => {
@@ -3220,7 +3221,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (cause instanceof ApiError && cause.code === "stale_epoch") {
         if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "群成员变更");
         await db.removeRoomMembershipOutbox(roomId); await syncRef?.catchUp();
-        throw new Error("群聊密钥刚刚发生变化，已同步；请重新操作");
+        throw new RoomOperationError("keys_changed");
       }
       if (cause instanceof ApiError && cause.code === "room_leave_cancelled") {
         if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "退出群聊");
@@ -3239,13 +3240,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function transferRoomOwnership(room: ServerRoom, targetUserId: UserId): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(room.room_id)) throw new Error("群聊状态尚未就绪");
-    if (!serverSupports(currentSession.protocol, "rooms.owner-transfer.v1")) throw new Error("当前服务器不支持群主转让");
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(room.room_id)) throw new RoomOperationError("crypto_not_ready");
+    if (!serverSupports(currentSession.protocol, "rooms.owner-transfer.v1")) throw new RoomOperationError("owner_transfer_unsupported");
     if (room.kind !== "group" || room.purpose !== "chat"
-      || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner")) throw new Error("只有群主可以转让群聊");
-    if (!room.members.some((member) => member.user_id === targetUserId && member.role === "member")) throw new Error("新群主必须是当前群成员");
-    if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先恢复此群聊");
-    if ((await db.outbox(room.room_id)).some((item) => item.event.type === "control.owner.transfer")) throw new Error("已有群主转让正在等待发送");
+      || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner")) throw new RoomOperationError("owner_required");
+    if (!room.members.some((member) => member.user_id === targetUserId && member.role === "member")) throw new RoomOperationError("owner_transfer_target_invalid");
+    if (historyRecoveryRooms().has(room.room_id)) throw new RoomOperationError("history_recovery_required");
+    if ((await db.outbox(room.room_id)).some((item) => item.event.type === "control.owner.transfer")) throw new RoomOperationError("owner_transfer_pending");
     setRoomOwnershipBusy(targetUserId);
     try {
       const updatedAt = Date.now();
@@ -3261,7 +3262,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   function changeRoomMembership(roomId: RoomId, operation: "add" | "remove", targetUserId: UserId): Promise<void> {
-    if (roomMembershipRun) return Promise.reject(new UserFacingError(t("workspace.feedback.membershipBusy")));
+    if (roomMembershipRun) return Promise.reject(new RoomOperationError("membership_busy"));
     setRoomMembershipBusy(targetUserId);
     roomMembershipRun = executeRoomMembershipChange(roomId, operation, targetUserId)
       .finally(() => { roomMembershipRun = null; setRoomMembershipBusy(null); });

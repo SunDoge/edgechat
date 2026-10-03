@@ -55,6 +55,8 @@ describe("local message catalog", () => {
     expect(translate("deviceLink.error.historyTransferLimit")).toContain("不迁移历史");
     expect(translate("workspace.historyRecovery.error.damaged")).toContain("完整性验证");
     expect(translate("workspace.historyRecovery.error.sourceIdentity")).toContain("可信设备");
+    expect(translate("workspace.roomOperation.error.keysChanged")).toContain("重新操作");
+    expect(translate("workspace.roomOperation.error.ownerTransferPending")).toContain("等待完成");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {
