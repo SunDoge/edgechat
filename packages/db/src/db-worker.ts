@@ -14,6 +14,7 @@ type DbRequest = ProfileRequest & (
   | { kind: "set-room-retention"; roomId: string; days: LocalRetentionDays | null; now: number }
   | { kind: "purge-expired-messages"; now: number }
   | { kind: "clear-room-history"; roomId: string; throughSeq: number; now: number }
+  | { kind: "close" }
   | { kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string }
 );
 type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
@@ -74,12 +75,25 @@ function databaseFor(profileId: string): Promise<PGlite> {
     try {
       db = new PGlite(`opfs-ahp://${slot}`);
       await db.waitReady;
-    } catch {
+    } catch (opfsError) {
+      await db!.close().catch(() => undefined);
       storage = "indexeddb";
-      db = new PGlite(`idb://${slot}`);
-      await db.waitReady;
+      try {
+        db = new PGlite(`idb://${slot}`);
+        await db.waitReady;
+      } catch (indexedDbError) {
+        await db!.close().catch(() => undefined);
+        const opfsDetail = opfsError instanceof Error ? opfsError.message : String(opfsError);
+        const indexedDbDetail = indexedDbError instanceof Error ? indexedDbError.message : String(indexedDbError);
+        throw new Error(`Unable to open local database (OPFS: ${opfsDetail}; IndexedDB: ${indexedDbDetail})`);
+      }
     }
-    await migrateLocalSchema(db);
+    try {
+      await migrateLocalSchema(db);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Unable to migrate local database: ${detail}`, { cause: error });
+    }
     return db;
   })();
   return database;
@@ -118,6 +132,13 @@ async function stageRestoredDatabase(request: Extract<DbRequest, { kind: "restor
 self.onmessage = async (event: MessageEvent<DbRequest>) => {
   const request = event.data;
   try {
+    if (request.kind === "close") {
+      const opened = database ? await database.catch(() => null) : null;
+      if (opened) await opened.close();
+      self.postMessage({ id: request.id, rows: [], storage } satisfies DbResponse);
+      self.close();
+      return;
+    }
     // Recovery must not depend on opening the current slot: that slot may be the
     // reason the user is restoring. Validate a fresh slot and switch only after
     // it is complete, leaving the old data untouched on every failure path.

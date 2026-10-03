@@ -9,3 +9,4 @@ worker-configuration.d.ts
 .DS_Store
 .dev.vars
 coverage
+.vitest-attachments

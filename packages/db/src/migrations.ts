@@ -2,6 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import { LOCAL_SCHEMA } from "./schema";
 
 export type LocalSchemaMigration = Readonly<{ version: number; name: string; checksum: string; sql: string }>;
+const MIGRATION_STATEMENTS_PER_TRANSACTION = 32;
 
 export const LOCAL_SCHEMA_V2 = `CREATE TABLE room_membership_outbox (
   room_id TEXT PRIMARY KEY,
@@ -74,6 +75,74 @@ function validateMigrations(migrations: readonly LocalSchemaMigration[]): void {
     if (!migration.sql.trim() || /\b(?:BEGIN|COMMIT|ROLLBACK)\b/i.test(migration.sql)) {
       throw new Error(`Local schema migration ${migration.version} must contain transaction-free SQL`);
     }
+    if (migration.version > 1 && migrationStatements(migration.sql).length > MIGRATION_STATEMENTS_PER_TRANSACTION) {
+      throw new Error(`Local schema migration ${migration.version} must contain at most ${MIGRATION_STATEMENTS_PER_TRANSACTION} statements`);
+    }
+  }
+}
+
+function migrationStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let statement = "";
+  let quote: "single" | "double" | null = null;
+  let dollarQuote: string | null = null;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < sql.length; index += 1) {
+    const character = sql[index]!;
+    const next = sql[index + 1];
+    if (lineComment) {
+      statement += character;
+      if (character === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      statement += character;
+      if (character === "*" && next === "/") { statement += next; index += 1; blockComment = false; }
+      continue;
+    }
+    if (dollarQuote) {
+      if (sql.startsWith(dollarQuote, index)) {
+        statement += dollarQuote;
+        index += dollarQuote.length - 1;
+        dollarQuote = null;
+      } else statement += character;
+      continue;
+    }
+    if (quote) {
+      statement += character;
+      const delimiter = quote === "single" ? "'" : '"';
+      if (character === delimiter && next === delimiter) { statement += next; index += 1; }
+      else if (character === delimiter) quote = null;
+      continue;
+    }
+    if (character === "-" && next === "-") { statement += "--"; index += 1; lineComment = true; continue; }
+    if (character === "/" && next === "*") { statement += "/*"; index += 1; blockComment = true; continue; }
+    if (character === "'") { statement += character; quote = "single"; continue; }
+    if (character === '"') { statement += character; quote = "double"; continue; }
+    if (character === "$") {
+      const tag = sql.slice(index).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+      if (tag) { statement += tag; index += tag.length - 1; dollarQuote = tag; continue; }
+    }
+    if (character === ";") {
+      if (statement.trim()) statements.push(statement.trim());
+      statement = "";
+    } else statement += character;
+  }
+  if (quote || dollarQuote || blockComment) throw new Error("Local schema migration contains unterminated SQL syntax");
+  if (statement.trim()) statements.push(statement.trim());
+  return statements;
+}
+
+async function execStatements(database: Pick<PGlite, "exec">, sql: string): Promise<void> {
+  const statements = migrationStatements(sql);
+  for (const [index, statement] of statements.entries()) {
+    try {
+      await database.exec(statement);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`SQL statement ${index + 1}/${statements.length} failed: ${detail}`, { cause: error });
+    }
   }
 }
 
@@ -84,7 +153,7 @@ export async function applyLocalSchemaMigrations(db: PGlite, migrations: readonl
       throw new Error(`Local schema migration ${migration.version} (${migration.name}) checksum does not match its SQL`);
     }
   }
-  await db.exec(LOCAL_SCHEMA_META);
+  await execStatements(db, LOCAL_SCHEMA_META);
   const result = await db.query<{ version: number | string }>("SELECT version FROM local_schema_meta WHERE id = 1");
   let current = result.rows.length ? Number(result.rows[0]!.version) : 0;
   const target = migrations.at(-1)!.version;
@@ -105,16 +174,29 @@ export async function applyLocalSchemaMigrations(db: PGlite, migrations: readonl
     if (migration.version <= current) continue;
     const now = Date.now();
     try {
-      await db.exec(`BEGIN;
-${migration.sql.trim()};
-INSERT INTO local_schema_migrations (version,migration_name,checksum,applied_at)
-VALUES (${migration.version},'${migration.name}','${migration.checksum}',${now});
-INSERT INTO local_schema_meta (id,version,migration_name,updated_at)
-VALUES (1,${migration.version},'${migration.name}',${now})
-ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version, migration_name = EXCLUDED.migration_name, updated_at = EXCLUDED.updated_at;
-COMMIT;`);
+      const statements = migrationStatements(migration.sql);
+      // PGlite's browser Postgres build cannot hold all 92 bootstrap DDL locks
+      // in one transaction. Version 1 is intentionally idempotent so an
+      // interrupted batch is safe to replay; later migrations stay atomic and
+      // are bounded above by one batch in validateMigrations.
+      for (let offset = 0; offset < statements.length; offset += MIGRATION_STATEMENTS_PER_TRANSACTION) {
+        const batch = statements.slice(offset, offset + MIGRATION_STATEMENTS_PER_TRANSACTION);
+        const finalBatch = offset + batch.length === statements.length;
+        await db.transaction(async (transaction) => {
+          await execStatements(transaction, batch.join(";"));
+          if (!finalBatch) return;
+          await transaction.query(
+            "INSERT INTO local_schema_migrations (version,migration_name,checksum,applied_at) VALUES ($1,$2,$3,$4)",
+            [migration.version, migration.name, migration.checksum, now],
+          );
+          await transaction.query(
+            `INSERT INTO local_schema_meta (id,version,migration_name,updated_at) VALUES (1,$1,$2,$3)
+             ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version, migration_name = EXCLUDED.migration_name, updated_at = EXCLUDED.updated_at`,
+            [migration.version, migration.name, now],
+          );
+        });
+      }
     } catch (error) {
-      await db.exec("ROLLBACK").catch(() => undefined);
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`Local database migration ${migration.version} (${migration.name}) failed: ${detail}`, { cause: error });
     }

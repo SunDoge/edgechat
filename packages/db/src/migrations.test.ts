@@ -96,11 +96,33 @@ describe("versioned local PGlite migrations", () => {
     await db.close();
   });
 
+  it("does not split semicolons inside quoted migration values", async () => {
+    const db = new PGlite();
+    const sql = "CREATE TABLE quoted_probe (value TEXT); INSERT INTO quoted_probe VALUES ('one;two'), ($$three;four$$)";
+    await expect(applyLocalSchemaMigrations(db, [
+      { version: 1, name: "quoted_probe", checksum: await localMigrationChecksum(sql), sql },
+    ])).resolves.toBe(1);
+    expect((await db.query("SELECT value FROM quoted_probe ORDER BY value")).rows)
+      .toEqual([{ value: "one;two" }, { value: "three;four" }]);
+    await db.close();
+  });
+
   it("rejects a non-contiguous or transaction-bearing manifest", async () => {
     const db = new PGlite();
     const placeholder = "0".repeat(64);
     await expect(applyLocalSchemaMigrations(db, [{ version: 2, name: "skipped_version", checksum: placeholder, sql: "SELECT 1" }])).rejects.toThrow("contiguous");
     await expect(applyLocalSchemaMigrations(db, [{ version: 1, name: "nested_transaction", checksum: placeholder, sql: "BEGIN; SELECT 1; COMMIT" }])).rejects.toThrow("transaction-free");
+    await db.close();
+  });
+
+  it("keeps post-bootstrap migrations within the browser-safe atomic statement limit", async () => {
+    const db = new PGlite();
+    const oversized = Array.from({ length: 33 }, (_, index) => `SELECT ${index}`).join(";");
+    const migrations = [
+      { version: 1, name: "bootstrap_probe", checksum: await localMigrationChecksum("SELECT 1"), sql: "SELECT 1" },
+      { version: 2, name: "oversized_change", checksum: await localMigrationChecksum(oversized), sql: oversized },
+    ] as const;
+    await expect(applyLocalSchemaMigrations(db, migrations)).rejects.toThrow("at most 32 statements");
     await db.close();
   });
 });

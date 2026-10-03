@@ -262,6 +262,7 @@ export class LocalDatabase {
   private readonly worker = new Worker(new URL("./db-worker.ts", import.meta.url), { type: "module", name: "edgechat-pglite" });
   private readonly pending = new Map<number, Pending>();
   private requestId = 0;
+  private closing: Promise<void> | null = null;
   storage: "opfs" | "indexeddb" | "initializing" = "initializing";
 
   constructor(private readonly profileId: string) {
@@ -1416,7 +1417,12 @@ export class LocalDatabase {
     );
   }
 
-  close(): void { this.worker.terminate(); }
+  close(): Promise<void> {
+    this.closing ??= this.request({ kind: "close" })
+      .then(() => undefined, () => undefined)
+      .finally(() => this.worker.terminate());
+    return this.closing;
+  }
 
   private async redactMessage(messageId: string, tombstone: { delete_event_id: string; deleted_by: string; deleted_at: number }): Promise<void> {
     const redactedPayload = JSON.stringify({ version: 2, message_id: messageId, parts: [], deleted: true });
