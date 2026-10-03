@@ -1,4 +1,4 @@
-import { For, Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
+import { For, Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount, untrack } from "solid-js";
 import {
   IconChevronLeft,
   IconChevronDown,
@@ -612,76 +612,77 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function processEvent(event: RoomEvent) {
-    const currentMls = mlsRef;
-    if (!currentMls?.hasGroup(event.room_id)) {
-      // Never advance the durable sequence over ciphertext that we cannot yet
-      // decrypt. A newly discovered room can race its MLS Welcome against the
-      // sync event; treating that event as processed would lose the local
-      // plaintext projection permanently.
-      throw new LocalProjectionPersistenceError(new Error(mlsProjectionBarrier.isBlocked()
-        ? "Room MLS state is waiting for staged projection recovery"
-        : "Room MLS state is not available yet"));
-    }
     await authenticateRoomEvent(event);
     const isMembershipCommit = isMlsMembershipCommitEventType(event.type);
-    if (event.device_id === identityRef?.deviceId) {
-      if (!isMembershipCommit) return null;
-      const eventEpoch = Number(event.metadata.mls_epoch);
-      if (Number.isInteger(eventEpoch) && currentMls.epoch(event.room_id) >= eventEpoch) return null;
-    }
+    if (event.device_id === identityRef?.deviceId && !isMembershipCommit) return null;
     const staged = await db.stagedDecryptedEvent(event.event_id);
     if (staged && (staged.event.room_id !== event.room_id || staged.event.seq !== event.seq || staged.event.ciphertext !== event.ciphertext || staged.event.signature !== event.signature)) {
       throw new LocalStagingIntegrityError();
     }
     if (staged && staged.sender_device_id !== event.device_id) throw new LocalStagingIntegrityError("Staged MLS sender identity does not match the signed event device");
-    if (staged) {
-      if (!identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for staged MLS recovery");
-      const activeState = currentMls.exportState();
-      const position = stagedMlsPosition(activeState, staged.previous_mls_state, staged.next_mls_state);
-      if (position === "previous") {
-        let restored: OpenMlsMessagingCore;
-        try { restored = await OpenMlsMessagingCore.create(identityRef.deviceId, staged.next_mls_state); }
-        catch (cause) { throw new LocalStagingIntegrityError(`Staged MLS transition cannot be restored: ${cause instanceof Error ? cause.message : String(cause)}`); }
-        currentMls.destroy(); mlsRef = restored;
-      } else if (position === "mismatch") {
-        throw new LocalStagingIntegrityError("Local MLS state does not match the staged event transition");
+    const plaintextBytes = await mutateMls(async () => {
+      let activeMls = mlsRef;
+      if (!activeMls?.hasGroup(event.room_id)) {
+        // Never advance the durable sequence over ciphertext that we cannot
+        // yet decrypt. Resolve the active instance only after acquiring the
+        // mutation lock: another queued operation may have replaced and
+        // destroyed the instance that existed when this event was admitted.
+        throw new LocalProjectionPersistenceError(new Error(mlsProjectionBarrier.isBlocked()
+          ? "Room MLS state is waiting for staged projection recovery"
+          : "Room MLS state is not available yet"));
       }
-      identityRef = { ...identityRef, mlsState: staged.next_mls_state };
-      try { await saveIdentity(profileId, identityRef); }
-      catch (cause) { throw new LocalProjectionPersistenceError(cause); }
-    }
-    if (!identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for authenticated MLS processing");
-    const plaintextBytes = staged?.plaintext ?? await mutateMls(async () => {
-      const previousState = currentMls.exportState(); const previousIdentity = identityRef;
-      const processed = currentMls.processMessage(event.room_id, decodeBase64Url(event.ciphertext));
+      if (event.device_id === identityRef?.deviceId && isMembershipCommit) {
+        const eventEpoch = Number(event.metadata.mls_epoch);
+        if (Number.isInteger(eventEpoch) && activeMls.epoch(event.room_id) >= eventEpoch) return null;
+      }
+      if (staged) {
+        if (!identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for staged MLS recovery");
+        const activeState = activeMls.exportState();
+        const position = stagedMlsPosition(activeState, staged.previous_mls_state, staged.next_mls_state);
+        if (position === "previous") {
+          let restored: OpenMlsMessagingCore;
+          try { restored = await OpenMlsMessagingCore.create(identityRef.deviceId, staged.next_mls_state); }
+          catch (cause) { throw new LocalStagingIntegrityError(`Staged MLS transition cannot be restored: ${cause instanceof Error ? cause.message : String(cause)}`); }
+          activeMls.destroy(); activeMls = restored; mlsRef = restored; setMls(restored);
+        } else if (position === "mismatch") {
+          throw new LocalStagingIntegrityError("Local MLS state does not match the staged event transition");
+        }
+        identityRef = { ...identityRef, mlsState: staged.next_mls_state };
+        try { await saveIdentity(profileId, identityRef); }
+        catch (cause) { throw new LocalProjectionPersistenceError(cause); }
+        return staged.plaintext;
+      }
+      if (!identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for authenticated MLS processing");
+      const previousState = activeMls.exportState(); const previousIdentity = identityRef;
+      const processed = activeMls.processMessage(event.room_id, decodeBase64Url(event.ciphertext));
       if (processed.senderDeviceId !== event.device_id) {
         if (previousIdentity) {
           const restored = await OpenMlsMessagingCore.create(previousIdentity.deviceId, previousState);
-          currentMls.destroy(); mlsRef = restored; setMls(restored);
+          activeMls.destroy(); mlsRef = restored; setMls(restored);
           identityRef = { ...previousIdentity, mlsState: previousState };
           await saveIdentity(profileId, identityRef).catch(() => undefined);
         }
         throw new LocalStagingIntegrityError("MLS authenticated sender does not match the signed event device");
       }
-      const nextState = currentMls.exportState();
+      const nextState = activeMls.exportState();
       try {
         mlsProjectionBarrier.add(event.event_id);
         await db.stageDecryptedEvent(event, new Uint8Array(processed.plaintext), processed.senderDeviceId, new Uint8Array(previousState), new Uint8Array(nextState));
-        await persistMls(currentMls);
+        await persistMls(activeMls);
         return processed.plaintext;
       } catch (cause) {
         // Keep a possibly committed staging row. Even if the PGlite worker
         // response was lost, startup can safely advance this restored pre-state.
         if (previousIdentity) {
           const restored = await OpenMlsMessagingCore.create(previousIdentity.deviceId, previousState);
-          currentMls.destroy(); mlsRef = restored;
+          activeMls.destroy(); mlsRef = restored; setMls(restored);
           identityRef = { ...previousIdentity, mlsState: previousState };
           await saveIdentity(profileId, identityRef).catch(() => undefined);
         }
         throw new LocalProjectionPersistenceError(cause);
       }
     }, event.event_id);
-    if (!plaintextBytes.length) return null;
+    if (!plaintextBytes?.length) return null;
     const decoded: unknown = JSON.parse(decoder.decode(plaintextBytes));
     const persistProjection = async (operation: () => Promise<void>) => {
       try { await operation(); }
@@ -810,8 +811,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     }
   }
 
-  async function loadRooms(currentMls = mlsRef) {
-    if (!currentMls) return;
+  async function loadRooms() {
+    if (!mlsRef) return;
     const response = await api.rooms();
     for (const room of response.rooms) {
       await db.saveRoom(room);
@@ -821,6 +822,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (mlsProjectionBarrier.isBlocked()) needsRemoteRoomRefresh = true;
     else {
       await mutateMls(async () => {
+        const currentMls = mlsRef;
+        if (!currentMls) return;
         for (const room of response.rooms) {
           if (!currentMls.hasGroup(room.room_id) && room.encrypted_state) {
             const packet = JSON.parse(room.encrypted_state) as { version: number; welcome: string; ratchet_tree: string };
@@ -1197,7 +1200,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         reflectLocalProfile(me); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); setIdentity(identityRef ?? storedIdentity); setSession(me);
         if (!offlineBootstrap) void reconcilePush(api, me.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
         if (offlineBootstrap) await Promise.all([loadCachedRooms(currentMls), refreshComposerDrafts()]);
-        else await Promise.all([loadRooms(currentMls), refreshComposerDrafts()]);
+        else await Promise.all([loadRooms(), refreshComposerDrafts()]);
         await Promise.all([enforceLocalRetention(true), enforceMessageExpiry(false)]);
         if (!offlineBootstrap) { await resumeRoomMembershipChanges(); await resumeDeviceLinks(currentMls); await resumeDeviceRevocations(currentMls); await resumeAccountRemovals(); }
       } catch (cause) {
@@ -1228,9 +1231,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   });
 
   createEffect(() => {
-    const currentSession = session(); const currentIdentity = identity(); const currentMls = mls();
+    const currentSession = session(); const currentIdentity = identity(); const currentMls = untrack(mls);
     if (!currentSession || !currentIdentity || !currentMls) return;
-    const engine = new SyncEngine(api, db, processEvent, async () => { await loadRooms(currentMls); }, undefined, resolveArchiveKey, presenceSharing(), db, archiveSegmentCache); syncRef = engine;
+    const engine = new SyncEngine(api, db, processEvent, async () => { await loadRooms(); }, undefined, resolveArchiveKey, presenceSharing(), db, archiveSegmentCache); syncRef = engine;
     let foregroundResumePending = false;
     const refresh = (received: Event) => {
       const event = (received as CustomEvent<RoomEvent>).detail;
@@ -1244,7 +1247,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         if (event.sender !== currentSession.user_id) setNotice(t("workspace.feedback.roomProfileUpdated"));
       }
       if (event.type === "control.owner.transfer") {
-        void loadRooms(currentMls);
+        void loadRooms();
         if (event.sender !== currentSession.user_id) setNotice(t("workspace.feedback.roomOwnerUpdated"));
       }
       if (["control.device.add", "control.device.revoke", "control.member.add", "control.member.remove", "control.group.commit"].includes(event.type)) void refreshRoomIdentityTrust(event.room_id);
@@ -1271,7 +1274,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       });
       if (needsRemoteRoomRefresh) {
         needsRemoteRoomRefresh = false;
-        void loadRooms(currentMls).catch(() => { needsRemoteRoomRefresh = true; setConnectionState("offline"); });
+        void loadRooms().catch(() => { needsRemoteRoomRefresh = true; setConnectionState("offline"); });
       }
       void resumeAccountRemovals();
       void resumeRoomMembershipChanges();
@@ -1279,15 +1282,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const accountDeletion = () => { void clearLocalAccount(t("workspace.feedback.accountDisabled")); };
     const deviceRevoked = () => { void clearLocalAccount(t("workspace.feedback.deviceRevoked")); };
     const sessionExpired = () => requireFreshSession();
-    const unavailableRoom = () => { void loadRooms(currentMls).catch(() => setConnectionState("offline")); };
+    const unavailableRoom = () => { void loadRooms().catch(() => setConnectionState("offline")); };
     const deviceEvent = (received: Event) => {
       const detail = (received as CustomEvent<Record<string, unknown>>).detail;
       if (["profile.updated", "room.leave.requested", "room.leave.updated", "room.leave.cancelled"].includes(String(detail?.type))) {
-        void loadRooms(currentMls).catch(() => setConnectionState("offline"));
+        void loadRooms().catch(() => setConnectionState("offline"));
       }
       if (detail?.type === "device.link.expired" || detail?.type === "device.link.cancelled") {
         setNotice(detail.type === "device.link.cancelled" ? t("devices.linkCancelled.removing") : t("devices.linkExpired.removing"));
-        void resumeDeviceRevocations(currentMls).then(() => {
+        const activeMls = mlsRef;
+        if (!activeMls) return;
+        void resumeDeviceRevocations(activeMls).then(() => {
           const target = String(detail.device_id ?? "");
           if (target && deviceRevocations()[target]?.status === "failed") setNotice(t("devices.linkExpired.failed"));
         }).catch(() => setNotice(t("devices.linkExpired.failed")));
@@ -1312,7 +1317,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (wasPending) setNotice(t("workspace.feedback.localWriteRecovered"));
       if (!mlsProjectionBarrier.isBlocked() && needsRemoteRoomRefresh && navigator.onLine && mlsRef) {
         needsRemoteRoomRefresh = false;
-        void loadRooms(mlsRef).catch(() => { needsRemoteRoomRefresh = true; });
+        void loadRooms().catch(() => { needsRemoteRoomRefresh = true; });
       }
       if (mlsRef && mls() !== mlsRef) setMls(mlsRef);
     };
@@ -1437,7 +1442,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setRooms((current) => current.map((room) => room.room_id === event.room_id ? { ...room, current_seq: Math.max(room.current_seq, event.seq) } : room));
       if (event.type === "control.message-expiry") void refreshMessageExpiryPolicies();
       if (event.type === "control.room.profile") void refreshRoomProfile(event.room_id);
-      if (event.type === "control.owner.transfer") void loadRooms(mlsRef);
+      if (event.type === "control.owner.transfer") void loadRooms();
       if (event.type.startsWith("message.")) void refreshRoomListActivities();
       if (event.room_id === selectedRef) void refreshRoomProjection(event.room_id).then(() => shouldMarkIncomingRead(historyFocus(), event.room_id, timelineNearBottom()) ? markRoomRead(event.room_id) : refreshUnreadCounts());
       else void refreshUnreadCounts();
@@ -1624,7 +1629,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       void attachmentSendCleanup.reconcile();
       void reconcilePush(api, next.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
       setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); await db.cacheSession(offlineSessionSnapshot(next));
-      await Promise.all([loadRooms(nextMls), refreshComposerDrafts()]); await Promise.all([enforceLocalRetention(true), enforceMessageExpiry(false)]);
+      await Promise.all([loadRooms(), refreshComposerDrafts()]); await Promise.all([enforceLocalRetention(true), enforceMessageExpiry(false)]);
     } finally { setLoading(false); }
   }
 
@@ -1861,7 +1866,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const remoteExisting = freshRooms.rooms.find((room) => room.purpose === "saved");
       if (remoteExisting) {
         savedRoomAttempt = null;
-        await loadRooms(mlsRef);
+        await loadRooms();
         return rooms().find((room) => room.purpose === "saved") ?? remoteExisting;
       }
       const currentSession = session(); const currentIdentity = identityRef;
@@ -1911,7 +1916,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         } catch (cause) {
           if (!recoveredRoom) throw cause;
           savedRoomAttempt = null;
-          await loadRooms(mlsRef);
+          await loadRooms();
           return rooms().find((room) => room.purpose === "saved") ?? recoveredRoom;
         }
       } else {
@@ -1927,7 +1932,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           savedRoomAttempt = null;
         }
       }
-      await loadRooms(mlsRef);
+      await loadRooms();
       const saved = rooms().find((room) => room.purpose === "saved");
       if (!saved) throw new UserFacingError(t("workspace.feedback.savedNotReady"));
       return saved;
@@ -2110,7 +2115,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function finishCreatedRoom(roomId: RoomId, encryptedName: string | null, profileQueued: boolean): Promise<void> {
-    try { await loadRooms(mlsRef); }
+    try { await loadRooms(); }
     catch {
       setNotice(t("workspace.feedback.roomCreatedRefreshError"));
       return;
@@ -2125,7 +2130,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     try {
       if (hidden) await api.hideGroupMember(roomId, userId);
       else await api.showGroupMember(roomId, userId);
-      await loadRooms(mlsRef);
+      await loadRooms();
       if (selectedRef === roomId) await refreshRoomProjection(roomId, true);
       await refreshUnreadCounts();
       if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
@@ -2143,7 +2148,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     try {
       if (room.blocked_by_me) await api.unblockUser(peer);
       else { syncRef?.disconnectRoom(room.room_id); await api.blockUser(peer); }
-      await loadRooms(mlsRef);
+      await loadRooms();
       if (room.blocked_by_me) {
         void syncRef?.connectRoom(room.room_id).catch(() => undefined);
         setNotice(t("workspace.feedback.blockRemoved"));
@@ -2160,7 +2165,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function acceptMessageRequest(room: ServerRoom): Promise<void> {
     try {
       await api.acceptMessageRequest(room.room_id);
-      await loadRooms(mlsRef);
+      await loadRooms();
       if (selectedRef === room.room_id) await refreshRoomProjection(room.room_id, true);
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
       setNotice(t("workspace.feedback.requestAccepted"));
@@ -2172,7 +2177,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       syncRef?.disconnectRoom(room.room_id);
       await api.rejectMessageRequest(room.room_id);
       if (selectedRef === room.room_id) setSelectedId(null);
-      await loadRooms(mlsRef);
+      await loadRooms();
       setNotice(t("workspace.feedback.requestRejected"));
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
@@ -2187,7 +2192,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const latest = messages().at(-1)?.event_id;
       await api.reportMessageRequest(room.room_id, "spam", latest);
       if (selectedRef === room.room_id) setSelectedId(null);
-      await loadRooms(mlsRef);
+      await loadRooms();
       setNotice(t("workspace.feedback.requestReported"));
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
@@ -2613,7 +2618,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setSession(next); reflectLocalProfile(next); await Promise.all([db.bindAccount(next.user_id, next.display_name), db.cacheSession(offlineSessionSnapshot(next)), updateLocalProfileName(profileId, next.display_name)]);
     }
     const currentMls = mls();
-    if (currentMls) await loadRooms(currentMls);
+    if (currentMls) await loadRooms();
   }
   async function updateInvitationPolicy(policy: InvitationPolicy): Promise<void> {
     const result = await api.setInvitationPolicy(policy); setInvitationPolicy(result.invitation_policy);
@@ -3331,7 +3336,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const latest = (await api.room(roomId)).room;
         const present = latest.members.some((member) => member.user_id === queued!.target_user_id);
         if (Number(latest.epoch) >= expectedEpoch && present === (queued.operation === "add")) {
-          await db.removeRoomMembershipOutbox(roomId); await loadRooms(mlsRef);
+          await db.removeRoomMembershipOutbox(roomId); await loadRooms();
           if (queued.operation === "add") {
             const profile = await db.roomProfile(roomId);
             if (profile) await updateRoomProfile(roomId, profile.name, false).catch(() => setNotice(t("workspace.feedback.memberAddedProfilePending")));
@@ -3346,12 +3351,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       if (cause instanceof ApiError && cause.code === "room_leave_cancelled") {
         if (mlsRef?.epoch(roomId) === expectedEpoch) await restoreMlsBeforeQueuedCommit(roomId, expectedEpoch, queued.previous_mls_state, "退出群聊");
-        await db.removeRoomMembershipOutbox(roomId); await loadRooms(mlsRef);
+        await db.removeRoomMembershipOutbox(roomId); await loadRooms();
         return;
       }
       await db.failRoomMembershipOutbox(roomId, cause instanceof Error ? cause.message : String(cause)); throw cause;
     }
-    await loadRooms(mlsRef);
+    await loadRooms();
     if (queued.operation === "add") {
       const profile = await db.roomProfile(roomId);
       if (profile) await updateRoomProfile(roomId, profile.name, false).catch(() => setNotice(t("workspace.feedback.memberAddedProfilePending")));
@@ -3415,13 +3420,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!confirm(t("workspace.feedback.leaveConfirm", { title: roomTitle(room, session()!.user_id) }))) return;
     stopTyping(room.room_id); flushComposerDraft(room.room_id); cancelComposerMode(); setFiles([]); setVoiceDurationMs(null);
     await api.requestRoomLeave(room.room_id);
-    await loadRooms(mlsRef);
+    await loadRooms();
     setRoomSettingsOpen(false); setNotice(t("workspace.feedback.leaveRequested"));
   }
 
   async function cancelRoomLeave(room: ServerRoom): Promise<void> {
     await api.cancelRoomLeave(room.room_id);
-    await loadRooms(mlsRef);
+    await loadRooms();
     setNotice(t("workspace.feedback.leaveCancelled"));
   }
 
@@ -3511,7 +3516,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         }
       }
       if (tasks.size) {
-        await loadRooms(mlsRef);
+        await loadRooms();
         setNotice(tasks.size === 1
           ? t("workspace.feedback.accountRemovalRoomComplete")
           : t("workspace.feedback.accountRemovalRoomsComplete", { count: tasks.size }));
