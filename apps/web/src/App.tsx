@@ -384,8 +384,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           return;
         }
         const sync = syncRef; const outbox = outboxRef; const archive = archiveRef;
-        archive?.close();
-        await Promise.all([sync?.quiesce(), outbox?.quiesce()]);
+        await Promise.all([sync?.quiesce(), outbox?.quiesce(), archive?.quiesce()]);
         window.dispatchEvent(new Event(TAB_HANDOFF_READY_EVENT));
       })().finally(() => { tabHandoffPreparation = null; });
     };
@@ -485,11 +484,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     else if (result === "unavailable") setNotice("请通过 HTTPS 打开后再安装");
   }
 
-  function requireFreshSession(): void {
+  async function requireFreshSession(): Promise<void> {
     const userId = session()?.user_id;
-    syncRef?.stop(); outboxRef?.stop(); archiveRef?.close();
+    await Promise.all([syncRef?.quiesce(), outboxRef?.quiesce(), archiveRef?.quiesce()]);
+    await mlsMutationTail;
     mlsRef?.destroy(); mlsRef = null; identityRef = null;
-    void clearLocalProfileToken(profileId); api.setToken(null);
+    await clearLocalProfileToken(profileId); api.setToken(null);
     if (userId) sessionStorage.setItem(profileSessionKey(profileId, "restore-user-id"), userId);
     setSession(null); setIdentity(null); setMls(null);
   }
@@ -2516,20 +2516,25 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function exportPortableBackup(password: string): Promise<void> {
-    const currentSession = session(); const currentMls = mlsRef;
-    if (!currentSession || !identityRef || !currentMls) throw new Error("设备加密状态尚未就绪");
-    await outboxRef?.kick();
-    const { checkpoint: backupCheckpoint, device_credential: deviceCredential } = await api.createBackupCheckpoint();
-    identityRef = { ...identityRef, recoveryCredential: deviceCredential };
-    await saveIdentity(profileId, identityRef);
-    await persistMls(currentMls);
-    await db.bindAccount(currentSession.user_id, currentSession.display_name);
-    if (!identityRef) throw new Error("设备加密状态尚未就绪");
-    const [portableIdentity, databaseSnapshot] = await Promise.all([
-      core.exportPortableIdentity(identityRef),
-      db.backupSnapshot(),
-    ]);
-    const input = { databaseSnapshot, identity: portableIdentity, userId: currentSession.user_id, serverOrigin: location.origin, backupCheckpoint, password };
+    const prepared = await mutateMls(async () => {
+      const currentSession = session(); const currentMls = mlsRef; const currentIdentity = identityRef;
+      if (!currentSession || !currentIdentity || !currentMls) throw new Error("设备加密状态尚未就绪");
+      // Drain any already-admitted event before recording the server-side
+      // anti-rollback count. New MLS sends cannot overtake this critical section.
+      await outboxRef?.kick();
+      const { checkpoint: backupCheckpoint, device_credential: deviceCredential } = await api.createBackupCheckpoint();
+      identityRef = { ...currentIdentity, recoveryCredential: deviceCredential, mlsState: currentMls.exportState() };
+      await saveIdentity(profileId, identityRef);
+      await db.bindAccount(currentSession.user_id, currentSession.display_name);
+      const [portableIdentity, databaseSnapshot] = await Promise.all([
+        core.exportPortableIdentity(identityRef),
+        db.backupSnapshot(),
+      ]);
+      return { databaseSnapshot, identity: portableIdentity, userId: currentSession.user_id,
+        serverOrigin: location.origin, backupCheckpoint, password };
+    });
+    const input = prepared;
+    const { databaseSnapshot } = prepared;
     const filename = `edgechat-backup-${new Date().toISOString().slice(0, 10)}.edgechat-backup`;
     const pickerWindow = window as ExportPickerWindow;
     let writable: ExportWritable | null = null;
@@ -2631,7 +2636,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function clearLocalAccount(successMessage: string): Promise<void> {
     let localCleanupFailed = false;
-    syncRef?.stop(); outboxRef?.stop(); archiveRef?.close();
+    await Promise.all([syncRef?.quiesce(), outboxRef?.quiesce(), archiveRef?.quiesce()]);
+    await mlsMutationTail;
     try {
       const registration = await navigator.serviceWorker.ready.catch(() => null);
       await registration?.pushManager.getSubscription().then((subscription) => subscription?.unsubscribe()).catch(() => undefined);
@@ -3254,13 +3260,21 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
   function profileChangeBlocked(): boolean {
     return files().length > 0 || voiceRecording() || sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy() || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen()
+      || pendingMlsMutations > 0 || mlsProjectionBarrier.isBlocked()
       || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
-      || Boolean(roomMembershipRun || accountRemovalRun || keyPackageRefill || retentionRun || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun);
+      || Boolean(roomMembershipRun || accountRemovalRun || savedRoomCreation || keyPackageRefill || retentionRun || messageExpiryRun
+        || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun || peerRecoveryRun || draftSyncRun)
+      || Boolean(syncRef?.isBusy() || outboxRef?.isBusy() || archiveRef?.isBusy());
   }
 
   async function prepareProfileChange(): Promise<void> {
     if (profileChangeBlocked()) throw new Error("请先完成发送、录音或账户安全操作，再切换身份");
     stopTyping(); await flushComposerDraft();
+    if (profileChangeBlocked()) throw new Error("请等待本机加密或存储操作完成后再切换身份");
+    const sync = syncRef; const outbox = outboxRef; const archive = archiveRef;
+    await Promise.all([sync?.quiesce(), outbox?.quiesce(), archive?.quiesce()]);
+    await mlsMutationTail;
+    if (pendingMlsMutations > 0 || mlsProjectionBarrier.isBlocked()) throw new Error("本机还有加密记录正在恢复，暂时不能切换身份");
     await suspendPush(api).catch(() => undefined);
   }
 
@@ -3279,7 +3293,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function removeCurrentLocalProfile(): Promise<void> {
-    syncRef?.stop(); outboxRef?.stop(); archiveRef?.close();
+    await prepareProfileChange();
     await disablePush(api).catch(() => clearPushConfig());
     const cleanup = await Promise.allSettled([db.clearAccountData(), attachmentCache.clear(), archiveSegmentCache.clear(), deviceHistoryStaging.clearProfile(), clearPortableBackupStaging(profileId), clearAccountExportStaging(profileId), clearIdentity(profileId)]);
     if (cleanup.some((result) => result.status === "rejected")) throw new Error("未能完全删除该身份的本机数据；身份仍保留，请重试或清除本站数据");

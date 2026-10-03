@@ -25,6 +25,37 @@ describe("ArchiveCoordinator", () => {
     expect(builder.close).toHaveBeenCalledOnce();
   });
 
+  it("quiesces only after an admitted compaction has fully settled", async () => {
+    let finishUpload!: () => void;
+    const uploadGate = new Promise<void>((resolve) => { finishUpload = resolve; });
+    const api = {
+      acquireCompactionLease: vi.fn(async () => lease), history: vi.fn(async () => ({ events, segments: [] })),
+      uploadSegment: vi.fn(async () => { await uploadGate; return { segment_id: lease.segment_id }; }),
+      acknowledgeArchiveSegmentRetention: vi.fn(async () => ({ segment_id: lease.segment_id })),
+      releaseCompactionLease: vi.fn(async () => undefined),
+    } as unknown as ApiClient;
+    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
+    const builder = { build: vi.fn(async () => new Uint8Array([1, 2, 3])), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
+    const cache = { get: vi.fn(), put: vi.fn(async () => true), remove: vi.fn(async () => undefined) };
+    const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
+
+    const compacting = coordinator.compact(roomId);
+    await vi.waitFor(() => expect(api.uploadSegment).toHaveBeenCalledOnce());
+    let quiet = false;
+    const quiescing = coordinator.quiesce().then(() => { quiet = true; });
+    await Promise.resolve();
+    expect(coordinator.isBusy()).toBe(true);
+    expect(quiet).toBe(false);
+    expect(builder.close).not.toHaveBeenCalled();
+    await expect(coordinator.compact("!another-room-0001:example.com" as RoomId)).resolves.toBe(false);
+
+    finishUpload();
+    await expect(compacting).resolves.toBe(true);
+    await quiescing;
+    expect(quiet).toBe(true);
+    expect(builder.close).toHaveBeenCalledOnce();
+  });
+
   it("wraps the key to room devices before building and uploading a leased range", async () => {
     const calls: string[] = [];
     const api = {

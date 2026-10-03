@@ -14,6 +14,7 @@ export type ArchiveKeyEnvelopeBuilder = (input: { room_id: RoomId; segment_id: s
 
 export class ArchiveCoordinator extends EventTarget {
   private readonly active = new Set<RoomId>();
+  private readonly idleWaiters = new Set<() => void>();
   private closed = false;
 
   constructor(
@@ -67,7 +68,13 @@ export class ArchiveCoordinator extends EventTarget {
       }
       if (lease && cached && !uploaded && this.cache) await this.cache.remove(lease.segment_id).catch(() => undefined);
       throw error;
-    } finally { this.active.delete(roomId); }
+    } finally {
+      this.active.delete(roomId);
+      if (!this.active.size) {
+        for (const resolve of this.idleWaiters) resolve();
+        this.idleWaiters.clear();
+      }
+    }
   }
 
   /** Retry only locally recorded post-upload acknowledgements; never recreates a GC'd server segment. */
@@ -88,6 +95,13 @@ export class ArchiveCoordinator extends EventTarget {
   }
 
   isBusy(): boolean { return this.active.size > 0; }
+
+  /** Stop admitting compactions and wait until every current job has settled. */
+  async quiesce(): Promise<void> {
+    this.closed = true;
+    if (this.active.size) await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
+    this.builder.close();
+  }
 
   close(): void {
     if (this.closed) return;
