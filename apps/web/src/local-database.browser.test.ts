@@ -20,11 +20,31 @@ async function removeProfileStorage(profileId: string): Promise<void> {
       if (name.includes(profileId)) await root.removeEntry(name, { recursive: true });
     }
   }
-  await new Promise<void>((resolve) => {
-    const request = indexedDB.deleteDatabase(`edgechat-local-${profileId}`);
-    request.onsuccess = request.onblocked = () => resolve();
-    request.onerror = (event) => { event.preventDefault(); resolve(); };
+  const names = typeof indexedDB.databases === "function"
+    ? (await indexedDB.databases()).map((database) => database.name).filter((name): name is string => Boolean(name?.includes(profileId)))
+    : [`edgechat-local-${profileId}`];
+  for (const name of names) {
+    await new Promise<void>((resolve) => {
+      const request = indexedDB.deleteDatabase(name);
+      request.onsuccess = request.onblocked = () => resolve();
+      request.onerror = (event) => { event.preventDefault(); resolve(); };
+    });
+  }
+  const config = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open("edgechat-local-config", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("settings");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
+  await new Promise<void>((resolve, reject) => {
+    const transaction = config.transaction("settings", "readwrite");
+    const settings = transaction.objectStore("settings");
+    settings.delete(`active-data-dir:${profileId}`);
+    settings.delete(`active-restore-id:${profileId}`);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+  config.close();
 }
 
 function expectedPersistentBackend(): "opfs" | "indexeddb" {
@@ -43,6 +63,39 @@ afterEach(async () => {
 });
 
 describe("real browser local database", () => {
+  it("atomically persists and verifies a restored database slot across worker restart", async () => {
+    const sourceProfileId = crypto.randomUUID();
+    const targetProfileId = crypto.randomUUID();
+    profiles.add(sourceProfileId);
+    profiles.add(targetProfileId);
+    const userId = "@restore-browser:example.com";
+
+    const source = new LocalDatabase(sourceProfileId);
+    let snapshot: Blob;
+    try {
+      await source.bindAccount(userId, "Restore Browser");
+      snapshot = await source.backupSnapshot();
+    } finally { await source.close(); }
+
+    const target = new LocalDatabase(targetProfileId);
+    let restoreId: string;
+    try {
+      restoreId = await target.stageRestoreSnapshot(snapshot, userId);
+      expect(await target.restoreCommitted(restoreId)).toBe(true);
+      expect(await target.restoreCommitted(crypto.randomUUID())).toBe(false);
+      expect(await target.cachedSession()).toBeNull();
+      expect(await target.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1"))
+        .toEqual([{ user_id: userId }]);
+    } finally { await target.close(); }
+
+    const reopened = new LocalDatabase(targetProfileId);
+    try {
+      expect(await reopened.restoreCommitted(restoreId)).toBe(true);
+      expect(await reopened.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1"))
+        .toEqual([{ user_id: userId }]);
+    } finally { await reopened.close(); }
+  });
+
   it("persists plaintext history and full-text search across a storage worker restart", async () => {
     const profileId = crypto.randomUUID();
     profiles.add(profileId);

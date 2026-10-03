@@ -15,7 +15,8 @@ type DbRequest = ProfileRequest & (
   | { kind: "purge-expired-messages"; now: number }
   | { kind: "clear-room-history"; roomId: string; throughSeq: number; now: number }
   | { kind: "close" }
-  | { kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string }
+  | { kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string; restoreId: string }
+  | { kind: "verify-restore"; restoreId: string }
 );
 type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
 
@@ -45,11 +46,24 @@ async function activeDataDir(profileId: string): Promise<string | null> {
   return value;
 }
 
-async function setActiveDataDir(profileId: string, value: string): Promise<void> {
+async function committedRestoreId(profileId: string): Promise<string | null> {
+  const config = await configDatabase();
+  const value = await new Promise<string | null>((resolve, reject) => {
+    const request = config.transaction("settings").objectStore("settings").get(`active-restore-id:${profileId}`);
+    request.onsuccess = () => resolve(typeof request.result === "string" ? request.result : null);
+    request.onerror = () => reject(request.error);
+  });
+  config.close();
+  return value;
+}
+
+async function commitRestoredDataDir(profileId: string, value: string, restoreId: string): Promise<void> {
   const config = await configDatabase();
   await new Promise<void>((resolve, reject) => {
     const transaction = config.transaction("settings", "readwrite");
-    transaction.objectStore("settings").put(value, `active-data-dir:${profileId}`);
+    const settings = transaction.objectStore("settings");
+    settings.put(value, `active-data-dir:${profileId}`);
+    settings.put(restoreId, `active-restore-id:${profileId}`);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   });
@@ -101,6 +115,7 @@ function databaseFor(profileId: string): Promise<PGlite> {
 
 async function stageRestoredDatabase(request: Extract<DbRequest, { kind: "restore" | "restore-device-history" }>): Promise<"opfs" | "indexeddb"> {
   if (!PROFILE_ID.test(request.profileId)) throw new Error("Invalid local profile identifier");
+  if (!PROFILE_ID.test(request.restoreId)) throw new Error("Invalid local restore identifier");
   if (request.snapshot.size === 0 || request.snapshot.size > 2_147_483_648) throw new Error("Backup database is empty or too large");
   const profileId = request.profileId.toLowerCase();
   const configured = await activeDataDir(profileId);
@@ -119,7 +134,7 @@ async function stageRestoredDatabase(request: Extract<DbRequest, { kind: "restor
       if (result.rows.length !== 1 || result.rows[0].user_id !== request.expectedUserId) throw new Error("备份中的本机消息库不属于这个账户");
       if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
       await restored.close();
-      await setActiveDataDir(profileId, dataDir);
+      await commitRestoredDataDir(profileId, dataDir, request.restoreId);
       return backend;
     } catch (error) {
       lastError = error;
@@ -145,6 +160,13 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
     if (request.kind === "restore" || request.kind === "restore-device-history") {
       storage = await stageRestoredDatabase(request);
       self.postMessage({ id: request.id, restored: true, storage } satisfies DbResponse);
+      return;
+    }
+    if (request.kind === "verify-restore") {
+      if (!PROFILE_ID.test(request.profileId)) throw new Error("Invalid local profile identifier");
+      if (!PROFILE_ID.test(request.restoreId)) throw new Error("Invalid local restore identifier");
+      const committed = await committedRestoreId(request.profileId.toLowerCase());
+      self.postMessage({ id: request.id, restored: committed === request.restoreId, storage } satisfies DbResponse);
       return;
     }
     const db = await databaseFor(request.profileId);

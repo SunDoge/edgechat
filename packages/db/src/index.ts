@@ -7,6 +7,13 @@ import type { LocalHistoryClearResult } from "./local-history";
 type Pending = { resolve: (value: DbResponse) => void; reject: (error: Error) => void };
 type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
 
+class LocalDatabaseResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LocalDatabaseResponseError";
+  }
+}
+
 export type LocalMessage = {
   event_id: string; message_id: string; room_id: RoomId; seq: number; sender: string; device_id: string;
   event_type: string; created_at: number; ciphertext: string; plaintext: string | null;
@@ -299,11 +306,19 @@ export function projectEditedPayload(payload: Record<string, unknown>, messageId
   return { payload: { ...payload, parts: [...(textPart ? [textPart] : []), ...nonText] }, textPart };
 }
 
+export class LocalRestoreCommitUnknownError extends Error {
+  constructor(cause: unknown) {
+    super("本机恢复提交状态无法确认；请重新打开后使用同一备份继续恢复", { cause });
+    this.name = "LocalRestoreCommitUnknownError";
+  }
+}
+
 export class LocalDatabase {
   private readonly worker = new Worker(new URL("./db-worker.ts", import.meta.url), { type: "module", name: "edgechat-pglite" });
   private readonly pending = new Map<number, Pending>();
   private requestId = 0;
   private closing: Promise<void> | null = null;
+  private workerFailure: Error | null = null;
   storage: "opfs" | "indexeddb" | "initializing" = "initializing";
 
   constructor(private readonly profileId: string) {
@@ -313,12 +328,17 @@ export class LocalDatabase {
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
-      if (response.error) pending.reject(new Error(response.error));
+      if (response.error) pending.reject(new LocalDatabaseResponseError(response.error));
       else {
         if (response.storage) this.storage = response.storage;
         pending.resolve(response);
       }
     };
+    this.worker.onerror = (event) => {
+      event.preventDefault();
+      this.failWorker(new Error(event.message || "Local database worker failed"));
+    };
+    this.worker.onmessageerror = () => this.failWorker(new Error("Local database worker response could not be decoded"));
   }
 
   async query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -407,14 +427,18 @@ export class LocalDatabase {
     return response.blob;
   }
 
-  async stageRestoreSnapshot(snapshot: Blob, expectedUserId: string): Promise<void> {
-    const response = await this.request({ kind: "restore", snapshot, expectedUserId });
-    if (!response.restored) throw new Error("Local database snapshot was not restored");
+  async stageRestoreSnapshot(snapshot: Blob, expectedUserId: string): Promise<string> {
+    return this.stageSnapshot("restore", snapshot, expectedUserId);
   }
 
-  async stageLinkedDeviceHistory(snapshot: Blob, expectedUserId: string): Promise<void> {
-    const response = await this.request({ kind: "restore-device-history", snapshot, expectedUserId });
-    if (!response.restored) throw new Error("Linked-device history was not restored");
+  async stageLinkedDeviceHistory(snapshot: Blob, expectedUserId: string): Promise<string> {
+    return this.stageSnapshot("restore-device-history", snapshot, expectedUserId);
+  }
+
+  async restoreCommitted(restoreId: string): Promise<boolean> {
+    if (!/^[0-9a-f-]{36}$/i.test(restoreId)) throw new Error("Invalid local restore identifier");
+    const response = await this.request({ kind: "verify-restore", restoreId });
+    return response.restored === true;
   }
 
   async getCursor(): Promise<number> {
@@ -1590,11 +1614,42 @@ export class LocalDatabase {
     return this.request({ sql, params, exec }).then((response) => ({ rows: response.rows ?? [], storage: response.storage ?? "indexeddb" }));
   }
 
+  private async stageSnapshot(kind: "restore" | "restore-device-history", snapshot: Blob, expectedUserId: string): Promise<string> {
+    const restoreId = crypto.randomUUID();
+    try {
+      const response = await this.request({ kind, snapshot, expectedUserId, restoreId });
+      if (!response.restored) throw new Error(kind === "restore" ? "Local database snapshot was not restored" : "Linked-device history was not restored");
+      return restoreId;
+    } catch (cause) {
+      // An error response from the Worker is authoritative: validation or the
+      // activation transaction failed before it acknowledged a commit.
+      if (cause instanceof LocalDatabaseResponseError) throw cause;
+      try {
+        if (await this.restoreCommitted(restoreId)) return restoreId;
+      } catch (verificationCause) {
+        throw new LocalRestoreCommitUnknownError(verificationCause);
+      }
+      throw cause;
+    }
+  }
+
+  private failWorker(error: Error): void {
+    if (this.workerFailure) return;
+    this.workerFailure = error;
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+  }
+
   private request(message: Record<string, unknown>): Promise<DbResponse> {
+    if (this.workerFailure) return Promise.reject(this.workerFailure);
     const id = ++this.requestId;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, profileId: this.profileId, ...message });
+      try { this.worker.postMessage({ id, profileId: this.profileId, ...message }); }
+      catch (cause) {
+        this.pending.delete(id);
+        reject(cause instanceof Error ? cause : new Error(String(cause)));
+      }
     });
   }
 }
