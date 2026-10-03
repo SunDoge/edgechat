@@ -32,6 +32,10 @@ describe("local message catalog", () => {
     expect(translate("devices.storage.breakdown", { attachments: "1 MB", archives: "2 MB", avatars: "3 KB" })).toBe("附件 1 MB · 消息历史 2 MB · 头像 3 KB");
     expect(translate("devices.revocation.working", { completed: 2, total: 5 })).toBe("正在安全移除 · 2/5 个对话");
     expect(translate("forward.titleMany", { count: 3 })).toBe("转发 3 条消息");
+    expect(translate("forward.partial", { completed: 2, remaining: 1, detail: "服务器暂时不可用，请稍后再试" })).toBe(
+      "2 条已加入发送队列，剩余 1 条未处理：服务器暂时不可用，请稍后再试",
+    );
+    expect(translate("shareTarget.sentTo", { title: "家人" })).toBe("已发送到 家人");
     expect(translate("media.description", { title: "家人" })).toBe("家人 · 仅显示这台设备已索引的内容");
     expect(translate("identity.fingerprintLabel", { value: "ABCD EFGH" })).toBe("设备验证字符 ABCD EFGH");
     expect(translate("roomPreview.failed", { preview: "照片" })).toBe("发送失败 · 照片");

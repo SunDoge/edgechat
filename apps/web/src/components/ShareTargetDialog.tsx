@@ -6,6 +6,7 @@ import { useI18n, type Translator } from "../i18n";
 import { avatarColor, initials, roomTitle } from "../presenters";
 import { SHARE_TARGET_MAX_FILES, SHARE_TARGET_MAX_TEXT, sharedComposerText, type ShareTargetError, type StagedShare } from "../share-target";
 import { Avatar, Dialog } from "./primitives";
+import { operationErrorMessage } from "../operation-errors";
 
 export function ShareTargetDialog(props: {
   share: StagedShare;
@@ -33,7 +34,7 @@ export function ShareTargetDialog(props: {
     if (!text().trim() && !files.length) return setError(t("shareTarget.error.empty"));
     setBusy(true); setError("");
     try { await props.onSend(roomId, text().trim(), files); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("shareTarget.error.send")); setBusy(false); }
+    catch (cause) { setError(operationErrorMessage(cause, t("shareTarget.error.send"), t)); setBusy(false); }
   }
 
   return <Dialog id="share-target" title={t("shareTarget.title")} description={t("shareTarget.description")} onClose={busy() ? () => undefined : props.onClose}>

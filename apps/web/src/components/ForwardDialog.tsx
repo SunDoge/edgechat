@@ -7,6 +7,7 @@ import { translate, useI18n, type Translator } from "../i18n";
 import { attachmentPresentation, messageAttachments, messageContacts, messageText, normalizeMessagePayload, type MessagePayload } from "../media";
 import { avatarColor, initials, roomTitle } from "../presenters";
 import { Avatar, Dialog } from "./primitives";
+import { operationErrorMessage } from "../operation-errors";
 
 export function ForwardDialog(props: {
   messages: LocalMessage[];
@@ -29,7 +30,7 @@ export function ForwardDialog(props: {
     if (busyRoom()) return;
     setBusyRoom(roomId); setError("");
     try { await props.onForward(roomId); props.onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("forward.error")); setBusyRoom(null); }
+    catch (cause) { setError(operationErrorMessage(cause, t("forward.error"), t)); setBusyRoom(null); }
   }
 
   return <Dialog id="forward-message" title={props.messages.length > 1 ? t("forward.titleMany", { count: props.messages.length }) : t("forward.titleOne")} description={t("forward.description")} onClose={() => { if (!busyRoom()) props.onClose(); }}>

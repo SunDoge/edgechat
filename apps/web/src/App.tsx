@@ -94,6 +94,7 @@ import { MlsProjectionBarrier } from "./mls-projection-barrier";
 import { deliveryReceiptRetryDelay } from "./delivery-receipt-retry";
 import { clearRoomSigningKeyPins, pinRoomSigningKeys, pinnedRoomSigningKey } from "./room-signing-key-pins";
 import { useI18n } from "./i18n";
+import { operationErrorMessage, UserFacingError } from "./operation-errors";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -1537,10 +1538,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     parameters.delete("share_target"); parameters.delete("share_error");
     const cleanUrl = `${location.pathname}${parameters.size ? `?${parameters}` : ""}${location.hash}`;
     history.replaceState(history.state, "", cleanUrl);
-    if (!id) { setNotice(rawShareId ? "共享内容引用无效，请重新分享" : shareTargetErrorMessage("storage")); return; }
+    if (!id) { setNotice(rawShareId ? t("shareTarget.error.invalidReference") : shareTargetErrorMessage("storage")); return; }
     void loadStagedShare(id).then((share) => {
       if (share) setIncomingShare(share);
-      else setNotice("共享内容已过期，请重新分享");
+      else setNotice(t("shareTarget.error.expired"));
     }).catch(() => setNotice(shareTargetErrorMessage("storage")));
   });
 
@@ -1573,18 +1574,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function enqueueNewMessage(room: ServerRoom, text: string, selectedFiles: readonly File[], relation?: MessagePayload["relation"], durationMs?: number | null): Promise<void> {
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef) throw new UserFacingError(t("send.queueNotReady"));
     mlsProjectionBarrier.assertWritable();
-    if (!text && !selectedFiles.length) throw new Error("没有可发送的内容");
-    if (room.blocked_by_me) throw new Error("你已屏蔽此用户，请先取消屏蔽再发送消息");
-    if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能发送消息");
-    if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先从另一台设备或备份恢复此对话");
-    if (text.length > 16_000) throw new Error("消息不能超过 16,000 个字符");
+    if (!text && !selectedFiles.length) throw new UserFacingError(t("send.empty"));
+    if (room.blocked_by_me) throw new UserFacingError(t("send.blocked"));
+    if (room.leave_status === "pending") throw new UserFacingError(t("send.leaving"));
+    if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("send.historyRecovery"));
+    if (text.length > 16_000) throw new UserFacingError(t("send.textTooLong"));
     const limits = attachmentLimits();
-    if (selectedFiles.length > limits.max_attachments_per_message) throw new Error(t("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message }));
-    if (selectedFiles.some((file) => file.size > limits.max_attachment_plaintext_bytes)) throw new Error(t("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) }));
-    if (selectedFiles.reduce((total, file) => total + file.size, 0) > limits.max_message_attachment_plaintext_bytes) throw new Error(t("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) }));
-    if (!currentMls.hasGroup(room.room_id)) throw new Error("这台设备还没有目标对话的加密状态");
+    if (selectedFiles.length > limits.max_attachments_per_message) throw new UserFacingError(t("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message }));
+    if (selectedFiles.some((file) => file.size > limits.max_attachment_plaintext_bytes)) throw new UserFacingError(t("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) }));
+    if (selectedFiles.reduce((total, file) => total + file.size, 0) > limits.max_message_attachment_plaintext_bytes) throw new UserFacingError(t("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) }));
+    if (!currentMls.hasGroup(room.room_id)) throw new UserFacingError(t("send.cryptoUnavailable"));
     const domain = currentSession.server_name ?? location.hostname;
     const eventId = `$${crypto.randomUUID()}:${domain}` as EventId;
     const createdAt = Date.now(); const attachments: AttachmentMetadata[] = [];
@@ -1633,8 +1634,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendMessage() {
     const room = selected(); const selectedFiles = files(); const text = compose().trim();
     if (!room || (!text && !selectedFiles.length) || sendBusy()) return;
-    if (localProjectionRecoveryActive()) return setNotice("请等待本机记录恢复后再发送");
-    if (historyRecoveryRooms().has(room.room_id)) return setNotice("请先从另一台设备或备份恢复此对话");
+    if (localProjectionRecoveryActive()) return setNotice(t("send.localRecovery"));
+    if (historyRecoveryRooms().has(room.room_id)) return setNotice(t("send.historyRecovery"));
     const quote = quoting(); const reply = replyingTo();
     const relation: MessagePayload["relation"] = quote
       ? { type: "quote", target: { kind: "message", message_id: quote.message.message_id as MessageId, room_id: room.room_id }, snapshot: { text: quote.text, sender: quote.message.sender, ...(quote.displayName ? { display_name: quote.displayName } : {}) } }
@@ -1643,23 +1644,23 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     try {
       await enqueueNewMessage(room, text, selectedFiles, relation, voiceDurationMs());
       stopTyping(room.room_id); composerRevision += 1; setCompose(""); setFiles([]); setVoiceDurationMs(null); setReplyingTo(null); setQuoting(null); clearComposerDraft(room.room_id);
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "发送失败"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("send.error"), t)); }
     finally { setSendBusy(false); }
   }
 
   async function sendContactCard(contact: ContactIdentity): Promise<void> {
     const room = selected(); const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
+    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new UserFacingError(t("send.queueNotReady"));
     mlsProjectionBarrier.assertWritable();
-    if (!serverSupports(currentSession.protocol, "messages.contact.v1")) throw new Error("当前服务器不支持联系人名片");
-    if (sendBusy()) throw new Error("另一条消息正在发送，请稍后重试");
-    if (room.blocked_by_me) throw new Error("请先取消屏蔽再发送联系人");
-    if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能发送联系人");
-    if (room.request_status === "pending") throw new Error("接受消息请求后才能发送联系人");
-    if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先恢复此对话");
+    if (!serverSupports(currentSession.protocol, "messages.contact.v1")) throw new UserFacingError(t("contactSend.unsupported"));
+    if (sendBusy()) throw new UserFacingError(t("send.busy"));
+    if (room.blocked_by_me) throw new UserFacingError(t("contactSend.blocked"));
+    if (room.leave_status === "pending") throw new UserFacingError(t("contactSend.leaving"));
+    if (room.request_status === "pending") throw new UserFacingError(t("contactSend.requestPending"));
+    if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("contactSend.historyRecovery"));
     const domain = contact.user_id.slice(contact.user_id.lastIndexOf(":") + 1);
-    if (domain !== (currentSession.server_name ?? location.hostname)) throw new Error("暂不支持分享其他服务器的联系人");
-    if (!currentMls.hasGroup(room.room_id)) throw new Error("这台设备还没有目标对话的加密状态");
+    if (domain !== (currentSession.server_name ?? location.hostname)) throw new UserFacingError(t("contactSend.remoteUnsupported"));
+    if (!currentMls.hasGroup(room.room_id)) throw new UserFacingError(t("send.cryptoUnavailable"));
     const eventId = `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId;
     const payload = createContactMessagePayload(eventId as MessageId, contact);
     setSendBusy(true);
@@ -1669,7 +1670,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           payload: payload as unknown as Record<string, unknown> });
       });
       if (selectedRef === room.room_id) setPendingMessages(await db.outbox(room.room_id));
-      setNotice("联系人名片已加入发送队列");
+      setNotice(t("contactSend.queued"));
     } finally { setSendBusy(false); }
   }
 
@@ -1685,48 +1686,48 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   function openSharedContact(contact: ContactIdentity): void {
     const currentSession = session();
     if (!currentSession) return;
-    if (contact.user_id === currentSession.user_id) { setNotice("这是你自己的联系人名片"); return; }
+    if (contact.user_id === currentSession.user_id) { setNotice(t("contactSend.self")); return; }
     const domain = contact.user_id.slice(contact.user_id.lastIndexOf(":") + 1);
-    if (domain !== (currentSession.server_name ?? location.hostname)) { setNotice("跨服务器对话尚未开放"); return; }
+    if (domain !== (currentSession.server_name ?? location.hostname)) { setNotice(t("contactSend.federationUnavailable")); return; }
     const existing = rooms().find((room) => room.kind === "direct" && room.members.some((member) => member.user_id === contact.user_id) && room.request_status !== "rejected");
     if (existing) { setSelectedId(existing.room_id); return; }
-    if (localProjectionRecoveryActive()) { setNotice("请等待本机记录恢复后再新建对话"); return; }
+    if (localProjectionRecoveryActive()) { setNotice(t("contactSend.newRoomRecovery")); return; }
     setNewRoomContact(contact); setNewRoom(true);
   }
 
   async function sendIncomingShare(roomId: RoomId, text: string, sharedFiles: File[]): Promise<void> {
     const share = incomingShare();
     const room = rooms().find((candidate) => candidate.room_id === roomId);
-    if (!share || !room) throw new Error("目标对话不存在");
-    if (sendBusy()) throw new Error("另一条消息正在发送，请稍后重试");
+    if (!share || !room) throw new UserFacingError(t("shareTarget.error.targetMissing"));
+    if (sendBusy()) throw new UserFacingError(t("shareTarget.error.busy"));
     setSendBusy(true);
     try {
       await enqueueNewMessage(room, text, sharedFiles);
       setIncomingShare(null); setSelectedId(roomId);
       void deleteStagedShare(share.id).catch(() => undefined);
-      setNotice(`已发送到 ${roomTitle(room, session()!.user_id)}`);
+      setNotice(t("shareTarget.sentTo", { title: roomTitle(room, session()!.user_id) }));
     } finally { setSendBusy(false); }
   }
 
   function discardIncomingShare(): void {
     const share = incomingShare();
     setIncomingShare(null);
-    if (share) void deleteStagedShare(share.id).catch(() => setNotice("共享内容已关闭；残留的本机暂存会在下次分享时清理"));
+    if (share) void deleteStagedShare(share.id).catch(() => setNotice(t("shareTarget.cleanupPending")));
   }
 
   async function forwardMessage(source: LocalMessage, targetRoomId: RoomId, successNotice?: string | false, savedFrom?: MessageReference): Promise<void> {
     const targetRoom = rooms().find((room) => room.room_id === targetRoomId);
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!targetRoom || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new Error("发送队列尚未就绪");
+    if (!targetRoom || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new UserFacingError(t("send.queueNotReady"));
     mlsProjectionBarrier.assertWritable();
-    if (targetRoom.blocked_by_me) throw new Error("请先取消屏蔽再转发");
-    if (targetRoom.leave_status === "pending") throw new Error("正在等待群主安全完成退出，不能再转发到这段群聊");
-    if (historyRecoveryRooms().has(targetRoomId)) throw new Error("请先从另一台设备或备份恢复目标对话");
-    if (!currentMls.hasGroup(targetRoomId)) throw new Error("这台设备还没有目标对话的加密状态");
+    if (targetRoom.blocked_by_me) throw new UserFacingError(t("forward.blocked"));
+    if (targetRoom.leave_status === "pending") throw new UserFacingError(t("forward.leaving"));
+    if (historyRecoveryRooms().has(targetRoomId)) throw new UserFacingError(t("forward.historyRecovery"));
+    if (!currentMls.hasGroup(targetRoomId)) throw new UserFacingError(t("send.cryptoUnavailable"));
     const sourcePayload = normalizeMessagePayload((source.payload ?? {}) as MessagePayload, source.event_id);
     const attachments = messageAttachments(sourcePayload);
-    if (messageContacts(sourcePayload).length && !serverSupports(currentSession.protocol, "messages.contact.v1")) throw new Error("当前服务器不支持联系人名片");
-    if (attachments.length > attachmentLimits().max_attachments_per_message) throw new Error(`当前服务器每条消息最多支持 ${attachmentLimits().max_attachments_per_message} 个附件`);
+    if (messageContacts(sourcePayload).length && !serverSupports(currentSession.protocol, "messages.contact.v1")) throw new UserFacingError(t("contactSend.unsupported"));
+    if (attachments.length > attachmentLimits().max_attachments_per_message) throw new UserFacingError(t("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message }));
     const domain = currentSession.server_name ?? location.hostname;
     const eventId = `$${crypto.randomUUID()}:${domain}` as EventId;
     const attachmentAliases = attachments.map(() => encodeBase64Url(crypto.getRandomValues(new Uint8Array(18))));
@@ -1740,11 +1741,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     });
     await Promise.all(attachmentAliases.map((alias, index) => attachmentLoader.aliasCached(attachments[index]!.attachment.id, alias)));
     if (selectedRef === targetRoomId) setPendingMessages(await db.outbox(targetRoomId));
-    if (successNotice !== false) setNotice(successNotice ?? `已转发到 ${roomTitle(targetRoom, currentSession.user_id)}`);
+    if (successNotice !== false) setNotice(successNotice ?? t("forward.sentTo", { title: roomTitle(targetRoom, currentSession.user_id) }));
   }
 
   async function forwardMessages(sources: LocalMessage[], targetRoomId: RoomId): Promise<void> {
-    if (!sources.some((message) => !message.deleted_at)) throw new Error("没有可转发的消息");
+    if (!sources.some((message) => !message.deleted_at)) throw new UserFacingError(t("forward.none"));
     const keepSelectionOnFailure = selectedMessageIds().size > 0;
     let ordered: LocalMessage[];
     try {
@@ -1754,15 +1755,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const remaining = cause.remaining;
       setForwardingMessages(remaining);
       if (keepSelectionOnFailure) setSelectedMessageIds(new Set(remaining.map((message) => message.message_id)));
-      const detail = cause.reason instanceof Error ? cause.reason.message : "未知错误";
-      if (!cause.completed) throw new Error(detail);
-      throw new Error(`${cause.completed} 条已加入发送队列，剩余 ${remaining.length} 条未处理：${detail}`);
+      const detail = operationErrorMessage(cause.reason, t("forward.error"), t);
+      if (!cause.completed) throw new UserFacingError(detail);
+      throw new UserFacingError(t("forward.partial", { completed: cause.completed, remaining: remaining.length, detail }));
     }
     const targetRoom = rooms().find((room) => room.room_id === targetRoomId);
     const currentSession = session();
+    const targetTitle = targetRoom && currentSession ? roomTitle(targetRoom, currentSession.user_id) : t("forward.targetFallback");
     setNotice(ordered.length === 1
-      ? `已转发到 ${targetRoom && currentSession ? roomTitle(targetRoom, currentSession.user_id) : "目标对话"}`
-      : `已转发 ${ordered.length} 条到 ${targetRoom && currentSession ? roomTitle(targetRoom, currentSession.user_id) : "目标对话"}`);
+      ? t("forward.sentTo", { title: targetTitle })
+      : t("forward.sentMany", { count: ordered.length, title: targetTitle }));
   }
 
   async function ensureSavedRoom(): Promise<ServerRoom> {

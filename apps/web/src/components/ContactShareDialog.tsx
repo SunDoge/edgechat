@@ -3,6 +3,7 @@ import type { ContactIdentity } from "../media";
 import { Avatar, Dialog } from "./primitives";
 import { avatarColor, initials } from "../presenters";
 import { useI18n } from "../i18n";
+import { operationErrorMessage } from "../operation-errors";
 
 export function ContactShareDialog(props: { contacts: ContactIdentity[]; onSend: (contact: ContactIdentity) => Promise<void>; onClose: () => void }) {
   const { t } = useI18n();
@@ -15,7 +16,7 @@ export function ContactShareDialog(props: { contacts: ContactIdentity[]; onSend:
     if (!contact || busy()) return;
     setBusy(true); setError("");
     try { await props.onSend(contact); props.onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("contactShare.error")); setBusy(false); }
+    catch (cause) { setError(operationErrorMessage(cause, t("contactShare.error"), t)); setBusy(false); }
   }
 
   return <Dialog id="share-contact" title={t("contactShare.title")} description={t("contactShare.description")} onClose={() => { if (!busy()) props.onClose(); }}>
