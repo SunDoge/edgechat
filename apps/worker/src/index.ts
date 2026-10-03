@@ -2568,9 +2568,8 @@ async function claimDeviceLink(request: Request, env: Env, linkId: string, ctx: 
   if (link.status === "cancelled") throw new HttpError(410, "Device link was cancelled", "device_link_cancelled");
   if (!link.user_id || (link.status !== "complete" && link.status !== "claimed")) throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
   const historyTransfer = await deviceLinkHistoryTransfer(env, linkId);
-  if (link.status !== "claimed" && historyTransfer
-    && historyTransfer.ready_shards.length + historyTransfer.acked_shards.length !== historyTransfer.shard_count) {
-    throw new HttpError(409, "Device history transfer is not ready", "device_history_not_ready");
+  if (link.status !== "claimed" && historyTransfer && historyTransfer.acked_shards.length !== historyTransfer.shard_count) {
+    throw new HttpError(409, "Device history is not durably staged on the target", "device_history_not_ready");
   }
   const body = await readJson(request);
   const accessToken = stringField(body, "access_token", 128);

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferComplete, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
+import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -16,21 +16,21 @@ function repairEvent(seq: number, generation = 3): RoomEvent {
   } as RoomEvent;
 }
 
-describe("deviceHistoryTransferComplete", () => {
+describe("deviceHistoryTransferAvailable", () => {
   const transfer = (ready_shards: number[], acked_shards: number[]): DeviceHistoryTransfer => ({
     transfer_id: "transfer_123456789", source_device_id: "source", plaintext_bytes: 2,
     shard_plaintext_bytes: 1, shard_count: 2, ready_shards, acked_shards, ciphertext_bytes: ready_shards.length,
   });
 
   it("requires every shard to be either ready or durably acknowledged", () => {
-    expect(deviceHistoryTransferComplete(transfer([0], []))).toBe(false);
-    expect(deviceHistoryTransferComplete(transfer([1], [0]))).toBe(true);
+    expect(deviceHistoryTransferAvailable(transfer([0], []))).toBe(false);
+    expect(deviceHistoryTransferAvailable(transfer([1], [0]))).toBe(true);
   });
 
   it("rejects duplicate and out-of-range server indexes", () => {
-    expect(deviceHistoryTransferComplete(transfer([0], [0]))).toBe(false);
-    expect(deviceHistoryTransferComplete(transfer([0, 2], []))).toBe(false);
-    expect(deviceHistoryTransferComplete(null)).toBe(false);
+    expect(deviceHistoryTransferAvailable(transfer([0], [0]))).toBe(false);
+    expect(deviceHistoryTransferAvailable(transfer([0, 2], []))).toBe(false);
+    expect(deviceHistoryTransferAvailable(null)).toBe(false);
   });
 });
 

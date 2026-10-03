@@ -2639,6 +2639,15 @@ describe("single-server durable delivery", () => {
     expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { method: "DELETE", headers: { "x-device-link-secret": link.secret } })).status).toBe(204);
     const afterAck = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
     expect(await afterAck.json()).toMatchObject({ history_transfer: { ready_shards: [1], acked_shards: [0], ciphertext_bytes: 3 } });
+    const unstagedClaim = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
+      method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" },
+      body: JSON.stringify({ access_token: prematureAccessToken, device_credential: prematureCredential, signature: prematureProof }),
+    });
+    expect(unstagedClaim.status).toBe(409);
+    expect(await unstagedClaim.json()).toMatchObject({ code: "device_history_not_ready" });
+    const second = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, { headers: { "x-device-link-secret": link.secret } });
+    expect(new Uint8Array(await second.arrayBuffer())).toEqual(shards[1]);
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, { method: "DELETE", headers: { "x-device-link-secret": link.secret } })).status).toBe(204);
     expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
       method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" },
       body: JSON.stringify({ access_token: prematureAccessToken, device_credential: prematureCredential, signature: prematureProof }),
@@ -2647,7 +2656,7 @@ describe("single-server durable delivery", () => {
       headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
         "x-content-sha256": secondDigest }, body: shards[1] })).status).toBe(404);
     const usage = await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${account.access_token}` } });
-    expect(await usage.json()).toMatchObject({ archive_bytes: 3, archive_objects: 1 });
+    expect(await usage.json()).toMatchObject({ archive_bytes: 0, archive_objects: 0 });
   });
 
   it("removes another device from every MLS room before revoking its session and live socket", async () => {

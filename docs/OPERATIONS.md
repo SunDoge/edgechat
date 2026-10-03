@@ -194,8 +194,10 @@ authenticated 16 MiB plaintext shards; there is no whole-bundle object route.
 Each shard follows the same conditional checksum PUT and exact-key cleanup
 contract. The target acknowledges a shard only after durable local staging,
 which deletes that exact object and returns quota immediately. If a manifest
-exists, the Worker refuses session claim until every distinct shard is ready or
-acknowledged, and refuses new manifests or uploads after claim. Normal request
+exists, the Worker refuses session claim until every distinct shard is durably
+staged and acknowledged by the target, and refuses new manifests or uploads
+after claim. A successful claim therefore leaves no temporary history object or
+quota charge. Normal request
 cost is therefore one PUT, one GET and one DELETE per shard, with no LIST and no
 unbounded single history object. The source retains the manifest-bound local
 snapshot until the target's durable claim event. A first GET that finds a

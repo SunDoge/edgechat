@@ -86,8 +86,8 @@ export type DeviceHistoryTransfer = {
   ciphertext_bytes: number;
 };
 
-/** Accept only a complete, non-duplicated shard index set from the server. */
-export function deviceHistoryTransferComplete(transfer: DeviceHistoryTransfer | null): boolean {
+/** True when every declared shard is remotely ready or already acknowledged, so target processing may start. */
+export function deviceHistoryTransferAvailable(transfer: DeviceHistoryTransfer | null): boolean {
   if (!transfer || !Number.isSafeInteger(transfer.shard_count) || transfer.shard_count < 1) return false;
   const indexes = [...transfer.ready_shards, ...transfer.acked_shards];
   if (indexes.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= transfer.shard_count)) return false;

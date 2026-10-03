@@ -1,13 +1,14 @@
 import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { IconCopy, IconDeviceMobile, IconRefresh, IconShieldCheck } from "@tabler/icons-solidjs";
 import { deviceFingerprint, deviceLinkClaimBytes, openAccountCredential, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
-import { ApiError, deviceHistoryTransferComplete, type ApiClient, type DeviceLinkStatus, type SessionIdentity } from "@edgechat/sync";
+import { ApiError, deviceHistoryTransferAvailable, type ApiClient, type DeviceLinkStatus, type SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { renderSVG } from "uqr";
 import { clearIdentity, loadIdentity, saveIdentity } from "../vault";
 import { clearPendingDeviceLink, deviceLinkUrl, loadPendingDeviceLink, randomDeviceLinkToken, savePendingDeviceLink, sha256Base64Url, type PendingDeviceLink } from "../device-linking";
 import { openDeviceHistoryShard, type DeviceHistoryManifest } from "../device-history-transfer";
 import { deviceHistoryStagingFor } from "../device-history-staging";
+import { deviceHistoryShardResumeAction } from "../device-link-target-policy";
 import { AttachmentCiphertextCache } from "../attachment-cache";
 import { ArchiveSegmentCiphertextCache } from "../archive-segment-cache";
 import { openDeviceHistoryBundle } from "../device-history-bundle";
@@ -114,14 +115,23 @@ export function DeviceLinkSetup(props: {
       const plaintextParts: Blob[] = [];
       for (let index = 0; index < transfer.shard_count; index += 1) {
         let plaintext = await deviceHistoryStaging.targetPlaintextShard(current.link_id, index);
-        if (!plaintext) {
-          if (acknowledged.has(index)) throw new UserFacingError(t("deviceLink.error.localShardMissing"));
-          if (!ready.has(index)) throw new UserFacingError(t("deviceLink.error.remoteShardMissing"));
+        const action = deviceHistoryShardResumeAction({
+          ready: ready.has(index), acknowledged: acknowledged.has(index), hasLocalPlaintext: Boolean(plaintext),
+        });
+        if (action === "local_missing") throw new UserFacingError(t("deviceLink.error.localShardMissing"));
+        if (action === "remote_missing") throw new UserFacingError(t("deviceLink.error.remoteShardMissing"));
+        if (action === "download_and_acknowledge") {
           const sealed = await props.api.downloadDeviceLinkHistoryShard(current.link_id, current.secret, index);
           plaintext = await openDeviceHistoryShard(sealed, manifest, index, context, identity);
           await deviceHistoryStaging.saveTargetPlaintextShard(current.link_id, index, plaintext);
+        }
+        // The plaintext write may have succeeded immediately before an ACK
+        // request/response was lost. Retrying this exact DELETE is idempotent
+        // and performs no object GET; claim remains blocked until it lands.
+        if (action === "download_and_acknowledge" || action === "acknowledge_local") {
           await props.api.acknowledgeDeviceLinkHistoryShard(current.link_id, current.secret, index);
         }
+        if (!plaintext) throw new UserFacingError(t("deviceLink.error.incompleteHistory"));
         plaintextParts.push(plaintext);
       }
       historySnapshot = new Blob(plaintextParts, { type: "application/gzip" });
@@ -179,7 +189,7 @@ export function DeviceLinkSetup(props: {
       } else if (next.status === "approved") setStage("approved");
       else if ((next.status === "complete" || next.status === "claimed") && next.account_mode === "opaque" && !next.account_credential_ready) setStage("approved");
       else if ((next.status === "complete" || next.status === "claimed") && next.history_transfer
-        && !deviceHistoryTransferComplete(next.history_transfer)) setStage("approved");
+        && !deviceHistoryTransferAvailable(next.history_transfer)) setStage("approved");
       else if (next.status === "complete" || next.status === "claimed") return await finishLink(loadPendingDeviceLink(props.profileId) ?? current, next);
       else if (next.status === "cancelled") throw new UserFacingError(t("deviceLink.error.cancelled"));
       else setStage("waiting");
