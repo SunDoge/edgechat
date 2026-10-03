@@ -72,6 +72,7 @@ import { persistBeforeTabHandoff, PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_CANCEL_
 import { localRetentionCoverage } from "./retention-coverage";
 import { verifyRoomEventSignature } from "./event-authentication";
 import { AttachmentCiphertextCache } from "./attachment-cache";
+import { AttachmentSendCleanupCoordinator } from "./attachment-send-cleanup";
 import { AttachmentCiphertextLoader } from "./attachment-loader";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
 import { createDeviceHistoryBundle } from "./device-history-bundle";
@@ -118,6 +119,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const db = new LocalDatabase(profileId);
   const mlsProjectionBarrier = new MlsProjectionBarrier();
   const attachmentCache = new AttachmentCiphertextCache(profileId);
+  const attachmentSendCleanup = new AttachmentSendCleanupCoordinator(api, db, attachmentCache);
   const attachmentLoader = new AttachmentCiphertextLoader(
     attachmentCache,
     (id) => api.downloadAttachment(id),
@@ -1227,6 +1229,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       void repairCloudHistory().catch(() => undefined);
       void repairCloudAttachments().catch(() => undefined);
       void repairCloudArchive().catch(() => undefined);
+      void attachmentSendCleanup.reconcile();
       void processPeerRecoveries().catch(() => undefined);
       void archiveRef?.reconcilePendingUploads().then(() => archiveRef?.reconcileRetentionAcks()).catch(() => undefined);
       void pullRemoteDrafts().then(() => processDraftSync()).catch((cause) => {
@@ -1561,6 +1564,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await db.bindAccount(next.user_id, next.display_name);
       nextMls = (await restoreMlsProjectionBarrier(nextMls)) ?? nextMls;
       setSession(next);
+      void attachmentSendCleanup.reconcile();
       void reconcilePush(api, next.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
       setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); await db.cacheSession(offlineSessionSnapshot(next));
       await Promise.all([loadRooms(nextMls), refreshComposerDrafts()]); await Promise.all([enforceLocalRetention(true), enforceMessageExpiry(false)]);
@@ -1583,16 +1587,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!currentMls.hasGroup(room.room_id)) throw new Error("这台设备还没有目标对话的加密状态");
     const domain = currentSession.server_name ?? location.hostname;
     const eventId = `$${crypto.randomUUID()}:${domain}` as EventId;
-    const createdAt = Date.now(); const attachments: AttachmentMetadata[] = []; const uploadedIds: string[] = [];
+    const createdAt = Date.now(); const attachments: AttachmentMetadata[] = [];
+    const attachmentIds = selectedFiles.map(() => createAttachmentId());
+    let cleanupJob = selectedFiles.length ? await db.stageAttachmentSendCleanup(eventId, room.room_id, attachmentIds) : null;
     let previewBudget = MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES;
     let queued = false;
     try {
-      for (const selectedFile of selectedFiles) {
+      for (const [index, selectedFile] of selectedFiles.entries()) {
         const preparedImage = await prepareImageMetadata(selectedFile, previewBudget);
         if (preparedImage.preview) previewBudget -= embeddedImagePreviewByteLength(preparedImage.preview);
         const encryptedFile = await core.encryptAttachment(await selectedFile.arrayBuffer());
-        const attachmentId = createAttachmentId();
-        uploadedIds.push(attachmentId);
+        const attachmentId = attachmentIds[index]!;
         const upload = await api.uploadAttachment(room.room_id, encryptedFile.ciphertext, attachmentId);
         if (await attachmentCache.put(upload.attachment_id, encryptedFile.ciphertext)) {
           await attachmentLoader.acknowledgeCached(upload.attachment_id, encryptedFile.ciphertext);
@@ -1606,10 +1611,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           metadata: attachmentReferenceMetadata(attachments.map((attachment) => attachment.id)) });
         queued = true;
       });
+      if (cleanupJob) {
+        await db.completeAttachmentSendCleanup(eventId).catch((error) => {
+          console.warn(JSON.stringify({ message: "attachment send cleanup journal completion failed", error: error instanceof Error ? error.message : String(error) }));
+        });
+        cleanupJob = null;
+      }
     } catch (cause) {
-      if (!queued && uploadedIds.length) {
-        void Promise.all(uploadedIds.map((id) => attachmentCache.remove(id))).catch(() => undefined);
-        void api.abandonAttachments(uploadedIds).catch((cleanupError) => console.warn(JSON.stringify({ message: "uncommitted attachment cleanup failed", attachment_count: uploadedIds.length, error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) })));
+      if (!queued && cleanupJob) {
+        void attachmentSendCleanup.reconcileJob(cleanupJob).catch((cleanupError) => console.warn(JSON.stringify({ message: "uncommitted attachment cleanup failed", attachment_count: cleanupJob?.attachment_ids.length ?? 0, error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) })));
       }
       throw cause;
     }

@@ -356,6 +356,7 @@ export type PendingArchiveUploadResolution = {
   room_id: RoomId; segment_id: string; lease_token: string; start_seq: number; end_seq: number; expires_at: number;
 };
 export type PendingArchiveRetentionAck = { room_id: RoomId; segment_id: string };
+export type PendingAttachmentSendCleanup = { event_id: string; room_id: RoomId; attachment_ids: string[] };
 export type LocalArchiveSegmentMetadata = {
   segment_id: string; room_id: RoomId; start_seq: number; end_seq: number; byte_size: number;
   header_bytes: Uint8Array<ArrayBuffer>; envelope_index_bytes: Uint8Array<ArrayBuffer>;
@@ -767,6 +768,53 @@ export class LocalDatabase {
       [event.event_id, event.room_id, JSON.stringify(event), plaintext, JSON.stringify(payload)],
     );
     return rows.length === 1;
+  }
+
+  async stageAttachmentSendCleanup(eventId: string, roomId: RoomId, attachmentIds: readonly string[]): Promise<PendingAttachmentSendCleanup> {
+    if (!eventId || eventId.length > 512 || !isNamespacedRoomId(roomId) || !attachmentIds.length || attachmentIds.length > 10
+      || attachmentIds.some((id) => !/^[A-Za-z0-9_-]{32}$/.test(id)) || new Set(attachmentIds).size !== attachmentIds.length) {
+      throw new Error("Invalid attachment send cleanup record");
+    }
+    const ids = [...attachmentIds]; const now = Date.now();
+    const rows = await this.query<{ event_id: string }>(
+      `INSERT INTO attachment_send_cleanup (event_id,room_id,attachment_ids,created_at,updated_at)
+       VALUES ($1,$2,$3::jsonb,$4,$4)
+       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id, updated_at = EXCLUDED.updated_at
+       WHERE attachment_send_cleanup.room_id = EXCLUDED.room_id AND attachment_send_cleanup.attachment_ids = EXCLUDED.attachment_ids
+       RETURNING event_id`,
+      [eventId, roomId, JSON.stringify(ids), now],
+    );
+    if (!rows.length) throw new Error("Attachment cleanup event ID conflicts with a different send");
+    return { event_id: eventId, room_id: roomId, attachment_ids: ids };
+  }
+
+  async pendingAttachmentSendCleanups(limit = 100): Promise<PendingAttachmentSendCleanup[]> {
+    const boundedLimit = Number.isInteger(limit) ? Math.min(100, Math.max(1, limit)) : 100;
+    const rows = await this.query<{ event_id: string; room_id: RoomId; attachment_ids: unknown }>(
+      "SELECT event_id,room_id,attachment_ids FROM attachment_send_cleanup ORDER BY created_at,event_id LIMIT $1", [boundedLimit],
+    );
+    return rows.map((row) => {
+      const ids = jsonValue(row.attachment_ids);
+      if (!Array.isArray(ids) || !ids.length || ids.length > 10 || ids.some((id) => typeof id !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(id))) {
+        throw new Error("Stored attachment send cleanup record is invalid");
+      }
+      return { event_id: row.event_id, room_id: row.room_id, attachment_ids: ids as string[] };
+    });
+  }
+
+  async attachmentSendCommittedLocally(eventId: string): Promise<boolean> {
+    const [row] = await this.query<{ committed: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM outbox WHERE event_id = $1
+         UNION ALL SELECT 1 FROM outgoing_event_staging WHERE event_id = $1
+         UNION ALL SELECT 1 FROM messages WHERE event_id = $1
+       ) AS committed`, [eventId],
+    );
+    return row?.committed === true;
+  }
+
+  async completeAttachmentSendCleanup(eventId: string): Promise<void> {
+    await this.query("DELETE FROM attachment_send_cleanup WHERE event_id = $1", [eventId]);
   }
 
   async cachedRooms<T extends object>(): Promise<T[]> {

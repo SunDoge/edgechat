@@ -9,7 +9,7 @@ describe("versioned local PGlite migrations", () => {
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await expect(migrateLocalSchema(db)).resolves.toBe(LOCAL_SCHEMA_VERSION);
     expect((await db.query("SELECT version,migration_name FROM local_schema_meta WHERE id = 1")).rows)
-      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "outgoing_mls_staging" }]);
+      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "attachment_send_cleanup" }]);
     expect((await db.query("SELECT user_id FROM users")).rows).toEqual([{ user_id: "@alice:example.com" }]);
     await db.close();
   });

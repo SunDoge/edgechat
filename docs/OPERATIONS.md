@@ -179,6 +179,16 @@ uses one exact-key DELETE; a concurrently finishing PUT rechecks that marker and
 deletes the same key itself. It performs no discovery HEAD/LIST and returns the
 quota reservation exactly once.
 
+For a multi-part message the PWA writes one bounded PGlite cleanup journal with
+all opaque attachment IDs before the first PUT. Crossing the crash-safe outgoing
+MLS staging/outbox boundary removes that journal. After a page crash, startup or
+durable reconnect first checks local outgoing staging, outbox, and projected
+message evidence: any match proves the send is durable and suppresses cleanup;
+otherwise one at-most-ten-ID abandonment request exact-deletes only uncommitted
+objects/claims and then removes their local cache files. An offline cleanup keeps
+the journal and ciphertext for retry. This recovery performs no LIST, HEAD, GET,
+or additional PUT and does not wait for the seven-day server backstop.
+
 Archive compaction likewise retries at most once with the lease's preallocated
 segment ID and byte-identical ciphertext. The Worker binds an already committed
 ID to its room, sequence range, size and digest; a lost-response retry is served

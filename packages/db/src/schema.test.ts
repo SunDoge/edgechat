@@ -3,7 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
 import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, MESSAGES_AFTER_SQL, PROMOTE_STAGED_OUTGOING_EVENT_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_LIST_ACTIVITIES_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
 import { LOCAL_CLEAR_ACCOUNT_DATA, LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
-import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4, LOCAL_SCHEMA_V5, LOCAL_SCHEMA_V6, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8 } from "./migrations";
+import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4, LOCAL_SCHEMA_V5, LOCAL_SCHEMA_V6, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9 } from "./migrations";
 import { purgeRoomBefore, setRoomRetention } from "./retention";
 import { messageExpiryAt, purgeExpiredMessages } from "./expiry";
 
@@ -133,7 +133,7 @@ describe("PGlite local full-text index", () => {
   });
 
   it("keeps searchable history and archive keys but strips source-device queues from a linked-device snapshot", async () => {
-    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8);
+    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8); await db.exec(LOCAL_SCHEMA_V9);
     await db.query("INSERT INTO account_state VALUES (1,'@linked:example.com','Linked',1)");
     await db.query("INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload,search_vector) VALUES ('event','$message:example.com','!room:example.com',1,'@linked:example.com','old-device','message.text',1,'cipher','kept history','{}',to_tsvector('simple','kept history'))");
     await db.query("INSERT INTO archive_keys VALUES ('segment','!room:example.com',$1,1,10,1)", [new Uint8Array(32)]);
@@ -154,6 +154,7 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO room_profiles VALUES ('!room:example.com','profile-event',4,'Weekend plans','@alice:example.com',1,NULL)");
     await db.query(`INSERT INTO room_membership_outbox (room_id,operation,target_user_id,target_device_ids,event_json,mls_claim_ids,previous_mls_state,mls_state,created_at,updated_at)
       VALUES ('!room:example.com','remove','@bob:example.com','["bob-phone"]','{"event_id":"membership"}','[]',$1,$2,1,1)`, [new Uint8Array([1]), new Uint8Array([2])]);
+    await db.query("INSERT INTO attachment_send_cleanup VALUES ('$unsent:example.com','!room:example.com','[\"12345678901234567890123456789012\"]',1,1)");
     await db.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
     expect((await db.query("SELECT event_id FROM messages")).rows).toEqual([{ event_id: "event" }]);
     expect((await db.query("SELECT segment_id FROM archive_keys")).rows).toEqual([{ segment_id: "segment" }]);
@@ -163,6 +164,7 @@ describe("PGlite local full-text index", () => {
     expect((await db.query("SELECT * FROM crypto_state")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM room_sync_state")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM deferred_room_events")).rows).toHaveLength(0);
+    expect((await db.query("SELECT * FROM attachment_send_cleanup")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM decrypted_event_staging")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM room_preferences")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM device_preferences")).rows).toHaveLength(0);
@@ -399,7 +401,7 @@ describe("PGlite local full-text index", () => {
 
   it("clears plaintext, crypto state, queues, and cursors for account deletion", async () => {
     const db = new PGlite();
-    await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8);
+    await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8); await db.exec(LOCAL_SCHEMA_V9);
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await db.query("INSERT INTO crypto_state VALUES ('!room:example.com',1,$1,'openmls',1)", [new Uint8Array([1, 2, 3])]);
     await db.query("INSERT INTO archive_segment_metadata VALUES ('segment','!room:example.com',1,10,100,$1,$2,1)", [new Uint8Array([1]), new Uint8Array([2])]);
@@ -413,6 +415,7 @@ describe("PGlite local full-text index", () => {
     await db.query("INSERT INTO room_profiles VALUES ('!room:example.com','profile-event',4,'Weekend plans','@alice:example.com',1,NULL)");
     await db.query(`INSERT INTO room_membership_outbox (room_id,operation,target_user_id,target_device_ids,event_json,mls_claim_ids,previous_mls_state,mls_state,created_at,updated_at)
       VALUES ('!room:example.com','remove','@bob:example.com','["bob-phone"]','{"event_id":"membership"}','[]',$1,$2,1,1)`, [new Uint8Array([1]), new Uint8Array([2])]);
+    await db.query("INSERT INTO attachment_send_cleanup VALUES ('$unsent:example.com','!room:example.com','[\"12345678901234567890123456789012\"]',1,1)");
     await db.query("UPDATE sync_state SET cursor = 99, updated_at = 99 WHERE id = 1");
     await db.exec(LOCAL_CLEAR_ACCOUNT_DATA);
     expect((await db.query("SELECT * FROM users")).rows).toHaveLength(0);
@@ -427,6 +430,7 @@ describe("PGlite local full-text index", () => {
     expect((await db.query("SELECT * FROM device_preferences")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM room_membership_outbox")).rows).toHaveLength(0);
     expect((await db.query("SELECT * FROM room_profiles")).rows).toHaveLength(0);
+    expect((await db.query("SELECT * FROM attachment_send_cleanup")).rows).toHaveLength(0);
     expect((await db.query<{ cursor: number }>("SELECT cursor FROM sync_state WHERE id = 1")).rows[0]).toEqual({ cursor: 0 });
     await db.close();
   });
