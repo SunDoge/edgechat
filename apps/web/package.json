@@ -9,6 +9,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests --exclude 'src/**/*.browser.test.ts'",
     "test:browser": "vitest run --config vitest.browser.config.ts",
+    "browser:install:firefox": "node node_modules/playwright/cli.js install firefox",
+    "test:browser:firefox": "EDGECHAT_BROWSER=firefox vitest run --config vitest.browser.config.ts",
+    "test:browser:matrix": "pnpm run test:browser && pnpm run test:browser:firefox",
     "test:pwa": "node scripts/pwa-offline.mjs"
   },
   "dependencies": {
