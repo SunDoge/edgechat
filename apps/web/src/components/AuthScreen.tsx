@@ -1,6 +1,7 @@
-import { Show, createSignal } from "solid-js";
+import { Show, createSignal, onMount } from "solid-js";
 import { IconQrcode, IconShieldLock, IconSwitchHorizontal, IconUpload } from "@tabler/icons-solidjs";
 import { OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
+import { deviceSessionProofBytes } from "@edgechat/protocol";
 import type { AccountAppealCategory, AccountAppealStatus, ApiClient, SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { loadIdentity, saveIdentity } from "../vault";
@@ -11,13 +12,13 @@ import { BackupRestoreForm } from "./BackupRestoreForm";
 import { profileSessionKey } from "../local-profiles";
 import { useI18n } from "../i18n";
 
-export function AuthScreen(props: { profileId: string; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void>; onManageProfiles: () => void }) {
+export function AuthScreen(props: { profileId: string; accountHint?: string | null; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void>; onManageProfiles: () => void }) {
   const { t } = useI18n();
   const restoreUserKey = profileSessionKey(props.profileId, "restore-user-id");
   const restoreCheckpointKey = profileSessionKey(props.profileId, "restore-checkpoint");
   const restorePhaseKey = profileSessionKey(props.profileId, "restore-phase");
   const appealReceiptKey = profileSessionKey(props.profileId, "account-appeal-receipt");
-  const restoredUserHint = sessionStorage.getItem(restoreUserKey) ?? "";
+  const restoredUserHint = sessionStorage.getItem(restoreUserKey) ?? props.accountHint ?? "";
   const restoreCheckpoint = sessionStorage.getItem(restoreCheckpointKey) ?? "";
   const finishingRestore = Boolean(restoreCheckpoint);
   if (restoredUserHint) sessionStorage.removeItem(restoreUserKey);
@@ -25,6 +26,7 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
   const [username, setUsername] = createSignal(restoredUserHint);
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
+  const [deviceBusy, setDeviceBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [restoreOpen, setRestoreOpen] = createSignal(false);
   const [appealOpen, setAppealOpen] = createSignal(false);
@@ -33,6 +35,31 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
   const [appealStatus, setAppealStatus] = createSignal<AccountAppealStatus | null>(null);
   const [appealBusy, setAppealBusy] = createSignal(false);
   const [appealError, setAppealError] = createSignal("");
+  const [deviceContinueAvailable, setDeviceContinueAvailable] = createSignal(false);
+
+  onMount(() => {
+    if (!restoredUserHint) return;
+    void loadIdentity(props.profileId).then((identity) => setDeviceContinueAvailable(Boolean(identity?.deviceCredential))).catch(() => undefined);
+  });
+
+  async function continueWithDevice() {
+    if (busy() || deviceBusy()) return;
+    setDeviceBusy(true); setError("");
+    try {
+      const identity = await loadIdentity(props.profileId);
+      if (!identity?.deviceCredential || !identity.mlsState) throw new Error(t("auth.deviceContinue.error"));
+      const { challenge } = await props.api.deviceSessionChallenge(identity.deviceId, identity.deviceCredential);
+      if (challenge.device_id !== identity.deviceId) throw new Error(t("auth.deviceContinue.error"));
+      const signature = await props.core.sign(identity, deviceSessionProofBytes(challenge));
+      const result = await props.api.claimDeviceSession(challenge, identity.deviceCredential, signature);
+      if (result.device_id !== identity.deviceId) throw new Error(t("auth.deviceContinue.error"));
+      const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
+      props.onReady(result, identity, result.access_token, mls);
+    } catch {
+      setDeviceContinueAvailable(false);
+      setError(t("auth.deviceContinue.error"));
+    } finally { setDeviceBusy(false); }
+  }
 
   async function submit(event: SubmitEvent) {
     event.preventDefault(); setBusy(true); setError("");
@@ -46,13 +73,13 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
         device_id: identity.deviceId, display_name: navigator.userAgent.includes("Mobile") ? t("auth.device.mobile") : t("auth.device.desktop"),
         ...publicKeys, mls_key_packages: mlsKeyPackages,
         ...(restoreCheckpoint ? { backup_checkpoint: restoreCheckpoint } : {}),
-        ...(identity.recoveryCredential ? { restore_credential: identity.recoveryCredential } : {}),
+        ...(identity.deviceCredential ? { device_credential: identity.deviceCredential } : {}),
       };
       const stored = { ...identity, mlsState: mls.exportState() }; await saveIdentity(props.profileId, stored);
       const result = mode() === "register"
         ? await props.api.register({ localpart: username(), password: password(), device })
         : await props.api.login({ user_id: username(), password: password(), device });
-      const authenticatedIdentity = result.device_credential ? { ...stored, recoveryCredential: result.device_credential } : stored;
+      const authenticatedIdentity = result.device_credential ? { ...stored, deviceCredential: result.device_credential } : stored;
       if (authenticatedIdentity !== stored) await saveIdentity(props.profileId, authenticatedIdentity);
       sessionStorage.removeItem(restoreCheckpointKey);
       sessionStorage.removeItem(restorePhaseKey);
@@ -108,6 +135,11 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
       <button type="button" role="tab" aria-selected={mode() === "login"} class="h-9 rounded-md text-sm font-medium text-muted aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-sm" onClick={() => setMode("login")}>{t("common.login")}</button>
     </div></Show>
     <div class="mb-7"><h1 class="text-balance text-2xl font-semibold tracking-tight text-ink">{finishingRestore ? t("auth.restore.finishTitle") : mode() === "register" ? t("auth.register.title") : t("auth.login.title")}</h1><p class="mt-2 text-base/6 text-muted">{finishingRestore ? t("auth.restore.finishDescription") : mode() === "register" ? t("auth.register.description") : t("auth.login.description")}</p></div>
+    <Show when={mode() === "login" && deviceContinueAvailable() && !finishingRestore}><div class="mb-5 grid gap-3">
+      <button type="button" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy() || deviceBusy()} onClick={() => void continueWithDevice()}>{deviceBusy() ? t("auth.deviceContinue.loading") : t("auth.deviceContinue.action")}</button>
+      <p class="text-xs/5 text-muted">{t("auth.deviceContinue.description")}</p>
+      <div class="flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.deviceContinue.passwordFallback")}<span class="h-px flex-1 bg-black/10"/></div>
+    </div></Show>
     <form class="grid gap-5" onSubmit={submit}>
       <div class="grid gap-1.5">
         <Input label={mode() === "register" ? t("auth.accountName") : t("auth.accountIdentifier")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "alice 或 @alice:example.com"} autocomplete="username" aria-describedby={mode() === "register" ? "account-name-help" : undefined} required autofocus={!restoredUserHint}/>
@@ -118,7 +150,7 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
         <p id="login-password-help" class="text-xs/5 text-muted">{t("auth.loginPasswordHint")}</p>
       </div>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm/5 text-red-700">{error()}</div></Show>
-      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy()}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
+      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy() || deviceBusy()}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
       <Show when={mode() === "login" && !finishingRestore}><button type="button" class="text-sm font-medium text-brand" onClick={() => { setAppealOpen(true); if (appealReceipt()) void refreshAppealStatus(); }}>{t("auth.login.appealAction")}</button></Show>
     </form>
     <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.alternative")}<span class="h-px flex-1 bg-black/10"/></div>

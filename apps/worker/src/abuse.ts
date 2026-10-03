@@ -21,7 +21,7 @@ async function requireRateLimit(limiter: RateLimit, key: string, code: string): 
 }
 
 /** Fast, PoP-local shedding. Raw IPs and account identifiers are never used as keys. */
-export async function limitUnauthenticatedRequest(request: Request, env: Env, scope: "login" | "register" | "operator" | "device-link" | "push-renew" | "appeal" | "password-change", target: string): Promise<void> {
+export async function limitUnauthenticatedRequest(request: Request, env: Env, scope: "login" | "register" | "operator" | "device-link" | "device-session" | "push-renew" | "appeal" | "password-change", target: string): Promise<void> {
   await requireRateLimit(env.AUTH_TARGET_RATE_LIMITER, await opaqueRateKey(scope, target), "authentication_rate_limited");
   await limitUnauthenticatedIpRequest(request, env);
 }

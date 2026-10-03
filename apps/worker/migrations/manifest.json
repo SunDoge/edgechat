@@ -168,6 +168,10 @@
     {
       "file": "0042_room_leave_requests.sql",
       "sha256": "76ab3100fa015bc3c0ca123c096eaac0c368316a455efbda568b8d822d00170c"
+    },
+    {
+      "file": "0043_device_sessions.sql",
+      "sha256": "6e8f3235f4b857fe3291f0ed0b9d7e0b51f5904aecff4298db2b5947e4762d5f"
     }
   ]
 }

@@ -1,5 +1,5 @@
 import type { LocalDatabase } from "@edgechat/db";
-import { assertCompatibleServerProtocol, isMlsMembershipCommitEventType, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserId, type UserProfile } from "@edgechat/protocol";
+import { assertCompatibleServerProtocol, isMlsMembershipCommitEventType, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DeviceSessionChallenge, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserId, type UserProfile } from "@edgechat/protocol";
 import { decodeSegmentChunk, decodeSegmentHeader, decodeSegmentIndex, rangesForSequences, SEGMENT_HEADER_BYTES } from "./archive";
 
 export class ApiError extends Error {
@@ -137,6 +137,16 @@ export class ApiClient {
 
   register(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/register", { method: "POST", body: JSON.stringify(payload) }); }
   login(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/login", { method: "POST", body: JSON.stringify(payload) }); }
+  deviceSessionChallenge(deviceId: string, deviceCredential: string) {
+    return this.request<{ challenge: DeviceSessionChallenge }>("/api/v1/device-sessions/challenge", {
+      method: "POST", body: JSON.stringify({ device_id: deviceId, device_credential: deviceCredential }),
+    });
+  }
+  claimDeviceSession(challenge: DeviceSessionChallenge, deviceCredential: string, signature: string) {
+    return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/device-sessions", {
+      method: "POST", body: JSON.stringify({ ...challenge, device_credential: deviceCredential, signature }),
+    });
+  }
   createAccountAppeal(userId: string, password: string, category: AccountAppealCategory) {
     return this.request<AccountAppealReceipt>("/api/v1/appeals", { method: "POST", body: JSON.stringify({ user_id: userId, password, category }) });
   }

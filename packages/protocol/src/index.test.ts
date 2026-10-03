@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeServerProtocol, serverSupports } from "./index";
+import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -50,6 +50,7 @@ describe("federation-ready identifiers", () => {
     expect(serverSupports(currentServerProtocol, "rooms.leave.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.owner-transfer.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "account.password-change.v1")).toBe(true);
+    expect(serverSupports(currentServerProtocol, "device-session.v1")).toBe(true);
   });
 
   it("rejects malformed or incompatible server capability envelopes", () => {
@@ -63,6 +64,12 @@ describe("federation-ready identifiers", () => {
     expect(new TextDecoder().decode(canonicalSignedEventBytes(event))).toContain('\"signature\":\"signature\"');
     const receipt = { version: 1 as const, key_id: "v1", room_id: event.room_id, seq: 7, event_id: event.event_id, event_hash: "hash", retention_generation: 2, accepted_at: 3 };
     expect(JSON.parse(new TextDecoder().decode(canonicalAcceptanceReceiptBytes(receipt)))).toEqual(receipt);
+  });
+
+  it("binds a device-session proof to its server, device, expiry, and challenge", () => {
+    const challenge = { version: 1 as const, challenge_id: "challenge", device_id: "device", challenge: "secret", expires_at: 123, server_name: "example.com" };
+    expect(JSON.parse(new TextDecoder().decode(deviceSessionProofBytes(challenge)))).toEqual(challenge);
+    expect(deviceSessionProofBytes({ ...challenge, server_name: "elsewhere.example" })).not.toEqual(deviceSessionProofBytes(challenge));
   });
 
   it("only accepts server ordering for the exact submitted signed envelope", () => {

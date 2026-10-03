@@ -1,22 +1,27 @@
+import "fake-indexeddb/auto";
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
-import type { WebCryptoMessagingCore } from "@edgechat/messaging-core";
+import type { DeviceIdentity, WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import type { ApiClient } from "@edgechat/sync";
+import { clearIdentity, saveIdentity } from "../vault";
 import { AuthScreen } from "./AuthScreen";
 
 let dispose: (() => void) | undefined;
+const PROFILE_ID = "00000000-0000-4000-8000-000000000001";
 
-afterEach(() => {
+afterEach(async () => {
   dispose?.(); dispose = undefined;
   document.body.replaceChildren();
   sessionStorage.clear(); localStorage.clear();
+  await clearIdentity(PROFILE_ID);
 });
 
-function renderAuth() {
+function renderAuth(accountHint?: string) {
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <AuthScreen
-    profileId="00000000-0000-4000-8000-000000000001"
+    profileId={PROFILE_ID}
+    accountHint={accountHint}
     api={{} as ApiClient}
     core={{} as WebCryptoMessagingCore}
     db={{} as LocalDatabase}
@@ -52,5 +57,13 @@ describe("AuthScreen account identity", () => {
     expect(username.labels?.[0]?.textContent).toContain("账号名或用户 ID");
     expect(username.placeholder).toContain("@alice:example.com");
     expect(document.querySelector("#account-name-help")).toBeNull();
+  });
+
+  it("offers device continuation only when this profile retains its possession credential", async () => {
+    await saveIdentity(PROFILE_ID, { deviceId: "device", deviceCredential: "credential", mlsState: new Uint8Array([1]) } as DeviceIdentity);
+    renderAuth("@alice:example.com");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("使用这台设备继续"));
+    expect(document.querySelector<HTMLInputElement>("#username")?.value).toBe("@alice:example.com");
+    expect(document.body.textContent).toContain("或使用登录密码");
   });
 });

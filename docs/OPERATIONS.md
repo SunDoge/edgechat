@@ -35,6 +35,12 @@ Alert on a degraded result for two consecutive checks, not on queue count alone.
 The public `/api/v1/health` remains a shallow liveness/protocol endpoint and must
 not expose operational inventory.
 
+Expired one-time device-session challenges are removed by the normal scheduled
+Worker cleanup. Each device has at most one outstanding row, challenges expire
+after five minutes, and issuing or claiming one never reads or writes object
+storage. Password logout of other devices removes their outstanding challenges
+and invalidates their hashed device credentials immediately.
+
 ## Structured security events
 
 Workers Observability is enabled in `wrangler.jsonc`. Security events are logged

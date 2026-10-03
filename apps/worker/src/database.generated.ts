@@ -288,15 +288,23 @@ export interface DeviceRoomPreferences {
 
 export interface Devices {
   created_at: number;
+  device_credential_hash: string | null;
   device_id: string;
   display_name: string;
   encryption_key: string;
   kind: Generated<string>;
   last_seen_at: number;
-  restore_credential_hash: string | null;
   revoked_at: number | null;
   signing_key: string;
   user_id: string;
+}
+
+export interface DeviceSessionChallenges {
+  challenge_hash: string;
+  challenge_id: string;
+  created_at: number;
+  device_id: string;
+  expires_at: number;
 }
 
 export interface DirectMessageRequests {
@@ -629,6 +637,7 @@ export interface DB {
   device_revocation_rooms: DeviceRevocationRooms;
   device_revocations: DeviceRevocations;
   device_room_preferences: DeviceRoomPreferences;
+  device_session_challenges: DeviceSessionChallenges;
   devices: Devices;
   direct_message_requests: DirectMessageRequests;
   group_hidden_members: GroupHiddenMembers;

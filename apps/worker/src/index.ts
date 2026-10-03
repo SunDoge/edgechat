@@ -1,4 +1,4 @@
-import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DeviceSessionChallenge, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
 import { sql } from "kysely";
 import { authenticate, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
@@ -34,6 +34,7 @@ const BOT_DEFAULT_MESSAGES_PER_MINUTE = 60;
 const DEVICE_LINK_PENDING_MS = 15 * 60 * 1_000;
 const DEVICE_LINK_APPROVED_MS = 24 * 60 * 60 * 1_000;
 const DEVICE_LINK_SESSION_MS = 30 * 24 * 60 * 60 * 1_000;
+const DEVICE_SESSION_CHALLENGE_MS = 5 * 60 * 1_000;
 const DEVICE_LINK_HISTORY_MAX_BYTES = 64 * 1024 * 1024;
 const DEVICE_LINK_HISTORY_SHARD_MAX_BYTES = 34 * 1024 * 1024;
 const DEVICE_LINK_HISTORY_MAX_SHARDS = 4096;
@@ -1194,13 +1195,14 @@ async function register(request: Request, env: Env): Promise<Response> {
   const packages = mlsKeyPackages(device);
   await validatePublicKeys(signingKey, encryptionKey);
   const credential = await passwordHash(password);
+  const deviceCredential = randomId(32);
   const userId = `@${localpart}:${env.SERVER_NAME}` as UserId;
   const now = Date.now();
   try {
     const db = createDatabase(env.DB);
     await batch(env.DB, [
       db.insertInto("users").values({ user_id: userId, localpart, display_name: displayName, bio: "", password_hash: credential.hash, password_salt: credential.salt, created_at: now }),
-      db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, created_at: now, last_seen_at: now, revoked_at: null }),
+      db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, device_credential_hash: await sha256(deviceCredential), created_at: now, last_seen_at: now, revoked_at: null }),
       ...(await keyPackageInserts(db, deviceId, packages, now)),
     ]);
   } catch (error) {
@@ -1208,7 +1210,7 @@ async function register(request: Request, env: Env): Promise<Response> {
     throw error;
   }
   const token = await createSession(env, userId, deviceId);
-  return json({ access_token: token, user_id: userId, device_id: deviceId, display_name: displayName, avatar_url: null, server_name: env.SERVER_NAME, ...sessionCapabilities(env) }, 201);
+  return json({ access_token: token, user_id: userId, device_id: deviceId, device_credential: deviceCredential, display_name: displayName, avatar_url: null, server_name: env.SERVER_NAME, ...sessionCapabilities(env) }, 201);
 }
 
 async function changePassword(request: Request, env: Env, auth: AuthContext): Promise<Response> {
@@ -1241,6 +1243,8 @@ async function changePassword(request: Request, env: Env, auth: AuthContext): Pr
       db.deleteFrom("sessions").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId),
       db.deleteFrom("ws_tickets").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId),
       db.deleteFrom("push_subscriptions").where("device_id", "in", db.selectFrom("devices").select("device_id").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId)),
+      db.deleteFrom("device_session_challenges").where("device_id", "in", db.selectFrom("devices").select("device_id").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId)),
+      db.updateTable("devices").set({ device_credential_hash: null }).where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId),
     ] : []),
   ]);
   if (logoutOtherDevices) {
@@ -1361,20 +1365,21 @@ async function login(request: Request, env: Env): Promise<Response> {
   const signingKey = stringField(device, "signing_key", 2_000);
   const encryptionKey = stringField(device, "encryption_key", 2_000);
   const backupCheckpoint = typeof device.backup_checkpoint === "string" && /^[A-Za-z0-9_-]{32,128}$/.test(device.backup_checkpoint) ? device.backup_checkpoint : null;
-  const restoreCredential = typeof device.restore_credential === "string" && /^[A-Za-z0-9_-]{32,128}$/.test(device.restore_credential) ? device.restore_credential : null;
+  const deviceCredential = typeof device.device_credential === "string" && /^[A-Za-z0-9_-]{32,128}$/.test(device.device_credential) ? device.device_credential : null;
   const packages = mlsKeyPackages(device);
   await validatePublicKeys(signingKey, encryptionKey);
-  const existing = await db.selectFrom("devices").select(["user_id", "revoked_at", "signing_key", "encryption_key", "restore_credential_hash"]).where("device_id", "=", deviceId).executeTakeFirst();
+  const existing = await db.selectFrom("devices").select(["user_id", "revoked_at", "signing_key", "encryption_key", "device_credential_hash"]).where("device_id", "=", deviceId).executeTakeFirst();
   if (existing && (existing.user_id !== userId || existing.revoked_at !== null)) throw new HttpError(403, "Device cannot be used", "device_rejected");
   if (existing && (!samePublicKey(existing.signing_key, signingKey) || !samePublicKey(existing.encryption_key, encryptionKey))) {
     throw new HttpError(403, "Device public keys do not match the registered identity", "device_key_mismatch");
   }
-  if (!existing && (backupCheckpoint || restoreCredential)) throw new HttpError(403, "Backup device is no longer registered", "backup_device_missing");
+  if (!existing && (backupCheckpoint || deviceCredential)) throw new HttpError(403, "Backup device is no longer registered", "backup_device_missing");
   const now = Date.now();
   let issuedDeviceCredential: string | undefined;
   if (!existing) {
+    issuedDeviceCredential = randomId(32);
     await batch(env.DB, [
-      db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, created_at: now, last_seen_at: now, revoked_at: null }),
+      db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, device_credential_hash: await sha256(issuedDeviceCredential), created_at: now, last_seen_at: now, revoked_at: null }),
       ...(await keyPackageInserts(db, deviceId, packages, now)),
     ]);
   } else {
@@ -1390,25 +1395,103 @@ async function login(request: Request, env: Env): Promise<Response> {
       if (consumed.numUpdatedRows !== 1n) throw new HttpError(409, "This backup was restored concurrently", "backup_checkpoint_invalid");
       issuedDeviceCredential = randomId(32);
       await batch(env.DB, [
-        db.updateTable("devices").set({ restore_credential_hash: await sha256(issuedDeviceCredential), last_seen_at: now }).where("device_id", "=", deviceId),
+        db.updateTable("devices").set({ device_credential_hash: await sha256(issuedDeviceCredential), last_seen_at: now }).where("device_id", "=", deviceId),
         db.deleteFrom("sessions").where("device_id", "=", deviceId),
         db.deleteFrom("ws_tickets").where("device_id", "=", deviceId),
       ]);
       const roomIds = await db.selectFrom("room_devices").select("room_id").where("device_id", "=", deviceId).where("removed_at", "is", null).execute();
       await Promise.all(roomIds.map((room) => env.ROOMS.getByName(room.room_id).revokeDevice(deviceId)));
     } else {
-      if (existing.restore_credential_hash && (!restoreCredential || await sha256(restoreCredential) !== existing.restore_credential_hash)) {
-        throw new HttpError(403, "This restored device requires its recovery credential", "restore_credential_required");
+      if (existing.device_credential_hash && (!deviceCredential || await sha256(deviceCredential) !== existing.device_credential_hash)) {
+        throw new HttpError(403, "This device requires its possession credential", "device_credential_required");
       }
+      if (!existing.device_credential_hash) issuedDeviceCredential = randomId(32);
     }
     await batch(env.DB, [
-      db.updateTable("devices").set({ last_seen_at: now }).where("device_id", "=", deviceId),
+      db.updateTable("devices").set({ last_seen_at: now, ...(issuedDeviceCredential ? { device_credential_hash: await sha256(issuedDeviceCredential) } : {}) }).where("device_id", "=", deviceId),
       ...(await keyPackageInserts(db, deviceId, packages, now)),
     ]);
   }
   const token = await createSession(env, userId, deviceId);
   await clearLoginFailures(env, userId);
   return json({ access_token: token, user_id: userId, device_id: deviceId, display_name: user.display_name, avatar_url: avatarUrl(user.avatar_id), server_name: env.SERVER_NAME, ...sessionCapabilities(env), ...(issuedDeviceCredential ? { device_credential: issuedDeviceCredential } : {}) });
+}
+
+async function issueDeviceSessionChallenge(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request, 2_048);
+  const deviceId = stringField(body, "device_id", 96);
+  const credential = stringField(body, "device_credential", 128);
+  await limitUnauthenticatedRequest(request, env, "device-session", deviceId);
+  const now = Date.now(); const expiresAt = now + DEVICE_SESSION_CHALLENGE_MS;
+  const challenge: DeviceSessionChallenge = {
+    version: 1, challenge_id: randomId(18), device_id: deviceId,
+    challenge: randomId(32), expires_at: expiresAt, server_name: env.SERVER_NAME,
+  };
+  const db = createDatabase(env.DB);
+  const eligible = /^[A-Za-z0-9_-]{32,128}$/.test(credential)
+    ? await db.selectFrom("devices as d").innerJoin("users as u", "u.user_id", "d.user_id")
+      .select("d.device_id").where("d.device_id", "=", deviceId).where("d.kind", "=", "user")
+      .where("d.device_credential_hash", "=", await sha256(credential)).where("d.revoked_at", "is", null)
+      .where("u.deletion_requested_at", "is", null).where("u.deleted_at", "is", null).executeTakeFirst()
+    : null;
+  const challengeHash = await sha256(challenge.challenge);
+  if (eligible) {
+    await db.insertInto("device_session_challenges").values({
+      challenge_id: challenge.challenge_id, device_id: deviceId, challenge_hash: challengeHash,
+      created_at: now, expires_at: expiresAt,
+    }).onConflict((conflict) => conflict.column("device_id").doUpdateSet({
+      challenge_id: challenge.challenge_id, challenge_hash: challengeHash,
+      created_at: now, expires_at: expiresAt,
+    })).execute();
+  }
+  // Unknown, revoked, and credential-less devices receive the same shape but no
+  // D1 row. Only a holder of both possession factors can complete the proof.
+  return json({ challenge }, 201);
+}
+
+async function claimDeviceSession(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request, 4_096);
+  const deviceId = stringField(body, "device_id", 96);
+  const credential = stringField(body, "device_credential", 128);
+  const challengeId = stringField(body, "challenge_id", 64);
+  const challengeSecret = stringField(body, "challenge", 128);
+  const signature = stringField(body, "signature", 512);
+  await limitUnauthenticatedRequest(request, env, "device-session", deviceId);
+  const invalid = () => { throw new HttpError(401, "Device proof is invalid or expired", "invalid_device_proof"); };
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(challengeId) || !/^[A-Za-z0-9_-]{32,128}$/.test(challengeSecret)
+    || !/^[A-Za-z0-9_-]{32,128}$/.test(credential) || !exactBase64UrlBytes(signature, 64)) return invalid();
+  const now = Date.now(); const db = createDatabase(env.DB);
+  const proof = await db.selectFrom("device_session_challenges as c")
+    .innerJoin("devices as d", "d.device_id", "c.device_id").innerJoin("users as u", "u.user_id", "d.user_id")
+    .select(["c.challenge_id", "c.device_id", "c.expires_at", "d.user_id", "d.signing_key", "u.display_name", "u.avatar_id"])
+    .where("c.challenge_id", "=", challengeId).where("c.device_id", "=", deviceId)
+    .where("c.challenge_hash", "=", await sha256(challengeSecret)).where("c.expires_at", ">", now)
+    .where("d.device_credential_hash", "=", await sha256(credential)).where("d.kind", "=", "user").where("d.revoked_at", "is", null)
+    .where("u.deletion_requested_at", "is", null).where("u.deleted_at", "is", null).executeTakeFirst();
+  if (!proof) return invalid();
+  const challenge: DeviceSessionChallenge = {
+    version: 1, challenge_id: proof.challenge_id, device_id: proof.device_id,
+    challenge: challengeSecret, expires_at: proof.expires_at, server_name: env.SERVER_NAME,
+  };
+  try {
+    const key = await crypto.subtle.importKey("jwk", JSON.parse(proof.signing_key) as JsonWebKey, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    if (!(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, fromB64url(signature), deviceSessionProofBytes(challenge)))) return invalid();
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    return invalid();
+  }
+  const consumed = await db.deleteFrom("device_session_challenges").where("challenge_id", "=", challengeId)
+    .where("device_id", "=", deviceId).where("challenge_hash", "=", await sha256(challengeSecret)).where("expires_at", ">", Date.now()).executeTakeFirst();
+  if (consumed.numDeletedRows !== 1n) return invalid();
+  await db.updateTable("devices").set({ last_seen_at: now }).where("device_id", "=", deviceId).execute();
+  const token = await createSession(env, proof.user_id, deviceId);
+  return json({ access_token: token, user_id: proof.user_id, device_id: deviceId, display_name: proof.display_name,
+    avatar_url: avatarUrl(proof.avatar_id), server_name: env.SERVER_NAME, ...sessionCapabilities(env) });
+}
+
+export async function cleanupExpiredDeviceSessionChallenges(env: Env, now = Date.now()): Promise<number> {
+  const result = await createDatabase(env.DB).deleteFrom("device_session_challenges").where("expires_at", "<=", now).executeTakeFirst();
+  return Number(result.numDeletedRows);
 }
 
 function samePublicKey(stored: string, candidate: string): boolean {
@@ -1435,7 +1518,7 @@ async function createBackupCheckpoint(env: Env, auth: AuthContext): Promise<Resp
       checkpoint_hash: await sha256(checkpoint), user_id: auth.userId, device_id: auth.deviceId,
       sent_event_count: await deviceSentEventCount(env, auth.userId, auth.deviceId), created_at: createdAt, consumed_at: null,
     }),
-    db.updateTable("devices").set({ restore_credential_hash: await sha256(deviceCredential) }).where("device_id", "=", auth.deviceId).where("user_id", "=", auth.userId),
+    db.updateTable("devices").set({ device_credential_hash: await sha256(deviceCredential) }).where("device_id", "=", auth.deviceId).where("user_id", "=", auth.userId),
     ...previous.slice(4).map((item) => db.deleteFrom("device_backup_checkpoints").where("checkpoint_hash", "=", item.checkpoint_hash)),
   ]);
   return json({ checkpoint, device_credential: deviceCredential, created_at: createdAt }, 201);
@@ -4468,6 +4551,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (!path.startsWith("/api/")) return env.ASSETS.fetch(request);
   if (path === "/api/v1/register" && request.method === "POST") return register(request, env);
   if (path === "/api/v1/login" && request.method === "POST") return login(request, env);
+  if (path === "/api/v1/device-sessions/challenge" && request.method === "POST") return issueDeviceSessionChallenge(request, env);
+  if (path === "/api/v1/device-sessions" && request.method === "POST") return claimDeviceSession(request, env);
   if (path === "/api/v1/appeals" && request.method === "POST") return createAccountAppeal(request, env);
   const publicAppeal = path.match(/^\/api\/v1\/appeals\/([^/]+)$/);
   if (publicAppeal && request.method === "GET") return accountAppealStatus(request, env, decodeURIComponent(publicAppeal[1]));
@@ -4835,6 +4920,9 @@ export default {
       }),
       cleanupExpiredDeviceLinks(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "cleaned expired device links", count }));
+      }),
+      cleanupExpiredDeviceSessionChallenges(env).then((count) => {
+        if (count) console.log(JSON.stringify({ message: "cleaned expired device session challenges", count }));
       }),
       cleanupExpiredRoomPeerRecoveries(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "cleaned expired peer recoveries", count }));

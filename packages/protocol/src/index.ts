@@ -6,7 +6,7 @@ export const MAX_MESSAGE_ATTACHMENTS = 10;
 export const MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES = 100 * 1024 * 1024;
 export const MAX_EVENT_CIPHERTEXT_LENGTH = 200_000;
 
-export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1"] as const;
+export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1"] as const;
 export type ServerProtocolFeature = typeof serverProtocolFeatures[number];
 export type ServerProtocolCapabilities = {
   version: number;
@@ -493,6 +493,28 @@ export function canonicalAcceptanceReceiptBytes(receipt: Omit<EventAcceptanceRec
     version: receipt.version, key_id: receipt.key_id, room_id: receipt.room_id, seq: receipt.seq,
     event_id: receipt.event_id, event_hash: receipt.event_hash,
     retention_generation: receipt.retention_generation, accepted_at: receipt.accepted_at,
+  };
+  return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
+}
+
+export type DeviceSessionChallenge = {
+  version: 1;
+  challenge_id: string;
+  device_id: string;
+  challenge: string;
+  expires_at: number;
+  server_name: string;
+};
+
+/** Canonical proof signed by the registered device key before minting a session. */
+export function deviceSessionProofBytes(challenge: DeviceSessionChallenge): Uint8Array<ArrayBuffer> {
+  const ordered = {
+    version: challenge.version,
+    challenge_id: challenge.challenge_id,
+    device_id: challenge.device_id,
+    challenge: challenge.challenge,
+    expires_at: challenge.expires_at,
+    server_name: challenge.server_name,
   };
   return new TextEncoder().encode(JSON.stringify(ordered)) as Uint8Array<ArrayBuffer>;
 }

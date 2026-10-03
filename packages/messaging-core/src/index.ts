@@ -5,7 +5,7 @@ export type DeviceIdentity = {
   encryptionPrivateKey: CryptoKey;
   encryptionPublicKey: CryptoKey;
   mlsState?: Uint8Array<ArrayBufferLike>;
-  recoveryCredential?: string;
+  deviceCredential?: string;
 };
 
 export type PortableDeviceIdentity = {
