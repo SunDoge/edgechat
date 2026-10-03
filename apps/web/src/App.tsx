@@ -271,7 +271,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const presenceLabel = createMemo(() => {
     const room = selected(); const count = activePresenceUsers().length;
     if (!room || room.purpose === "saved" || count === 0) return null;
-    return room.kind === "direct" ? "在线" : `${count} 人在线`;
+    return room.kind === "direct" ? t("workspace.presence.direct") : t("workspace.presence.group", { count });
   });
   const preferenceFor = (roomId: RoomId): LocalRoomPreference => roomPreferences()[roomId] ?? defaultRoomPreference(roomId);
   const messageExpiryFor = (roomId: RoomId): LocalMessageExpiryPolicy | null => messageExpiryPolicies()[roomId] ?? null;
@@ -325,9 +325,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function copyMessageText(text: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(text);
-      setNotice("已复制消息文字");
+      setNotice(t("workspace.feedback.copySuccess"));
     } catch {
-      setNotice("无法复制消息文字，请检查浏览器剪贴板权限");
+      setNotice(t("workspace.feedback.copyError"));
     }
   }
 
@@ -343,18 +343,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   function historyRecoveryError(cause: unknown): string {
-    if (!navigator.onLine) return "网络恢复后会自动继续。";
-    if (cause instanceof ApiError && cause.code === "peer_recovery_source_unavailable") return "没有其他可用设备保存这段记录，请稍后上线旧设备或从本机备份恢复。";
-    if (cause instanceof ApiError && (cause.status === 409 || cause.status === 429)) return "另一项恢复正在进行，请稍后再试。";
-    if (cause instanceof ApiError && cause.status >= 500) return "服务器暂时不可用，稍后会自动重试。";
-    return "无法验证或导入这批记录，请重试；问题持续时可改用本机备份。";
+    if (!navigator.onLine) return t("workspace.historyRecovery.error.offline");
+    if (cause instanceof ApiError && cause.code === "peer_recovery_source_unavailable") return t("workspace.historyRecovery.error.noSource");
+    if (cause instanceof ApiError && (cause.status === 409 || cause.status === 429)) return t("workspace.historyRecovery.error.busy");
+    if (cause instanceof ApiError && cause.status >= 500) return t("workspace.historyRecovery.error.server");
+    return t("workspace.historyRecovery.error.invalid");
   }
 
   function attachmentReferenceMetadata(ids: readonly string[], sourceIds: readonly string[] = []): ClientEvent["metadata"] {
     if (!ids.length) return {};
     const currentSession = session();
     if (!currentSession) throw new Error("登录会话尚未就绪");
-    if (ids.length > attachmentLimits().max_attachments_per_message) throw new Error(`当前服务器每条消息最多支持 ${attachmentLimits().max_attachments_per_message} 个附件`);
+    if (ids.length > attachmentLimits().max_attachments_per_message) throw new Error(t("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message }));
     if (sourceIds.length && sourceIds.length !== ids.length) throw new Error("附件转发引用不完整");
     if (serverSupports(currentSession.protocol, "attachments.multi.v1")) {
       return { attachment_ids: [...ids], ...(sourceIds.length ? { forward_source_attachment_ids: [...sourceIds] } : {}) };
@@ -410,7 +410,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (message.deleted_at) return;
     const result = toggleSelectedMessage(selectedMessageIds(), message.message_id);
     setSelectedMessageIds(result.ids);
-    if (result.limitReached) setNotice(`一次最多选择 ${MAX_FORWARD_SELECTION} 条消息`);
+    if (result.limitReached) setNotice(t("workspace.selection.limit", { count: MAX_FORWARD_SELECTION }));
   }
 
   function cancelMessageSelection(): void {
@@ -448,7 +448,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const operation = draftWriteTail.then(write, write);
     draftWriteTail = operation.catch((cause) => {
       console.warn(JSON.stringify({ message: "local composer draft persistence failed", room_id: roomId, error: cause instanceof Error ? cause.message : String(cause) }));
-      setNotice("草稿暂时无法保存到这台设备");
+      setNotice(t("workspace.feedback.draftSaveError"));
     });
     void draftWriteTail.then(() => { if (connectionState() === "online") scheduleDraftSync(); });
     return operation;
@@ -479,16 +479,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       persistDraft: () => flushComposerDraft(),
       activate: applyPwaUpdate,
     });
-    if (result === "unsafe-media") setNotice("请先发送或移除当前附件，再更新应用");
-    else if (result === "draft-failed") setNotice("草稿无法保存，已取消更新以避免内容丢失");
-    else if (result === "unavailable") setNotice("新版本暂时无法启用，请稍后重试");
+    if (result === "unsafe-media") setNotice(t("workspace.feedback.updateUnsafeMedia"));
+    else if (result === "draft-failed") setNotice(t("workspace.feedback.updateDraftFailed"));
+    else if (result === "unavailable") setNotice(t("workspace.feedback.updateUnavailable"));
   }
 
   async function installPwa(): Promise<void> {
     const result = await requestPwaInstall();
-    if (result === "accepted") setNotice("安装请求已交给浏览器");
-    else if (result === "dismissed") setNotice("已取消安装，可以稍后从浏览器菜单重试");
-    else if (result === "unavailable") setNotice("请通过 HTTPS 打开后再安装");
+    if (result === "accepted") setNotice(t("workspace.feedback.installAccepted"));
+    else if (result === "dismissed") setNotice(t("workspace.feedback.installDismissed"));
+    else if (result === "unavailable") setNotice(t("workspace.feedback.installUnavailable"));
   }
 
   async function requireFreshSession(): Promise<void> {
@@ -511,7 +511,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const activity = roomListActivities()[room.room_id]; const currentUserId = session()?.user_id ?? "";
     return composerDraftPreview(composerDrafts()[room.room_id])
       ?? (activity ? formatRoomActivityPreview(activity, currentUserId, room.kind === "group", (userId) => memberName(room, userId), t) : null)
-      ?? (room.purpose === "saved" ? room.current_seq ? "仅你和你的设备可读" : "保存消息、图片和文件" : room.blocked_by_me ? "已屏蔽" : room.kind === "group" ? `${room.members.length} 人群聊` : room.current_seq ? "端到端加密消息" : "还没有消息");
+      ?? (room.purpose === "saved" ? room.current_seq ? t("workspace.roomPreview.savedPrivate") : t("workspace.roomPreview.savedEmpty") : room.blocked_by_me ? t("workspace.roomPreview.blocked") : room.kind === "group" ? t("workspace.roomPreview.group", { count: room.members.length }) : room.current_seq ? t("workspace.roomPreview.encrypted") : t("workspace.roomPreview.empty"));
   }
 
   async function authenticateRoomEvent(event: RoomEvent): Promise<void> {
@@ -1565,9 +1565,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先从另一台设备或备份恢复此对话");
     if (text.length > 16_000) throw new Error("消息不能超过 16,000 个字符");
     const limits = attachmentLimits();
-    if (selectedFiles.length > limits.max_attachments_per_message) throw new Error(`当前服务器每条消息最多支持 ${limits.max_attachments_per_message} 个附件`);
-    if (selectedFiles.some((file) => file.size > limits.max_attachment_plaintext_bytes)) throw new Error(`每个附件不能超过 ${Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024)} MB`);
-    if (selectedFiles.reduce((total, file) => total + file.size, 0) > limits.max_message_attachment_plaintext_bytes) throw new Error(`一条消息的附件总量不能超过 ${Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024)} MB`);
+    if (selectedFiles.length > limits.max_attachments_per_message) throw new Error(t("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message }));
+    if (selectedFiles.some((file) => file.size > limits.max_attachment_plaintext_bytes)) throw new Error(t("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) }));
+    if (selectedFiles.reduce((total, file) => total + file.size, 0) > limits.max_message_attachment_plaintext_bytes) throw new Error(t("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) }));
     if (!currentMls.hasGroup(room.room_id)) throw new Error("这台设备还没有目标对话的加密状态");
     const domain = currentSession.server_name ?? location.hostname;
     const eventId = `$${crypto.randomUUID()}:${domain}` as EventId;
@@ -3455,33 +3455,33 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             return <div role={recovery().phase === "failed" ? "alert" : "status"} aria-live="polite" class={`mx-auto flex max-w-[760px] items-start gap-3 border-t px-4 py-3 ${recovery().phase === "failed" ? "border-red-200 bg-red-50 text-red-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}>
               <Show when={active()} fallback={<IconAlertTriangle class={`mt-0.5 size-4 shrink-0 ${recovery().phase === "failed" ? "stroke-red-700" : "stroke-amber-700"}`}/>}><span aria-hidden="true" class="mt-0.5 size-4 shrink-0 animate-spin rounded-full border-2 border-amber-300 border-t-amber-700"/></Show>
               <div class="min-w-0 flex-1"><strong class="block text-sm font-semibold">{copy().title}</strong><p class={`mt-0.5 text-xs/5 ${recovery().phase === "failed" ? "text-red-800" : "text-amber-800"}`}>{copy().detail}</p></div>
-              <Show when={recovery().phase === "waiting" || recovery().phase === "failed"}><button type="button" class={`min-h-9 shrink-0 rounded-lg px-3 text-xs font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${recovery().phase === "failed" ? "bg-red-100 text-red-800 hover:bg-red-200" : "bg-amber-100 text-amber-900 hover:bg-amber-200"}`} onClick={() => void retryPeerRecovery(room().room_id)}>{recovery().phase === "failed" ? "重试" : "检查进度"}</button></Show>
+              <Show when={recovery().phase === "waiting" || recovery().phase === "failed"}><button type="button" class={`min-h-9 shrink-0 rounded-lg px-3 text-xs font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${recovery().phase === "failed" ? "bg-red-100 text-red-800 hover:bg-red-200" : "bg-amber-100 text-amber-900 hover:bg-amber-200"}`} onClick={() => void retryPeerRecovery(room().room_id)}>{recovery().phase === "failed" ? t("workspace.historyRecovery.retry") : t("workspace.historyRecovery.check")}</button></Show>
             </div>;
           }}</Show>
           <Show when={editingMessage() ?? quoting()?.message ?? replyingTo()}>{(target) => <div class="mx-auto flex max-w-[760px] items-center gap-3 border-t border-black/5 bg-white px-4 py-2">
             <div class="min-w-0 flex-1 border-l-2 border-brand pl-3">
-              <strong class="block text-xs font-semibold text-brand">{editingMessage() ? "编辑消息" : quoting() ? `引用 ${quoting()!.displayName || memberName(room(), target().sender)}` : `回复 ${memberName(room(), target().sender)}`}</strong>
-              <span class="mt-0.5 block truncate text-xs text-muted">{quoting()?.text || target().plaintext || (target().deleted_at ? "此消息已撤回" : "附件消息")}</span>
+              <strong class="block text-xs font-semibold text-brand">{editingMessage() ? t("workspace.composer.editing") : quoting() ? t("workspace.composer.quoting", { name: quoting()!.displayName || memberName(room(), target().sender) }) : t("workspace.composer.replying", { name: memberName(room(), target().sender) })}</strong>
+              <span class="mt-0.5 block truncate text-xs text-muted">{quoting()?.text || target().plaintext || (target().deleted_at ? t("workspace.composer.retracted") : t("workspace.composer.attachmentMessage"))}</span>
             </div>
             <button type="button" aria-label={t("common.cancel")} class="grid size-8 shrink-0 place-items-center rounded-lg hover:bg-neutral-100" onClick={cancelComposerMode}><IconX class="size-4 stroke-muted"/></button>
           </div>}</Show>
           <Show when={files().length}><div class="mx-auto flex max-w-[760px] gap-2 overflow-x-auto border-t border-black/5 bg-white px-3 py-2" aria-label={t("workspace.composer.pendingAttachments")}>
             <For each={files()}>{(selectedFile, index) => <div class="flex min-w-0 max-w-56 shrink-0 items-center gap-2 rounded-lg bg-neutral-100 py-1.5 pl-2.5 pr-1">
-              <IconPaperclip class="size-4 shrink-0 stroke-muted"/><span class="min-w-0 truncate text-xs font-medium text-ink">{voiceDurationMs() && files().length === 1 ? `语音 · ${Math.max(1, Math.round(voiceDurationMs()! / 1000))} 秒` : selectedFile.name}</span>
+              <IconPaperclip class="size-4 shrink-0 stroke-muted"/><span class="min-w-0 truncate text-xs font-medium text-ink">{voiceDurationMs() && files().length === 1 ? t("workspace.composer.voiceFile", { seconds: Math.max(1, Math.round(voiceDurationMs()! / 1000)) }) : selectedFile.name}</span>
               <button type="button" aria-label={t("workspace.composer.removeAttachment", { name: selectedFile.name })} class="grid size-8 shrink-0 place-items-center rounded-md hover:bg-black/5 disabled:opacity-40" disabled={sendBusy()} onClick={() => { setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index())); setVoiceDurationMs(null); }}><IconX class="size-4 stroke-muted"/></button>
             </div>}</For>
           </div></Show>
           <ChatComposer value={compose()} hasContent={files().length > 0 || Boolean(editingMessage())} disabled={localProjectionRecoveryActive() || sendBusy() || voiceRecording() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || selectedRequestCannotSend()} disabledReason={localProjectionRecoveryActive() ? t("workspace.composer.disabled.localRecovery") : room().leave_status === "pending" ? t("workspace.composer.disabled.leaving") : selectedRequestCannotSend() ? room().request_role === "recipient" ? t("workspace.composer.disabled.acceptRequest") : t("workspace.composer.disabled.awaitAcceptance") : selectedNeedsHistoryRecovery() ? t("workspace.composer.disabled.historyRecovery") : voiceRecording() ? t("workspace.composer.disabled.recording") : room().blocked_by_me ? t("workspace.composer.disabled.blocked") : sendBusy() ? t("workspace.composer.disabled.sending") : undefined} placeholder={localProjectionRecoveryActive() ? t("workspace.composer.placeholder.localRecovery") : room().leave_status === "pending" ? t("workspace.composer.placeholder.leaving") : selectedRequestCannotSend() ? room().request_role === "recipient" ? t("workspace.composer.placeholder.acceptRequest") : t("workspace.composer.placeholder.awaitAcceptance") : selectedNeedsHistoryRecovery() ? t("workspace.composer.placeholder.historyRecovery") : voiceRecording() ? t("workspace.composer.placeholder.recording") : room().blocked_by_me ? t("workspace.composer.placeholder.blocked") : quoting() ? t("workspace.composer.placeholder.quote") : t("workspace.composer.placeholder.message")} onChange={onComposerChange} onSend={() => void submitComposer()} accessory={<div class="flex shrink-0 items-center gap-1"><Show when={room().purpose !== "saved" && serverSupports(currentSession().protocol, "messages.contact.v1")}><button type="button" aria-label={t("workspace.composer.shareContact")} disabled={localProjectionRecoveryActive() || sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} class="grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 disabled:opacity-40" onClick={() => setContactShareOpen(true)}><IconAddressBook class="size-4 stroke-muted"/></button></Show><Show when={!files().length}><VoiceRecorder contextId={room().room_id} disabled={localProjectionRecoveryActive() || sendBusy() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending"} onRecordingChange={setVoiceRecording} onRecorded={(recorded, duration) => { setFiles([recorded]); setVoiceDurationMs(duration); }} onError={setNotice}/></Show><label class={`relative grid size-9 shrink-0 place-items-center rounded-lg hover:bg-neutral-100 ${localProjectionRecoveryActive() || sendBusy() || voiceRecording() || editingMessage() || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message ? "pointer-events-none opacity-50" : "cursor-pointer"}`} aria-label={localProjectionRecoveryActive() ? t("workspace.composer.attachment.localRecovery") : room().leave_status === "pending" ? t("workspace.composer.attachment.leaving") : room().request_status === "pending" ? t("workspace.composer.attachment.acceptRequest") : selectedNeedsHistoryRecovery() ? t("workspace.composer.attachment.historyRecovery") : room().blocked_by_me ? t("workspace.composer.attachment.blocked") : editingMessage() ? t("workspace.composer.attachment.editing") : files().length >= attachmentLimits().max_attachments_per_message ? t("workspace.composer.attachment.maximum", { count: attachmentLimits().max_attachments_per_message }) : t("workspace.composer.attachment.add")}><IconPaperclip class="size-4 stroke-muted"/><input name="attachment" type="file" multiple={attachmentLimits().max_attachments_per_message > 1} class="sr-only" disabled={localProjectionRecoveryActive() || sendBusy() || voiceRecording() || Boolean(editingMessage()) || room().blocked_by_me || room().leave_status === "pending" || selectedNeedsHistoryRecovery() || room().request_status === "pending" || files().length >= attachmentLimits().max_attachments_per_message} onChange={(event) => {
             const selected = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
             const limits = attachmentLimits();
-            if (selected.some((item) => item.size > limits.max_attachment_plaintext_bytes)) return setNotice(`每个附件不能超过 ${Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024)} MB`);
+            if (selected.some((item) => item.size > limits.max_attachment_plaintext_bytes)) return setNotice(t("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) }));
             const next = [...files(), ...selected];
-            if (next.length > limits.max_attachments_per_message) return setNotice(`当前服务器每条消息最多支持 ${limits.max_attachments_per_message} 个附件`);
-            if (next.reduce((total, item) => total + item.size, 0) > limits.max_message_attachment_plaintext_bytes) return setNotice(`一条消息的附件总量不能超过 ${Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024)} MB`);
+            if (next.length > limits.max_attachments_per_message) return setNotice(t("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message }));
+            if (next.reduce((total, item) => total + item.size, 0) > limits.max_message_attachment_plaintext_bytes) return setNotice(t("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) }));
             setFiles(next); setVoiceDurationMs(null);
           }}/></label></div>}/>
         </div>}/>}</Show></section>
-      <Show when={selectedMessageIds().size > 0}><div class="fixed inset-x-0 bottom-0 z-20 flex min-h-16 items-center gap-3 border-t border-black/8 bg-white px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] md:left-[360px] sm:px-5"><button type="button" class="min-h-11 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={cancelMessageSelection}>取消</button><span class="min-w-0 flex-1 truncate text-center text-sm font-medium text-ink">已选择 {selectedMessages().length} 条</span><button type="button" disabled={localProjectionRecoveryActive() || !selectedMessages().length} class="flex min-h-11 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => setForwardingMessages(selectedMessages())}><IconArrowForwardUp class="size-4 stroke-white"/>转发 {selectedMessages().length} 条</button></div></Show>
+      <Show when={selectedMessageIds().size > 0}><div class="fixed inset-x-0 bottom-0 z-20 flex min-h-16 items-center gap-3 border-t border-black/8 bg-white px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] md:left-[360px] sm:px-5"><button type="button" class="min-h-11 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={cancelMessageSelection}>{t("workspace.selection.cancel")}</button><span class="min-w-0 flex-1 truncate text-center text-sm font-medium text-ink">{t("workspace.selection.selected", { count: selectedMessages().length })}</span><button type="button" disabled={localProjectionRecoveryActive() || !selectedMessages().length} class="flex min-h-11 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => setForwardingMessages(selectedMessages())}><IconArrowForwardUp class="size-4 stroke-white"/>{t("workspace.selection.forward", { count: selectedMessages().length })}</button></div></Show>
       <Show when={newRoom()}><NewRoomDialog api={api} createGroup={(roomId, packages) => mutateMls(async () => { const created = mls()!.createGroup(roomId, packages); await persistMls(mls()!); return created; })} queueInitialProfile={(roomId, name) => updateRoomProfile(roomId, name, false, true, null)} serverName={currentSession().server_name ?? location.hostname} initialContact={newRoomContact()} creationBlocked={localProjectionRecoveryActive()} onClose={() => { setNewRoom(false); setNewRoomContact(null); }} onCreated={(id, encryptedName, profileQueued) => { setNewRoom(false); setNewRoomContact(null); void finishCreatedRoom(id, encryptedName, profileQueued); }}/></Show>
       <Show when={contactShareOpen() && selected()}>{(room) => <ContactShareDialog contacts={shareableContacts(room())} onSend={sendContactCard} onClose={() => setContactShareOpen(false)}/>}</Show>
       <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>

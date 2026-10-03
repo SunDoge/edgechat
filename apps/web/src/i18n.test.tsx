@@ -17,6 +17,9 @@ describe("local message catalog", () => {
     expect(translate("deviceLink.rooms", { count: 12 })).toBe("12 个对话将使用新的加密身份");
     expect(translate("workspace.identity.verified", { verified: 2, total: 3 })).toBe("身份已核验 · 2/3 台设备");
     expect(translate("workspace.composer.removeAttachment", { name: "照片.png" })).toBe("移除 照片.png");
+    expect(translate("workspace.composer.voiceFile", { seconds: 12 })).toBe("语音 · 12 秒");
+    expect(translate("workspace.selection.selected", { count: 3 })).toBe("已选择 3 条");
+    expect(translate("workspace.roomPreview.group", { count: 5 })).toBe("5 人群聊");
     expect(translate("newRoom.createGroup", { count: 4 })).toBe("创建 4 人群聊");
     expect(translate("roomList.actions", { title: "家人" })).toBe("家人的对话操作");
     expect(translate("search.similarity", { score: 87 })).toBe("相似度 87%");
