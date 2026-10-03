@@ -1,4 +1,5 @@
 import Dexie, { type Table } from "dexie";
+import { translate, type Translator } from "./i18n";
 
 export const SHARE_TARGET_QUERY = "share_target";
 export const SHARE_TARGET_MAX_TEXT = 16_000;
@@ -64,13 +65,13 @@ export function shareTargetId(search: string): string | null {
   return id && /^[0-9a-f-]{36}$/i.test(id) ? id : null;
 }
 
-export function shareTargetErrorMessage(error: ShareTargetError): string {
-  if (error === "too_many_files") return `一次最多分享 ${SHARE_TARGET_MAX_FILES} 个文件`;
-  if (error === "file_too_large") return "每个共享文件不能超过 25 MB";
-  if (error === "files_too_large") return "共享文件总量不能超过 100 MB";
-  if (error === "text_too_long") return "共享文字不能超过 16,000 个字符";
-  if (error === "storage") return "这台设备无法暂存共享内容，请重新分享";
-  return "没有找到可分享的文字或文件";
+export function shareTargetErrorMessage(error: ShareTargetError, t: Translator = translate): string {
+  if (error === "too_many_files") return t("shareTarget.error.tooManyFiles", { count: SHARE_TARGET_MAX_FILES });
+  if (error === "file_too_large") return t("shareTarget.error.fileTooLarge");
+  if (error === "files_too_large") return t("shareTarget.error.filesTooLarge");
+  if (error === "text_too_long") return t("shareTarget.error.textTooLong");
+  if (error === "storage") return t("shareTarget.error.storage");
+  return t("shareTarget.error.noContent");
 }
 
 export async function loadStagedShare(id: string, now = Date.now()): Promise<StagedShare | null> {

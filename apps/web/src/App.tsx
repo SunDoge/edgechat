@@ -34,7 +34,7 @@ import { Avatar, Brand, IconButton } from "./components/primitives";
 import { EncryptedRoomAvatar } from "./components/EncryptedRoomAvatar";
 import { AccountDeletionDialog, BackupDialog, DevicesDialog, SearchDialog, type DeviceRevocationProgress, type DeviceRow, type LocalSearchResult } from "./components/UtilityDialogs";
 import { ForwardDialog } from "./components/ForwardDialog";
-import { avatarColor, initials, memberName, roomTitle, userName } from "./presenters";
+import { avatarColor, initials, memberName, roomTitle as baseRoomTitle, userName } from "./presenters";
 import { assertMessageEnvelope, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, embeddedImagePreviewByteLength, MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES, messageAttachments, messageContacts, messageText, normalizeMessagePayload, prepareImageMetadata, quoteTextForMessage, quoteTextSnapshot, type AttachmentMetadata, type ContactIdentity, type MessagePayload } from "./media";
 import { LocalImageSemanticSearch } from "./semantic-search";
 import { semanticSearchEnabled as storedSemanticSearchEnabled, setSemanticSearchEnabled as persistSemanticSearchEnabled } from "./semantic-search-preference";
@@ -112,6 +112,7 @@ type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedN
 
 export function App(props: { localProfile: LocalProfile; localProfiles: LocalProfile[]; accessToken: string | null }) {
   const { locale, t } = useI18n();
+  const roomTitle = (room: ServerRoom, userId: string) => baseRoomTitle(room, userId, t);
   const profileId = props.localProfile.profile_id;
   const restoreUserKey = profileSessionKey(profileId, "restore-user-id");
   const restoreCheckpointKey = profileSessionKey(profileId, "restore-checkpoint");
@@ -516,7 +517,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   function roomPreview(room: ServerRoom): string {
     const activity = roomListActivities()[room.room_id]; const currentUserId = session()?.user_id ?? "";
-    return composerDraftPreview(composerDrafts()[room.room_id])
+    return composerDraftPreview(composerDrafts()[room.room_id], t)
       ?? (activity ? formatRoomActivityPreview(activity, currentUserId, room.kind === "group", (userId) => memberName(room, userId), t) : null)
       ?? (room.purpose === "saved" ? room.current_seq ? t("workspace.roomPreview.savedPrivate") : t("workspace.roomPreview.savedEmpty") : room.blocked_by_me ? t("workspace.roomPreview.blocked") : room.kind === "group" ? t("workspace.roomPreview.group", { count: room.members.length }) : room.current_seq ? t("workspace.roomPreview.encrypted") : t("workspace.roomPreview.empty"));
   }
@@ -1538,11 +1539,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     parameters.delete("share_target"); parameters.delete("share_error");
     const cleanUrl = `${location.pathname}${parameters.size ? `?${parameters}` : ""}${location.hash}`;
     history.replaceState(history.state, "", cleanUrl);
-    if (!id) { setNotice(rawShareId ? t("shareTarget.error.invalidReference") : shareTargetErrorMessage("storage")); return; }
+    if (!id) { setNotice(rawShareId ? t("shareTarget.error.invalidReference") : shareTargetErrorMessage("storage", t)); return; }
     void loadStagedShare(id).then((share) => {
       if (share) setIncomingShare(share);
       else setNotice(t("shareTarget.error.expired"));
-    }).catch(() => setNotice(shareTargetErrorMessage("storage")));
+    }).catch(() => setNotice(shareTargetErrorMessage("storage", t)));
   });
 
   createEffect(() => {
@@ -2609,7 +2610,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       };
       const count = await streamConversationTranscript({
         roomId: room.room_id, roomTitle: title, exportedAt, displayName: (userId) => memberName(room, userId),
-        loadPage: (afterSeq, limit) => db.messagesAfter(room.room_id, afterSeq, limit), write, signal: controller.signal,
+        loadPage: (afterSeq, limit) => db.messagesAfter(room.room_id, afterSeq, limit), write, signal: controller.signal, t,
       });
       if (writable) { await writable.close(); writable = null; }
       else {

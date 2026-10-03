@@ -33,7 +33,7 @@ export function RoomListItem(props: {
   blockedByMe: boolean;
   onToggleBlocked: () => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [muteDialogOpen, setMuteDialogOpen] = createSignal(false);
   const [clock, setClock] = createSignal(Date.now());
@@ -83,7 +83,7 @@ export function RoomListItem(props: {
         <EncryptedRoomAvatar class="size-11" avatar={props.groupAvatar} label={props.avatarLabel} color={props.avatarColor} load={load()}/>
       }</Show>
       <span class="min-w-0">
-        <span class="flex items-center gap-1.5"><strong class="min-w-0 truncate text-sm font-semibold text-ink">{props.title}</strong><Show when={props.recoveryRequired}><IconAlertTriangle aria-label={t("roomList.recoveryRequired")} class="size-3.5 shrink-0 stroke-amber-600"/></Show><Show when={pinned()}><IconPin aria-label={t("roomList.pinned")} class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={muted()}><IconBellOff aria-label={props.preference.muted_until === Number.MAX_SAFE_INTEGER ? t("roomList.mutedForever") : t("roomList.mutedUntil", { time: new Date(Number(props.preference.muted_until)).toLocaleString("zh-CN") })} class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={props.activityAt}>{(timestamp) => <time datetime={new Date(timestamp()).toISOString()} class="ml-auto shrink-0 text-xs font-normal tabular-nums text-neutral-400">{roomActivityTimeLabel(timestamp(), clock())}</time>}</Show></span>
+        <span class="flex items-center gap-1.5"><strong class="min-w-0 truncate text-sm font-semibold text-ink">{props.title}</strong><Show when={props.recoveryRequired}><IconAlertTriangle aria-label={t("roomList.recoveryRequired")} class="size-3.5 shrink-0 stroke-amber-600"/></Show><Show when={pinned()}><IconPin aria-label={t("roomList.pinned")} class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={muted()}><IconBellOff aria-label={props.preference.muted_until === Number.MAX_SAFE_INTEGER ? t("roomList.mutedForever") : t("roomList.mutedUntil", { time: new Date(Number(props.preference.muted_until)).toLocaleString(locale()) })} class="size-3.5 shrink-0 stroke-muted"/></Show><Show when={props.activityAt}>{(timestamp) => <time datetime={new Date(timestamp()).toISOString()} class="ml-auto shrink-0 text-xs font-normal tabular-nums text-neutral-400">{roomActivityTimeLabel(timestamp(), clock(), locale(), t)}</time>}</Show></span>
         <small class={`mt-1 block truncate text-sm ${props.recoveryRequired ? "font-medium text-amber-700" : "text-muted"}`}>{props.recoveryRequired ? t("roomList.restoreFromDevice") : props.preview}</small>
       </span>
       <Show when={props.unread > 0} fallback={<span/>}><span aria-label={t("roomList.unread", { count: props.unread })} class="grid min-w-5 place-items-center self-center rounded-full bg-brand px-1.5 py-0.5 text-[0.6875rem] font-semibold tabular-nums text-white">{Math.min(props.unread, 99)}{props.unread > 99 ? "+" : ""}</span></Show>

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createTranslator, zhHansMessages } from "./i18n";
 import { messageDateLabel, messageDateValue, millisecondsUntilNextLocalDay, roomActivityTimeLabel, startsNewMessageDay } from "./message-date";
 
 function localTime(year: number, month: number, day: number, hour = 12): number {
@@ -17,6 +18,9 @@ describe("message date presentation", () => {
     expect(messageDateLabel(localTime(2026, 10, 3), now)).toBe("今天");
     expect(messageDateLabel(localTime(2026, 10, 2), now)).toBe("昨天");
     expect(messageDateLabel(localTime(2025, 10, 3), now)).toContain("2025");
+    const english = createTranslator({ ...zhHansMessages, "common.today": "Today", "common.yesterday": "Yesterday" });
+    expect(messageDateLabel(localTime(2026, 10, 3), now, "zh-Hans", english)).toBe("Today");
+    expect(roomActivityTimeLabel(localTime(2026, 10, 2), now, "zh-Hans", english)).toBe("Yesterday");
   });
 
   it("emits a machine-readable local calendar date", () => {

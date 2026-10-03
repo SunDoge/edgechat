@@ -23,7 +23,7 @@ export function ForwardDialog(props: {
   const summary = () => forwardSelectionSummary(props.messages, t);
   const available = createMemo(() => {
     const needle = query().trim().toLocaleLowerCase();
-    return props.rooms.filter((room) => !room.blocked_by_me && (!needle || roomTitle(room, props.currentUserId).toLocaleLowerCase().includes(needle)));
+    return props.rooms.filter((room) => !room.blocked_by_me && (!needle || roomTitle(room, props.currentUserId, t).toLocaleLowerCase().includes(needle)));
   });
 
   async function choose(roomId: RoomId) {
@@ -38,7 +38,7 @@ export function ForwardDialog(props: {
       <div class="rounded-xl border border-black/8 bg-neutral-50 px-3 py-2.5 text-sm text-muted"><span class="line-clamp-2 break-words">{summary()}</span></div>
       <label class="relative" for="forward-room-search"><span class="sr-only">{t("forward.searchRooms")}</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="forward-room-search" class="h-10 w-full rounded-lg pl-9 pr-3 text-base ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} placeholder={t("forward.searchRooms")} autofocus/></label>
       <div class="max-h-[50dvh] divide-y divide-black/5 overflow-y-auto"><For each={available()} fallback={<p class="py-8 text-center text-sm text-muted">{t("forward.noRooms")}</p>}>{(room) => {
-        const title = () => roomTitle(room, props.currentUserId);
+        const title = () => roomTitle(room, props.currentUserId, t);
         return <button type="button" class="flex min-h-14 w-full items-center gap-3 rounded-lg px-1 text-left hover:bg-neutral-50 disabled:opacity-50" disabled={Boolean(busyRoom())} onClick={() => void choose(room.room_id)}><Avatar saved={room.purpose === "saved"} group={room.kind === "group"} label={initials(title())} color={avatarColor(room.room_id)}/><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{title()}</strong><small class="block truncate text-xs text-muted">{room.purpose === "saved" ? t("roomTarget.saved") : room.kind === "group" ? t("roomTarget.group", { count: room.members.length }) : t("roomTarget.encrypted")}</small></span><span class="text-xs font-semibold text-brand">{busyRoom() === room.room_id ? t("forward.sending") : t("forward.action")}</span></button>;
       }}</For></div>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm text-red-700">{error()}</div></Show>

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ServerRoom } from "@edgechat/sync";
+import { createTranslator, zhHansMessages } from "./i18n";
 import { roomTitle } from "./presenters";
 
 const base: ServerRoom = {
@@ -25,6 +26,8 @@ const base: ServerRoom = {
 describe("room titles", () => {
   it("uses a stable human title for the saved-messages room", () => {
     expect(roomTitle(base, "@alice:example.com")).toBe("已保存消息");
+    const english = createTranslator({ ...zhHansMessages, "workspace.saved.title": "Saved messages" });
+    expect(roomTitle(base, "@alice:example.com", english)).toBe("Saved messages");
   });
 
   it("keeps ordinary direct-room peer titles", () => {

@@ -48,6 +48,9 @@ describe("local message catalog", () => {
     expect(translate("identity.fingerprintLabel", { value: "ABCD EFGH" })).toBe("设备验证字符 ABCD EFGH");
     expect(translate("roomPreview.failed", { preview: "照片" })).toBe("发送失败 · 照片");
     expect(translate("message.reaction.labelMine", { emoji: "👍", count: 2 })).toBe("👍，2 人回应，包括你");
+    expect(translate("draft.preview", { text: "later" })).toBe("草稿：later");
+    expect(translate("conversationExport.attachment", { kind: "图片", name: "photo.jpg", size: "2.0 KiB" })).toBe("图片：photo.jpg（2.0 KiB；文件内容未包含）");
+    expect(translate("conversationExport.footer", { count: 12 })).toBe("共导出 12 条本机消息。");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { File as NodeFile } from "node:buffer";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createTranslator, zhHansMessages } from "./i18n";
 import { deleteStagedShare, loadStagedShare, normalizeStagedShare, SHARE_TARGET_MAX_FILE_BYTES, shareTargetErrorMessage, shareTargetId, sharedComposerText, stageLocalFiles } from "./share-target";
 
 function stagedFile(name: string, size: number) {
@@ -41,6 +42,8 @@ describe("PWA share target", () => {
     expect(shareTargetErrorMessage("too_many_files")).toContain("10 个文件");
     expect(shareTargetErrorMessage("file_too_large")).toContain("25 MB");
     expect(shareTargetErrorMessage("files_too_large")).toContain("100 MB");
+    const english = createTranslator({ ...zhHansMessages, "shareTarget.error.tooManyFiles": "At most {count} files" });
+    expect(shareTargetErrorMessage("too_many_files", english)).toBe("At most 10 files");
   });
 
   it("normalizes legacy single-file shares and accepts bounded multi-file shares", () => {

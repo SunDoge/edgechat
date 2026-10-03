@@ -23,7 +23,7 @@ export function ShareTargetDialog(props: {
   const [error, setError] = createSignal("");
   const available = createMemo(() => {
     const needle = query().trim().toLocaleLowerCase();
-    return props.rooms.filter((room) => !room.blocked_by_me && (!needle || roomTitle(room, props.currentUserId).toLocaleLowerCase().includes(needle)));
+    return props.rooms.filter((room) => !room.blocked_by_me && (!needle || roomTitle(room, props.currentUserId, t).toLocaleLowerCase().includes(needle)));
   });
   const selectedRoom = createMemo(() => props.rooms.find((room) => room.room_id === selectedRoomId()));
 
@@ -46,12 +46,12 @@ export function ShareTargetDialog(props: {
           <strong class="text-sm font-medium text-ink">{t("shareTarget.selectRoom")}</strong>
           <label class="relative" for="share-room-search"><span class="sr-only">{t("shareTarget.searchRooms")}</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="share-room-search" class="h-10 w-full rounded-lg pl-9 pr-3 text-base ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} placeholder={t("shareTarget.searchRooms")}/></label>
           <div class="max-h-[34dvh] divide-y divide-black/5 overflow-y-auto"><For each={available()} fallback={<p class="py-8 text-center text-sm text-muted">{t("shareTarget.noRooms")}</p>}>{(room) => {
-            const title = () => roomTitle(room, props.currentUserId);
+            const title = () => roomTitle(room, props.currentUserId, t);
             const active = () => selectedRoomId() === room.room_id;
             return <button type="button" aria-pressed={active()} class={`flex min-h-14 w-full items-center gap-3 rounded-lg px-1 text-left ${active() ? "bg-brand-soft" : "hover:bg-neutral-50"}`} onClick={() => setSelectedRoomId(room.room_id)}><Avatar saved={room.purpose === "saved"} group={room.kind === "group"} label={initials(title())} color={avatarColor(room.room_id)}/><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{title()}</strong><small class="block truncate text-xs text-muted">{room.purpose === "saved" ? t("roomTarget.saved") : room.kind === "group" ? t("roomTarget.group", { count: room.members.length }) : t("roomTarget.encrypted")}</small></span><Show when={active()}><IconCheck class="size-5 shrink-0 stroke-brand"/></Show></button>;
           }}</For></div>
         </div>
-        <button type="button" disabled={!selectedRoom() || busy() || (!text().trim() && !props.share.files.length)} class="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => void send()}><IconSend class="size-4 stroke-white"/>{busy() ? t("shareTarget.sending") : selectedRoom() ? t("shareTarget.sendTo", { title: roomTitle(selectedRoom()!, props.currentUserId) }) : t("shareTarget.selectBeforeSend")}</button>
+        <button type="button" disabled={!selectedRoom() || busy() || (!text().trim() && !props.share.files.length)} class="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50" onClick={() => void send()}><IconSend class="size-4 stroke-white"/>{busy() ? t("shareTarget.sending") : selectedRoom() ? t("shareTarget.sendTo", { title: roomTitle(selectedRoom()!, props.currentUserId, t) }) : t("shareTarget.selectBeforeSend")}</button>
       </>}><div role="alert" class="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{shareTargetErrorText(props.share.error!, t)}</div></Show>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm text-red-700">{error()}</div></Show>
     </div>

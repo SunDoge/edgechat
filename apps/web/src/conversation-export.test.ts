@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LocalMessage } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
+import { createTranslator, zhHansMessages } from "./i18n";
 import { conversationExportFilename, formatConversationMessage, streamConversationTranscript } from "./conversation-export";
 
 const room = "!roomroomroomroom:example.com" as RoomId;
@@ -34,6 +35,21 @@ describe("conversation transcript export", () => {
     expect(count).toBe(501); expect(calls).toEqual([0, 500]); expect(chunks).toHaveLength(4);
     expect(chunks.join("")).toContain("共导出 501 条本机消息");
     expect(conversationExportFilename("测试 / 对话", new Date("2026-10-03T00:00:00Z").getTime())).toBe("edgechat-测试 - 对话-2026-10-03.txt");
+  });
+
+  it("uses the caller's catalog without changing transcript paging", async () => {
+    const chunks: string[] = [];
+    const english = createTranslator({
+      ...zhHansMessages,
+      "conversationExport.header": "Transcript: {title} ({room}) at {date}",
+      "conversationExport.footer": "Exported {count} local messages.",
+    });
+    await streamConversationTranscript({
+      roomId: room, roomTitle: "Family", exportedAt: new Date(2026, 9, 3, 12).getTime(), displayName: () => "Alice",
+      write: (chunk) => { chunks.push(chunk); }, loadPage: async () => [], t: english,
+    });
+    expect(chunks.join("")).toContain(`Transcript: Family (${room})`);
+    expect(chunks.join("")).toContain("Exported 0 local messages.");
   });
 
   it("fails closed on a duplicate or cross-room page", async () => {
