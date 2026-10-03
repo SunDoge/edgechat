@@ -63,6 +63,12 @@ export class OutboxEngine extends EventTarget {
     void this.kick();
   }
 
+  /** Announce an item that was atomically promoted from MLS staging. */
+  notifyPersisted(): void {
+    this.changed();
+    void this.kick();
+  }
+
   async retry(eventId: string): Promise<void> {
     await this.db.retryOutbox(eventId);
     this.changed();

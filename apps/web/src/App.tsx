@@ -358,7 +358,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   function tabHandoffBlocked(): boolean {
     return loading() || files().length > 0 || voiceRecording() || sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy()
-      || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen() || pendingMlsMutations > 0
+      || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen() || pendingMlsMutations > 0 || mlsProjectionBarrier.isBlocked()
       || Boolean(roomMembershipRun || accountRemovalRun || savedRoomCreation || keyPackageRefill || retentionRun || messageExpiryRun
         || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun || peerRecoveryRun || draftSyncRun)
       || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
@@ -527,10 +527,37 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     }
   }
 
-  async function restoreMlsProjectionBarrier(): Promise<void> {
-    const staged = await db.stagedDecryptedEvents(500);
-    mlsProjectionBarrier.replace(staged.map((event) => event.event_id));
-    setLocalProjectionRecoveries(Object.fromEntries(staged.map((event) => [event.event_id, event.room_id])));
+  async function restoreMlsProjectionBarrier(currentMls = mlsRef): Promise<OpenMlsMessagingCore | null> {
+    const [incoming, outgoing] = await Promise.all([db.stagedDecryptedEvents(500), db.stagedOutgoingEvents(500)]);
+    mlsProjectionBarrier.replace([...incoming.map((event) => event.event_id), ...outgoing.map(({ event }) => event.event_id)]);
+    setLocalProjectionRecoveries(Object.fromEntries([
+      ...incoming.map((event) => [event.event_id, event.room_id] as const),
+      ...outgoing.map(({ event }) => [event.event_id, event.room_id] as const),
+    ]));
+    if (!outgoing.length) return currentMls;
+    if (!currentMls || !identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for outgoing MLS recovery");
+    let active = currentMls;
+    for (const staged of outgoing) {
+      const position = stagedMlsPosition(active.exportState(), staged.previous_mls_state, staged.next_mls_state);
+      if (position === "mismatch") throw new LocalStagingIntegrityError("Local MLS state does not match the staged outgoing transition");
+      if (position === "previous") {
+        let restored: OpenMlsMessagingCore;
+        try { restored = await OpenMlsMessagingCore.create(identityRef.deviceId, staged.next_mls_state); }
+        catch (cause) { throw new LocalStagingIntegrityError(`Staged outgoing MLS transition cannot be restored: ${cause instanceof Error ? cause.message : String(cause)}`); }
+        active.destroy(); active = restored; mlsRef = restored; setMls(restored);
+      }
+      identityRef = { ...identityRef, mlsState: staged.next_mls_state };
+      try {
+        await saveIdentity(profileId, identityRef);
+        await db.promoteStagedOutgoingEvent(staged.event.event_id);
+      } catch (cause) { throw new LocalProjectionPersistenceError(cause); }
+      mlsProjectionBarrier.settle(staged.event.event_id);
+      setLocalProjectionRecoveries((current) => {
+        const next = { ...current }; delete next[staged.event.event_id]; return next;
+      });
+    }
+    mlsRef = active; setMls(active); setIdentity(identityRef);
+    return active;
   }
 
   async function processEvent(event: RoomEvent) {
@@ -654,6 +681,60 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!currentMls || !identityRef) return;
     const stored = { ...identityRef, mlsState: currentMls.exportState() };
     identityRef = stored; await saveIdentity(profileId, stored);
+  }
+
+  async function enqueueEncryptedEvent(input: {
+    eventId: EventId; roomId: RoomId; type: ClientEvent["type"]; createdAt: number;
+    payload: Record<string, unknown>; plaintext?: string; metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(input.roomId)) throw new Error("发送队列尚未就绪");
+    const previousState = currentMls.exportState();
+    try {
+      const ciphertext = encodeBase64Url(currentMls.encryptMessage(input.roomId, encoder.encode(JSON.stringify(input.payload))));
+      const nextState = currentMls.exportState();
+      const unsigned: Omit<ClientEvent, "signature"> = {
+        event_id: input.eventId, room_id: input.roomId, sender: currentSession.user_id as UserId,
+        device_id: currentIdentity.deviceId, type: input.type, created_at: input.createdAt, ciphertext,
+        metadata: { mls_epoch: currentMls.epoch(input.roomId), ...input.metadata },
+      };
+      const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
+      mlsProjectionBarrier.add(input.eventId);
+      setLocalProjectionRecoveries((current) => ({ ...current, [input.eventId]: input.roomId }));
+      await db.stageOutgoingEvent({ ...unsigned, signature }, input.plaintext ?? "", input.payload, new Uint8Array(previousState), new Uint8Array(nextState));
+      await persistMls(currentMls);
+      await db.promoteStagedOutgoingEvent(input.eventId);
+      mlsProjectionBarrier.settle(input.eventId);
+      setLocalProjectionRecoveries((current) => { const next = { ...current }; delete next[input.eventId]; return next; });
+      outboxRef.notifyPersisted();
+    } catch (cause) {
+      // If staging committed but its response or a later write failed, replay
+      // that exact ciphertext transition. Otherwise roll back the in-memory
+      // MLS ratchet so a failed local admission consumes no generation.
+      const [staged, promoted] = await Promise.all([
+        db.stagedOutgoingEvents(500).then((rows) => rows.find(({ event }) => event.event_id === input.eventId)).catch(() => undefined),
+        db.outbox(input.roomId).then((rows) => rows.some(({ event }) => event.event_id === input.eventId)).catch(() => false),
+      ]);
+      if (promoted) {
+        mlsProjectionBarrier.settle(input.eventId);
+        setLocalProjectionRecoveries((current) => { const next = { ...current }; delete next[input.eventId]; return next; });
+        outboxRef?.notifyPersisted();
+        return;
+      }
+      if (staged) {
+        try {
+          await restoreMlsProjectionBarrier(mlsRef);
+          outboxRef?.notifyPersisted();
+          return;
+        } catch (recoveryCause) { throw new LocalProjectionPersistenceError(recoveryCause); }
+      }
+      const restored = await OpenMlsMessagingCore.create(currentIdentity.deviceId, previousState);
+      currentMls.destroy(); mlsRef = restored; setMls(restored);
+      identityRef = { ...currentIdentity, mlsState: previousState };
+      mlsProjectionBarrier.settle(input.eventId);
+      setLocalProjectionRecoveries((current) => { const next = { ...current }; delete next[input.eventId]; return next; });
+      throw cause;
+    }
   }
 
   async function loadRooms(currentMls = mlsRef) {
@@ -1024,7 +1105,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const storedIdentity = await loadIdentity(profileId);
         if (!storedIdentity || !api.getToken()) return;
         if (!storedIdentity.mlsState) { await clearLocalProfileToken(profileId); api.setToken(null); return; }
-        const currentMls = await OpenMlsMessagingCore.create(storedIdentity.deviceId, storedIdentity.mlsState);
+        let currentMls = await OpenMlsMessagingCore.create(storedIdentity.deviceId, storedIdentity.mlsState);
         identityRef = storedIdentity; mlsRef = currentMls; setMls(currentMls);
         let me: SessionIdentity; let offlineBootstrap = false;
         try {
@@ -1038,8 +1119,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           me = cached; offlineBootstrap = true; needsRemoteRoomRefresh = true; setConnectionState("offline");
         }
         await Promise.all([db.bindAccount(me.user_id, me.display_name), bindLocalProfile(profileId, { user_id: me.user_id, display_name: me.display_name, device_id: me.device_id, access_token: props.accessToken! })]);
-        await restoreMlsProjectionBarrier();
-        reflectLocalProfile(me); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); setIdentity(storedIdentity); setSession(me);
+        currentMls = (await restoreMlsProjectionBarrier(currentMls)) ?? currentMls;
+        reflectLocalProfile(me); setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); setIdentity(identityRef ?? storedIdentity); setSession(me);
         if (!offlineBootstrap) void reconcilePush(api, me.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
         if (offlineBootstrap) await Promise.all([loadCachedRooms(currentMls), refreshComposerDrafts()]);
         else await Promise.all([loadRooms(currentMls), refreshComposerDrafts()]);
@@ -1416,7 +1497,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setIdentity(nextIdentity); setMls(nextMls); setLoading(true);
     try {
       await db.bindAccount(next.user_id, next.display_name);
-      await restoreMlsProjectionBarrier();
+      nextMls = (await restoreMlsProjectionBarrier(nextMls)) ?? nextMls;
       setSession(next);
       void reconcilePush(api, next.vapid_public_key).then(setPushStatus).catch(() => setPushStatus("error"));
       setLinkPreviews(await db.linkPreviewsEnabled()); setPresenceSharing(await db.presenceSharingEnabled()); await db.cacheSession(offlineSessionSnapshot(next));
@@ -1455,11 +1536,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       const payload = createMessagePayload(eventId as MessageId, text, attachments, relation);
       await mutateMls(async () => {
-        const ciphertext = encodeBase64Url(currentMls.encryptMessage(room.room_id, encoder.encode(JSON.stringify(payload))));
-        await persistMls(currentMls);
-        const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId, room_id: room.room_id, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId, type: attachmentEventTypeForFiles(selectedFiles), created_at: createdAt, ciphertext, metadata: { mls_epoch: currentMls.epoch(room.room_id), ...attachmentReferenceMetadata(attachments.map((attachment) => attachment.id)) } };
-        const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-        await outboxRef!.enqueue({ ...unsigned, signature }, messageText(payload), payload as unknown as Record<string, unknown>);
+        await enqueueEncryptedEvent({ eventId, roomId: room.room_id, type: attachmentEventTypeForFiles(selectedFiles), createdAt,
+          payload: payload as unknown as Record<string, unknown>, plaintext: messageText(payload),
+          metadata: attachmentReferenceMetadata(attachments.map((attachment) => attachment.id)) });
         queued = true;
       });
     } catch (cause) {
@@ -1511,11 +1590,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setSendBusy(true);
     try {
       await mutateMls(async () => {
-        const ciphertext = encodeBase64Url(currentMls.encryptMessage(room.room_id, encoder.encode(JSON.stringify(payload))));
-        await persistMls(currentMls);
-        const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId, room_id: room.room_id, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId, type: "message.contact", created_at: Date.now(), ciphertext, metadata: { mls_epoch: currentMls.epoch(room.room_id) } };
-        const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-        await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+        await enqueueEncryptedEvent({ eventId, roomId: room.room_id, type: "message.contact", createdAt: Date.now(),
+          payload: payload as unknown as Record<string, unknown> });
       });
       if (selectedRef === room.room_id) setPendingMessages(await db.outbox(room.room_id));
       setNotice("联系人名片已加入发送队列");
@@ -1582,16 +1658,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const payload = createForwardPayload(eventId as MessageId, sourcePayload, attachmentAliases, savedFrom);
     const createdAt = Date.now();
     await mutateMls(async () => {
-      const ciphertext = encodeBase64Url(currentMls.encryptMessage(targetRoomId, encoder.encode(JSON.stringify(payload))));
-      await persistMls(currentMls);
-      const unsigned: Omit<ClientEvent, "signature"> = {
-        event_id: eventId, room_id: targetRoomId, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId,
+      await enqueueEncryptedEvent({ eventId, roomId: targetRoomId,
         type: attachments.length ? "message.file" : messageContacts(payload).length ? "message.contact" : "message.text",
-        created_at: createdAt, ciphertext,
-        metadata: { mls_epoch: currentMls.epoch(targetRoomId), ...attachmentReferenceMetadata(attachmentAliases, attachments.map((part) => part.attachment.id)) },
-      };
-      const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-      await outboxRef!.enqueue({ ...unsigned, signature }, messageText(payload), payload as unknown as Record<string, unknown>);
+        createdAt, payload: payload as unknown as Record<string, unknown>, plaintext: messageText(payload),
+        metadata: attachmentReferenceMetadata(attachmentAliases, attachments.map((part) => part.attachment.id)) });
     });
     await Promise.all(attachmentAliases.map((alias, index) => attachmentLoader.aliasCached(attachments[index]!.attachment.id, alias)));
     if (selectedRef === targetRoomId) setPendingMessages(await db.outbox(targetRoomId));
@@ -1797,16 +1867,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const updatedAt = Date.now();
     const payload: MessageExpiryPolicyPayload = { version: 1, kind: "room.message-expiry", expires_in_seconds: seconds, updated_at: updatedAt };
     await mutateMls(async () => {
-      const ciphertext = encodeBase64Url(currentMls.encryptMessage(roomId, encoder.encode(JSON.stringify(payload))));
-      await persistMls(currentMls);
-      const unsigned: Omit<ClientEvent, "signature"> = {
-        event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
-        room_id: roomId, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId,
-        type: "control.message-expiry", created_at: updatedAt, ciphertext,
-        metadata: { mls_epoch: currentMls.epoch(roomId) },
-      };
-      const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-      await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+      await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
+        roomId, type: "control.message-expiry", createdAt: updatedAt, payload: payload as unknown as Record<string, unknown> });
     });
     await db.outbox(roomId).then(setPendingMessages).catch(() => undefined);
     setNotice(seconds === null ? "关闭设置已加入发送队列" : "自动消失设置已加入发送队列，仅影响之后的新消息");
@@ -1828,17 +1890,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const updatedAt = Date.now();
     const payload: RoomProfilePayload = { version: 1, kind: "room.profile", name: normalizedName, avatar, updated_at: updatedAt };
     await mutateMls(async () => {
-      const ciphertext = encodeBase64Url(currentMls.encryptMessage(roomId, encoder.encode(JSON.stringify(payload))));
-      await persistMls(currentMls);
-      const unsigned: Omit<ClientEvent, "signature"> = {
-        event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
-        room_id: roomId, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId,
-        type: "control.room.profile", created_at: updatedAt, ciphertext,
-        metadata: { mls_epoch: currentMls.epoch(roomId), room_profile_avatar_id: avatar?.attachment_id ?? null,
-          room_profile_previous_avatar_id: currentAvatar?.attachment_id ?? null },
-      };
-      const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-      await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+      await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
+        roomId, type: "control.room.profile", createdAt: updatedAt, payload: payload as unknown as Record<string, unknown>,
+        metadata: { room_profile_avatar_id: avatar?.attachment_id ?? null, room_profile_previous_avatar_id: currentAvatar?.attachment_id ?? null } });
     });
     await db.outbox(roomId).then(setPendingMessages).catch(() => undefined);
     if (announce) setNotice("群聊资料已加入发送队列");
@@ -1966,20 +2020,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能操作消息");
     if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先从另一台设备或备份恢复此对话");
     await mutateMls(async () => {
-      const ciphertext = encodeBase64Url(currentMls.encryptMessage(room.room_id, encoder.encode(JSON.stringify(payload))));
-      await persistMls(currentMls);
-      const unsigned: Omit<ClientEvent, "signature"> = {
-        event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
-        room_id: room.room_id,
-        sender: currentSession.user_id as UserId,
-        device_id: currentIdentity.deviceId,
-        type,
-        created_at: "edited_at" in payload ? payload.edited_at : payload.updated_at,
-        ciphertext,
-        metadata: { mls_epoch: currentMls.epoch(room.room_id), target_event_id: target.event_id },
-      };
-      const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-      await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+      await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
+        roomId: room.room_id, type, createdAt: "edited_at" in payload ? payload.edited_at : payload.updated_at,
+        payload: payload as unknown as Record<string, unknown>, metadata: { target_event_id: target.event_id } });
     });
     setPendingMessages(await db.outbox(room.room_id));
   }
@@ -2048,22 +2091,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const readAt = Date.now();
     const payload: ReadReceiptPayload = { version: 1, kind: "receipt.read", room_id: roomId, up_to_seq: latestSeq, read_at: readAt };
     await mutateMls(async () => {
-      const ciphertext = encodeBase64Url(currentMls.encryptMessage(roomId, encoder.encode(JSON.stringify(payload))));
-      await persistMls(currentMls);
-      const unsigned: Omit<ClientEvent, "signature"> = {
-        event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
-        room_id: roomId,
-        sender: currentSession.user_id as UserId,
-        device_id: currentIdentity.deviceId,
-        type: "receipt.read",
-        created_at: readAt,
-        ciphertext,
-        // The read position deliberately remains inside MLS ciphertext.
-        metadata: { mls_epoch: currentMls.epoch(roomId) },
-      };
-      const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-      await db.supersedeReadReceiptOutbox(roomId);
-      await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+      // The read position deliberately remains inside MLS ciphertext.
+      await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
+        roomId, type: "receipt.read", createdAt: readAt, payload: payload as unknown as Record<string, unknown> });
     });
   }
 
@@ -2088,21 +2118,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const deliveredAt = Date.now();
     const payload: DeliveryReceiptPayload = { version: 1, kind: "receipt.delivered", room_id: roomId, up_to_seq: latestSeq, delivered_at: deliveredAt };
     await mutateMls(async () => {
-      const ciphertext = encodeBase64Url(currentMls.encryptMessage(roomId, encoder.encode(JSON.stringify(payload))));
-      await persistMls(currentMls);
-      const unsigned: Omit<ClientEvent, "signature"> = {
-        event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
-        room_id: roomId,
-        sender: currentSession.user_id as UserId,
-        device_id: currentIdentity.deviceId,
-        type: "receipt.delivered",
-        created_at: deliveredAt,
-        ciphertext,
-        metadata: { mls_epoch: currentMls.epoch(roomId) },
-      };
-      const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-      await db.supersedeDeliveryReceiptOutbox(roomId);
-      await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+      await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
+        roomId, type: "receipt.delivered", createdAt: deliveredAt, payload: payload as unknown as Record<string, unknown> });
     });
   }
 
@@ -2202,11 +2219,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const eventId = `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId;
         const deletedAt = Date.now();
         const payload: MessageDeletePayload = { version: 1, kind: "message.delete", target: { kind: "message", message_id: message.message_id as MessageId, room_id: room.room_id }, deleted_at: deletedAt };
-        const ciphertext = encodeBase64Url(currentMls.encryptMessage(room.room_id, encoder.encode(JSON.stringify(payload))));
-        await persistMls(currentMls);
-        const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId, room_id: room.room_id, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId, type: "message.delete", created_at: deletedAt, ciphertext, metadata: { mls_epoch: currentMls.epoch(room.room_id), target_event_id: message.event_id } };
-        const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-        await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+        await enqueueEncryptedEvent({ eventId, roomId: room.room_id, type: "message.delete", createdAt: deletedAt,
+          payload: payload as unknown as Record<string, unknown>, metadata: { target_event_id: message.event_id } });
       });
       setPendingMessages(await db.outbox(room.room_id));
     } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法撤回消息"); }
@@ -3038,16 +3052,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const updatedAt = Date.now();
       const payload: RoomOwnerTransferPayload = { version: 1, kind: "room.owner-transfer", target_user_id: targetUserId, updated_at: updatedAt };
       await mutateMls(async () => {
-        const ciphertext = encodeBase64Url(currentMls.encryptMessage(room.room_id, encoder.encode(JSON.stringify(payload))));
-        await persistMls(currentMls);
-        const unsigned: Omit<ClientEvent, "signature"> = {
-          event_id: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}`,
-          room_id: room.room_id, sender: currentSession.user_id as UserId, device_id: currentIdentity.deviceId,
-          type: "control.owner.transfer", created_at: updatedAt, ciphertext,
-          metadata: { mls_epoch: currentMls.epoch(room.room_id), target_user_id: targetUserId },
-        };
-        const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
-        await outboxRef!.enqueue({ ...unsigned, signature }, "", payload as unknown as Record<string, unknown>);
+        await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
+          roomId: room.room_id, type: "control.owner.transfer", createdAt: updatedAt,
+          payload: payload as unknown as Record<string, unknown>, metadata: { target_user_id: targetUserId } });
       });
       await db.outbox(room.room_id).then(setPendingMessages).catch(() => undefined);
       setRoomSettingsOpen(false); setNotice("群主转让已加入发送队列");

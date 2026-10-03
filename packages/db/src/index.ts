@@ -1,4 +1,4 @@
-import { isMessageExpiryPolicyPayload, isNamespacedRoomId, isNamespacedUserId, isRoomProfilePayload, type ClientEvent, type DeliveryReceiptPayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomProfileAvatar, type RoomProfilePayload, type UserId } from "@edgechat/protocol";
+import { isClientEventEnvelope, isMessageExpiryPolicyPayload, isNamespacedRoomId, isNamespacedUserId, isRoomProfilePayload, type ClientEvent, type DeliveryReceiptPayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomProfileAvatar, type RoomProfilePayload, type UserId } from "@edgechat/protocol";
 import { LOCAL_CLEAR_ACCOUNT_DATA } from "./schema";
 import { isLocalRetentionDays, type LocalRetentionDays } from "./retention";
 import { messageExpiryAt } from "./expiry";
@@ -36,6 +36,13 @@ export type LocalStagedDecryptedEvent = {
   previous_mls_state: Uint8Array<ArrayBuffer>;
   next_mls_state: Uint8Array<ArrayBuffer>;
 };
+export type LocalStagedOutgoingEvent = {
+  event: ClientEvent;
+  plaintext: string;
+  payload: Record<string, unknown>;
+  previous_mls_state: Uint8Array<ArrayBuffer>;
+  next_mls_state: Uint8Array<ArrayBuffer>;
+};
 export type LocalRoomDeviceSigningKey = { room_id: RoomId; device_id: string; user_id: UserId; signing_key: JsonWebKey };
 export const PIN_ROOM_DEVICE_SIGNING_KEY_SQL = `INSERT INTO room_device_signing_keys (room_id,device_id,user_id,signing_key,first_seen_at,last_seen_at)
 VALUES ($1,$2,$3,$4::jsonb,$5,$5)
@@ -57,6 +64,19 @@ export const MARK_EVENT_PROCESSED_SQL = `WITH stored_envelope AS (
 )
 INSERT INTO processed_events (event_id, room_id, seq, processed_at)
 VALUES ($1,$2,$3,$6) ON CONFLICT (event_id) DO NOTHING`;
+
+export const PROMOTE_STAGED_OUTGOING_EVENT_SQL = `WITH staged AS (
+  DELETE FROM outgoing_event_staging WHERE event_id = $1
+  RETURNING event_id,room_id,event_json,plaintext,payload,staged_at
+), superseded AS (
+  DELETE FROM outbox o USING staged s
+  WHERE o.room_id = s.room_id AND o.status <> 'sending'
+    AND s.payload->>'kind' IN ('receipt.read','receipt.delivered')
+    AND o.payload->>'kind' = s.payload->>'kind'
+)
+INSERT INTO outbox (event_id,message_id,room_id,event_json,plaintext,payload,status,attempts,next_attempt_at,last_error,created_at,updated_at)
+SELECT event_id,COALESCE(NULLIF(payload->>'message_id',''),event_id),room_id,event_json,plaintext,payload,'pending',0,staged_at,NULL,staged_at,staged_at
+FROM staged ON CONFLICT (event_id) DO NOTHING RETURNING event_id`;
 
 export const ADVANCE_ROOM_SEQUENCE_SQL = `WITH RECURSIVE contiguous(seq) AS (
   SELECT processed_through_seq FROM room_sync_state WHERE room_id = $1
@@ -518,6 +538,44 @@ export class LocalDatabase {
 
   async removeStagedDecryptedEvent(eventId: string): Promise<void> {
     await this.query("DELETE FROM decrypted_event_staging WHERE event_id = $1", [eventId]);
+  }
+
+  async stageOutgoingEvent(
+    event: ClientEvent,
+    plaintext: string,
+    payload: Record<string, unknown>,
+    previousMlsState: Uint8Array<ArrayBuffer>,
+    nextMlsState: Uint8Array<ArrayBuffer>,
+  ): Promise<void> {
+    await this.query(
+      `INSERT INTO outgoing_event_staging (event_id,room_id,event_json,plaintext,payload,previous_mls_state,next_mls_state,staged_at)
+       VALUES ($1,$2,$3::jsonb,$4,$5::jsonb,$6,$7,$8)
+       ON CONFLICT (event_id) DO NOTHING`,
+      [event.event_id, event.room_id, JSON.stringify(event), plaintext, JSON.stringify(payload), previousMlsState, nextMlsState, Date.now()],
+    );
+  }
+
+  async stagedOutgoingEvents(limit = 500): Promise<LocalStagedOutgoingEvent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Outgoing staging limit must be between 1 and 500");
+    const rows = await this.query<{ event_id: string; room_id: RoomId; event_json: ClientEvent | string; plaintext: string; payload: Record<string, unknown> | string; previous_mls_state: Uint8Array<ArrayBuffer>; next_mls_state: Uint8Array<ArrayBuffer> }>(
+      "SELECT event_id,room_id,event_json,plaintext,payload,previous_mls_state,next_mls_state FROM outgoing_event_staging ORDER BY staged_at,event_id LIMIT $1",
+      [limit],
+    );
+    return rows.map((row) => {
+      const event: unknown = jsonValue(row.event_json);
+      if (!isClientEventEnvelope(event) || event.event_id !== row.event_id || event.room_id !== row.room_id) {
+        throw new Error("Stored outgoing event staging record is invalid");
+      }
+      return { event, plaintext: row.plaintext, payload: jsonValue(row.payload), previous_mls_state: row.previous_mls_state, next_mls_state: row.next_mls_state };
+    });
+  }
+
+  async promoteStagedOutgoingEvent(eventId: string): Promise<void> {
+    const rows = await this.query<{ event_id: string }>(PROMOTE_STAGED_OUTGOING_EVENT_SQL, [eventId]);
+    if (!rows.length) {
+      const existing = await this.query<{ event_id: string }>("SELECT event_id FROM outbox WHERE event_id = $1", [eventId]);
+      if (!existing.length) throw new Error("Outgoing staging record is missing");
+    }
   }
 
   async cachedRooms<T extends object>(): Promise<T[]> {

@@ -434,7 +434,7 @@ export const LOCAL_CLEAR_ACCOUNT_DATA = `
 TRUNCATE TABLE
   account_state, cached_session, users, devices, device_verifications, room_device_signing_keys, rooms, room_snapshots, room_profiles, room_members, room_hidden_senders, messages, expired_messages, room_message_expiry, message_tombstones, message_edits, message_reactions,
   room_read_state, room_preferences, room_local_history_floor, device_preferences, composer_drafts, composer_draft_sync_state, composer_draft_outbox, composer_draft_device_state, read_receipts, room_delivery_state, delivery_receipts, outbox,
-  device_revocation_outbox, device_link_jobs, device_link_outbox, account_removal_outbox, room_membership_outbox, processed_events, room_sync_state, deferred_room_events, decrypted_event_staging, event_envelopes, failed_events, attachments,
+  device_revocation_outbox, device_link_jobs, device_link_outbox, account_removal_outbox, room_membership_outbox, outgoing_event_staging, processed_events, room_sync_state, deferred_room_events, decrypted_event_staging, event_envelopes, failed_events, attachments,
   message_parts, image_embeddings, segment_state, crypto_state, archive_keys, archive_segment_metadata, compaction_jobs, push_state
 CASCADE;
 UPDATE sync_state SET cursor = 0, updated_at = 0 WHERE id = 1;
@@ -445,7 +445,7 @@ UPDATE sync_state SET cursor = 0, updated_at = 0 WHERE id = 1;
 export const LOCAL_PREPARE_LINKED_DEVICE_HISTORY = `
 TRUNCATE TABLE
   outbox, device_revocation_outbox, device_link_jobs, device_link_outbox,
-  account_removal_outbox, room_membership_outbox, deferred_room_events, decrypted_event_staging, failed_events, crypto_state, room_sync_state, compaction_jobs, room_preferences, device_preferences, room_hidden_senders, composer_drafts, composer_draft_sync_state, composer_draft_outbox, composer_draft_device_state, cached_session, room_snapshots
+  account_removal_outbox, room_membership_outbox, outgoing_event_staging, deferred_room_events, decrypted_event_staging, failed_events, crypto_state, room_sync_state, compaction_jobs, room_preferences, device_preferences, room_hidden_senders, composer_drafts, composer_draft_sync_state, composer_draft_outbox, composer_draft_device_state, cached_session, room_snapshots
 CASCADE;
 UPDATE push_state SET subscribed = FALSE, updated_at = 0 WHERE id = 1;
 `;
