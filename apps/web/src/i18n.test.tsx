@@ -24,6 +24,9 @@ describe("local message catalog", () => {
     expect(translate("roomSettings.confirm.transferOwnership", { name: "小林" })).toContain("转让给 小林");
     expect(translate("devices.storage.breakdown", { attachments: "1 MB", archives: "2 MB", avatars: "3 KB" })).toBe("附件 1 MB · 消息历史 2 MB · 头像 3 KB");
     expect(translate("devices.revocation.working", { completed: 2, total: 5 })).toBe("正在安全移除 · 2/5 个对话");
+    expect(translate("forward.titleMany", { count: 3 })).toBe("转发 3 条消息");
+    expect(translate("media.description", { title: "家人" })).toBe("家人 · 仅显示这台设备已索引的内容");
+    expect(translate("identity.fingerprintLabel", { value: "ABCD EFGH" })).toBe("设备验证字符 ABCD EFGH");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {

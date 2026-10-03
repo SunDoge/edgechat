@@ -1,6 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { IconFile, IconMicrophone, IconPhoto, IconRefresh } from "@tabler/icons-solidjs";
 import type { LocalRoomAttachment, LocalRoomAttachmentCursor, LocalRoomAttachmentPage } from "@edgechat/db";
+import { useI18n } from "../i18n";
 import { attachmentPresentation, type AttachmentMetadata, type AttachmentPresentation } from "../media";
 import { Dialog } from "./primitives";
 
@@ -66,6 +67,7 @@ export function ConversationMediaDialog(props: {
   onOpenMessage: (messageId: string) => void;
   onClose: () => void;
 }) {
+  const { locale, t } = useI18n();
   const [items, setItems] = createSignal<Array<LocalRoomAttachment & { attachment: AttachmentMetadata; presentation: AttachmentPresentation }>>([]);
   const [cursor, setCursor] = createSignal<LocalRoomAttachmentCursor | null>(null);
   const [hasMore, setHasMore] = createSignal(true);
@@ -85,35 +87,36 @@ export function ConversationMediaDialog(props: {
       });
       setItems((current) => [...current, ...normalized]);
       setCursor(page.next_cursor); setHasMore(Boolean(page.next_cursor));
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "无法读取本机媒体索引"); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : t("media.error.load")); }
     finally { setLoading(false); }
   }
 
   onMount(() => void loadMore());
-  const labels: Array<{ value: MediaFilter; label: string }> = [
-    { value: "all", label: "全部" }, { value: "image", label: "图片" }, { value: "audio", label: "音频" }, { value: "file", label: "文件" },
+  const labels = (): Array<{ value: MediaFilter; label: string }> => [
+    { value: "all", label: t("media.filters.all") }, { value: "image", label: t("media.filters.image") },
+    { value: "audio", label: t("media.filters.audio") }, { value: "file", label: t("media.filters.file") },
   ];
 
-  return <Dialog id="conversation-media" title="对话媒体" description={`${props.roomTitle} · 仅显示这台设备已索引的内容`} onClose={props.onClose} class="sm:max-w-3xl">
-    <div class="sticky top-0 z-10 flex gap-1 overflow-x-auto border-b border-black/5 bg-white px-4 py-2" aria-label="媒体筛选">
-      <For each={labels}>{(item) => <button type="button" aria-pressed={filter() === item.value} class={`min-h-10 shrink-0 rounded-lg px-3 text-sm font-semibold ${filter() === item.value ? "bg-brand-soft text-brand" : "text-muted hover:bg-neutral-100"}`} onClick={() => setFilter(item.value)}>{item.label}</button>}</For>
+  return <Dialog id="conversation-media" title={t("media.title")} description={t("media.description", { title: props.roomTitle })} onClose={props.onClose} class="sm:max-w-3xl">
+    <div class="sticky top-0 z-10 flex gap-1 overflow-x-auto border-b border-black/5 bg-white px-4 py-2" aria-label={t("media.filters.label")}>
+      <For each={labels()}>{(item) => <button type="button" aria-pressed={filter() === item.value} class={`min-h-10 shrink-0 rounded-lg px-3 text-sm font-semibold ${filter() === item.value ? "bg-brand-soft text-brand" : "text-muted hover:bg-neutral-100"}`} onClick={() => setFilter(item.value)}>{item.label}</button>}</For>
     </div>
     <div class="p-4 sm:p-5">
-      <Show when={!props.coverageComplete}><p class="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs/5 text-amber-900">更早的对话历史尚未保存在这台设备上，因此不会出现在这里。</p></Show>
-      <Show when={items().length || loading()} fallback={<div class="grid min-h-52 place-content-center justify-items-center px-6 text-center"><IconPhoto class="size-8 stroke-neutral-300"/><p class="mt-3 text-sm font-medium text-ink">这台设备上还没有媒体</p><p class="mt-1 text-xs/5 text-muted">收到或发送的图片、语音和文件会显示在这里。</p></div>}>
-        <Show when={filtered().length} fallback={<p class="py-16 text-center text-sm text-muted">当前分类中没有内容</p>}>
+      <Show when={!props.coverageComplete}><p class="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs/5 text-amber-900">{t("media.incomplete")}</p></Show>
+      <Show when={items().length || loading()} fallback={<div class="grid min-h-52 place-content-center justify-items-center px-6 text-center"><IconPhoto class="size-8 stroke-neutral-300"/><p class="mt-3 text-sm font-medium text-ink">{t("media.empty.title")}</p><p class="mt-1 text-xs/5 text-muted">{t("media.empty.description")}</p></div>}>
+        <Show when={filtered().length} fallback={<p class="py-16 text-center text-sm text-muted">{t("media.empty.filter")}</p>}>
           <div class="grid grid-cols-2 gap-3 sm:grid-cols-3" role="list">
             <For each={filtered()}>{(item) => <div role="listitem" class="min-w-0"><button type="button" class="flex h-full w-full flex-col overflow-hidden rounded-xl bg-white text-left ring-1 ring-black/8 transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand motion-reduce:transform-none" onClick={() => props.onOpenMessage(item.message_id)}>
               <Show when={item.presentation === "image"} fallback={<div class="grid aspect-[4/3] place-items-center bg-neutral-100"><Show when={item.presentation === "audio"} fallback={<IconFile class="size-8 stroke-neutral-400"/>}><IconMicrophone class="size-8 stroke-neutral-400"/></Show></div>}>
                 <LocalImageThumbnail attachment={item.attachment} loadCached={props.loadCachedImage}/>
               </Show>
-              <span class="block w-full min-w-0 p-2.5"><strong class="block truncate text-sm font-medium text-ink">{item.presentation === "audio" && item.attachment.duration_ms ? `语音 · ${Math.max(1, Math.round(item.attachment.duration_ms / 1000))} 秒` : item.attachment.name}</strong><small class="mt-1 block truncate text-xs text-muted">{props.displayName(item.sender)} · {new Date(Number(item.created_at)).toLocaleDateString("zh-CN")} · {formatBytes(item.attachment.size)}</small></span>
+              <span class="block w-full min-w-0 p-2.5"><strong class="block truncate text-sm font-medium text-ink">{item.presentation === "audio" && item.attachment.duration_ms ? t("media.voiceDuration", { seconds: Math.max(1, Math.round(item.attachment.duration_ms / 1000)) }) : item.attachment.name}</strong><small class="mt-1 block truncate text-xs text-muted">{props.displayName(item.sender)} · {new Date(Number(item.created_at)).toLocaleDateString(locale())} · {formatBytes(item.attachment.size)}</small></span>
             </button></div>}</For>
           </div>
         </Show>
       </Show>
-      <Show when={error()}><div role="alert" class="mt-4 flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700"><span class="min-w-0">{error()}</span><button type="button" class="flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 font-semibold hover:bg-red-100" onClick={() => void loadMore()}><IconRefresh class="size-4 shrink-0 stroke-red-600"/>重试</button></div></Show>
-      <Show when={hasMore() && !error()}><div class="mt-5 flex justify-center"><button type="button" disabled={loading()} class="min-h-10 rounded-lg bg-neutral-100 px-4 text-sm font-semibold text-ink hover:bg-neutral-200 disabled:opacity-60" onClick={() => void loadMore()}>{loading() ? "正在读取…" : "显示更早媒体"}</button></div></Show>
+      <Show when={error()}><div role="alert" class="mt-4 flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700"><span class="min-w-0">{error()}</span><button type="button" class="flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 font-semibold hover:bg-red-100" onClick={() => void loadMore()}><IconRefresh class="size-4 shrink-0 stroke-red-600"/>{t("media.retry")}</button></div></Show>
+      <Show when={hasMore() && !error()}><div class="mt-5 flex justify-center"><button type="button" disabled={loading()} class="min-h-10 rounded-lg bg-neutral-100 px-4 text-sm font-semibold text-ink hover:bg-neutral-200 disabled:opacity-60" onClick={() => void loadMore()}>{loading() ? t("media.loading") : t("media.loadOlder")}</button></div></Show>
     </div>
   </Dialog>;
 }
