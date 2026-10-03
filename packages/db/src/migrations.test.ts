@@ -9,7 +9,7 @@ describe("versioned local PGlite migrations", () => {
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await expect(migrateLocalSchema(db)).resolves.toBe(LOCAL_SCHEMA_VERSION);
     expect((await db.query("SELECT version,migration_name FROM local_schema_meta WHERE id = 1")).rows)
-      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "attachment_send_cleanup" }]);
+      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "messaging_privacy_preferences" }]);
     expect((await db.query("SELECT user_id FROM users")).rows).toEqual([{ user_id: "@alice:example.com" }]);
     await db.close();
   });
@@ -37,6 +37,14 @@ describe("versioned local PGlite migrations", () => {
     const db = new PGlite(); await migrateLocalSchema(db);
     await db.query("INSERT INTO room_preferences (room_id,manually_unread,updated_at) VALUES ('!room:example.com',TRUE,1)");
     expect((await db.query("SELECT manually_unread FROM room_preferences")).rows).toEqual([{ manually_unread: true }]);
+    await db.close();
+  });
+
+  it("adds device-local read-receipt and typing privacy preferences", async () => {
+    const db = new PGlite(); await migrateLocalSchema(db);
+    await db.query("INSERT INTO device_preferences (id,updated_at) VALUES (1,1)");
+    expect((await db.query("SELECT send_read_receipts,send_typing_indicators FROM device_preferences")).rows)
+      .toEqual([{ send_read_receipts: true, send_typing_indicators: true }]);
     await db.close();
   });
 

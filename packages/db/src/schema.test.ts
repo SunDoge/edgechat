@@ -1,13 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
-import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, MESSAGES_AFTER_SQL, PROMOTE_STAGED_OUTGOING_EVENT_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_LIST_ACTIVITIES_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
+import { ADVANCE_ROOM_SEQUENCE_SQL, APPLY_ROOM_PROFILE_SQL, CLEAR_QUEUED_READ_RECEIPTS_SQL, FIRST_UNREAD_VISIBLE_MESSAGE_SQL, MARK_EVENT_PROCESSED_SQL, MESSAGES_AFTER_SQL, PROMOTE_STAGED_OUTGOING_EVENT_SQL, ROOM_ATTACHMENTS_BEFORE_SQL, ROOM_ATTACHMENTS_FIRST_PAGE_SQL, ROOM_LIST_ACTIVITIES_SQL, ROOM_UNREAD_COUNTS_SQL, SET_HIDDEN_ROOM_MEMBERS_SQL, assembleMessageWindow, assembleSignedEventRange, normalizeVector, projectEditedPayload, rankImageEmbeddings, type LocalMessage } from "./index";
 import { LOCAL_CLEAR_ACCOUNT_DATA, LOCAL_PREPARE_LINKED_DEVICE_HISTORY, LOCAL_SCHEMA } from "./schema";
-import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4, LOCAL_SCHEMA_V5, LOCAL_SCHEMA_V6, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9 } from "./migrations";
+import { LOCAL_SCHEMA_V2, LOCAL_SCHEMA_V3, LOCAL_SCHEMA_V4, LOCAL_SCHEMA_V5, LOCAL_SCHEMA_V6, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9, LOCAL_SCHEMA_V10, migrateLocalSchema } from "./migrations";
 import { purgeRoomBefore, setRoomRetention } from "./retention";
 import { messageExpiryAt, purgeExpiredMessages } from "./expiry";
 
 describe("PGlite local full-text index", () => {
+  it("cancels only unsent read receipts when device sharing is disabled", async () => {
+    const db = new PGlite(); await migrateLocalSchema(db);
+    await db.query(`INSERT INTO outbox (event_id,message_id,room_id,event_json,plaintext,payload,status,created_at,updated_at) VALUES
+      ('read-pending','read-pending','!room:example.com','{}','','{"kind":"receipt.read"}','pending',1,1),
+      ('read-sending','read-sending','!room:example.com','{}','','{"kind":"receipt.read"}','sending',2,2),
+      ('message-pending','message-pending','!room:example.com','{}','hello','{"kind":"message"}','pending',3,3)`);
+    await db.exec(CLEAR_QUEUED_READ_RECEIPTS_SQL);
+    expect((await db.query("SELECT event_id,status FROM outbox ORDER BY event_id")).rows).toEqual([
+      { event_id: "message-pending", status: "pending" },
+      { event_id: "read-sending", status: "sending" },
+    ]);
+    await db.close();
+  });
+
   it("keeps the newest encrypted room profile by authoritative room sequence", async () => {
     const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7);
     const room = "!profile:example.com";
@@ -133,7 +147,7 @@ describe("PGlite local full-text index", () => {
   });
 
   it("keeps searchable history and archive keys but strips source-device queues from a linked-device snapshot", async () => {
-    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8); await db.exec(LOCAL_SCHEMA_V9);
+    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8); await db.exec(LOCAL_SCHEMA_V9); await db.exec(LOCAL_SCHEMA_V10);
     await db.query("INSERT INTO account_state VALUES (1,'@linked:example.com','Linked',1)");
     await db.query("INSERT INTO messages (event_id,message_id,room_id,seq,sender,device_id,event_type,created_at,ciphertext,plaintext,payload,search_vector) VALUES ('event','$message:example.com','!room:example.com',1,'@linked:example.com','old-device','message.text',1,'cipher','kept history','{}',to_tsvector('simple','kept history'))");
     await db.query("INSERT INTO archive_keys VALUES ('segment','!room:example.com',$1,1,10,1)", [new Uint8Array(32)]);
@@ -401,7 +415,7 @@ describe("PGlite local full-text index", () => {
 
   it("clears plaintext, crypto state, queues, and cursors for account deletion", async () => {
     const db = new PGlite();
-    await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8); await db.exec(LOCAL_SCHEMA_V9);
+    await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V2); await db.exec(LOCAL_SCHEMA_V3); await db.exec(LOCAL_SCHEMA_V4); await db.exec(LOCAL_SCHEMA_V5); await db.exec(LOCAL_SCHEMA_V6); await db.exec(LOCAL_SCHEMA_V7); await db.exec(LOCAL_SCHEMA_V8); await db.exec(LOCAL_SCHEMA_V9); await db.exec(LOCAL_SCHEMA_V10);
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await db.query("INSERT INTO crypto_state VALUES ('!room:example.com',1,$1,'openmls',1)", [new Uint8Array([1, 2, 3])]);
     await db.query("INSERT INTO archive_segment_metadata VALUES ('segment','!room:example.com',1,10,100,$1,$2,1)", [new Uint8Array([1]), new Uint8Array([2])]);

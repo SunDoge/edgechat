@@ -222,6 +222,8 @@ export const PROMOTE_STAGED_OUTGOING_EVENT_SQL = `WITH staged AS (
 )
 SELECT event_id FROM admitted`;
 
+export const CLEAR_QUEUED_READ_RECEIPTS_SQL = "DELETE FROM outbox WHERE payload->>'kind' = 'receipt.read' AND status <> 'sending'";
+
 export const ADVANCE_ROOM_SEQUENCE_SQL = `WITH RECURSIVE contiguous(seq) AS (
   SELECT processed_through_seq FROM room_sync_state WHERE room_id = $1
   UNION ALL
@@ -1229,6 +1231,36 @@ export class LocalDatabase {
        ON CONFLICT (id) DO UPDATE SET share_presence = EXCLUDED.share_presence, updated_at = EXCLUDED.updated_at`,
       [enabled, Date.now()],
     );
+  }
+
+  async readReceiptsEnabled(): Promise<boolean> {
+    const [row] = await this.query<{ send_read_receipts: boolean }>("SELECT send_read_receipts FROM device_preferences WHERE id = 1");
+    return row?.send_read_receipts ?? true;
+  }
+
+  async setReadReceiptsEnabled(enabled: boolean): Promise<void> {
+    await this.query(
+      `INSERT INTO device_preferences (id,send_read_receipts,updated_at) VALUES (1,$1,$2)
+       ON CONFLICT (id) DO UPDATE SET send_read_receipts = EXCLUDED.send_read_receipts, updated_at = EXCLUDED.updated_at`,
+      [enabled, Date.now()],
+    );
+  }
+
+  async typingIndicatorsEnabled(): Promise<boolean> {
+    const [row] = await this.query<{ send_typing_indicators: boolean }>("SELECT send_typing_indicators FROM device_preferences WHERE id = 1");
+    return row?.send_typing_indicators ?? true;
+  }
+
+  async setTypingIndicatorsEnabled(enabled: boolean): Promise<void> {
+    await this.query(
+      `INSERT INTO device_preferences (id,send_typing_indicators,updated_at) VALUES (1,$1,$2)
+       ON CONFLICT (id) DO UPDATE SET send_typing_indicators = EXCLUDED.send_typing_indicators, updated_at = EXCLUDED.updated_at`,
+      [enabled, Date.now()],
+    );
+  }
+
+  async clearQueuedReadReceipts(): Promise<void> {
+    await this.query(CLEAR_QUEUED_READ_RECEIPTS_SQL);
   }
 
   async composerDrafts(): Promise<LocalComposerDraft[]> {

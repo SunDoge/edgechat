@@ -79,6 +79,36 @@ afterEach(async () => {
 });
 
 describe("real browser local database", () => {
+  it("persists device-local messaging privacy and removes only unsent read receipts", async () => {
+    const profileId = crypto.randomUUID(); profiles.add(profileId);
+    const roomId = "!browser-privacy:example.com" as RoomId;
+    const readEvent = {
+      event_id: "$browser-read-receipt:example.com", room_id: roomId, sender: "@alice:example.com", device_id: "browser-device",
+      type: "receipt.read", created_at: 1, ciphertext: "encrypted-read", metadata: {}, signature: "read-signature",
+    } satisfies ClientEvent;
+    const messageEvent = {
+      event_id: "$browser-private-message:example.com", room_id: roomId, sender: "@alice:example.com", device_id: "browser-device",
+      type: "message.text", created_at: 2, ciphertext: "encrypted-message", metadata: {}, signature: "message-signature",
+    } satisfies ClientEvent;
+    const database = new LocalDatabase(profileId);
+    try {
+      expect(await database.readReceiptsEnabled()).toBe(true);
+      expect(await database.typingIndicatorsEnabled()).toBe(true);
+      await database.setReadReceiptsEnabled(false);
+      await database.setTypingIndicatorsEnabled(false);
+      await database.enqueueOutbox(readEvent, "", { version: 1, kind: "receipt.read", room_id: roomId, up_to_seq: 4, read_at: 1 });
+      await database.enqueueOutbox(messageEvent, "hello", { version: 2, kind: "message", message_id: messageEvent.event_id, parts: [] });
+      await database.clearQueuedReadReceipts();
+      expect((await database.outbox(roomId)).map((item) => item.event_id)).toEqual([messageEvent.event_id]);
+    } finally { await database.close(); }
+
+    const reopened = new LocalDatabase(profileId);
+    try {
+      expect(await reopened.readReceiptsEnabled()).toBe(false);
+      expect(await reopened.typingIndicatorsEnabled()).toBe(false);
+    } finally { await reopened.close(); }
+  });
+
   it("durably schedules physical PGlite destruction before profile metadata can be removed", async () => {
     const sourceProfileId = crypto.randomUUID();
     const targetProfileId = crypto.randomUUID();

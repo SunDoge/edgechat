@@ -68,8 +68,10 @@ export const LOCAL_SCHEMA_V9 = `CREATE TABLE attachment_send_cleanup (
   updated_at BIGINT NOT NULL
 );
 CREATE INDEX idx_attachment_send_cleanup_order ON attachment_send_cleanup(created_at, event_id)`;
+export const LOCAL_SCHEMA_V10 = `ALTER TABLE device_preferences ADD COLUMN send_read_receipts BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE device_preferences ADD COLUMN send_typing_indicators BOOLEAN NOT NULL DEFAULT TRUE`;
 
-export const LOCAL_SCHEMA_VERSION = 9;
+export const LOCAL_SCHEMA_VERSION = 10;
 export const LOCAL_SCHEMA_MIGRATIONS: readonly LocalSchemaMigration[] = Object.freeze([
   { version: 1, name: "initial_local_schema", checksum: "f1e403a6e8c19ccd6943e34523664090f1a2aec623a88ea9d1588ef1278b9a69", sql: LOCAL_SCHEMA },
   { version: 2, name: "room_membership_outbox", checksum: "c30cd87e8264841f9255936181a7ed428750d4d217f41f8633a2f93a07acdc59", sql: LOCAL_SCHEMA_V2 },
@@ -80,6 +82,7 @@ export const LOCAL_SCHEMA_MIGRATIONS: readonly LocalSchemaMigration[] = Object.f
   { version: 7, name: "authenticated_event_senders", checksum: "7e5abc0f324b0e27e4ab3efb0e03c3d4ed85d57698b138124a5e7c45c28c23dc", sql: LOCAL_SCHEMA_V7 },
   { version: 8, name: "outgoing_mls_staging", checksum: "d2d78fda2acc6f33973996303caaacb098e6112b58389995b628681353537036", sql: LOCAL_SCHEMA_V8 },
   { version: 9, name: "attachment_send_cleanup", checksum: "e3f6aa1338299d386a5abdb27a813652b99e8ae7b603debcae6460c47aa9ba6a", sql: LOCAL_SCHEMA_V9 },
+  { version: 10, name: "messaging_privacy_preferences", checksum: "840013f3514b7d1b32b4f4447bf7340cc64e538356d44be9c5b6aebe71a4c688", sql: LOCAL_SCHEMA_V10 },
 ]);
 
 const LOCAL_SCHEMA_META = `CREATE TABLE IF NOT EXISTS local_schema_meta (
