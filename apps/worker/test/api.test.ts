@@ -893,6 +893,42 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT count(*) AS count FROM profile_avatar_deletions").first()).toEqual({ count: 0 });
   });
 
+  it("circuit-breaks a missing profile avatar and repairs the same key without changing quota", async () => {
+    const account = await register("profile_avatar_repair", await device("profile-avatar-repair-device"));
+    const bytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 6, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+    const headers = { authorization: `Bearer ${account.access_token}`, "content-type": "image/webp", "content-length": "12" };
+    const uploaded = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", { method: "PUT", headers, body: bytes });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(200);
+    const profile = await uploaded.json() as { profile: { avatar_url: string } };
+    const stored = await env.DB.prepare("SELECT avatar_object_key, avatar_sha256 FROM users WHERE user_id = ?").bind(account.user_id)
+      .first<{ avatar_object_key: string; avatar_sha256: string }>();
+    await env.ARCHIVE.delete(stored!.avatar_object_key);
+
+    const missing = await SELF.fetch(`https://edgechat.test${profile.profile.avatar_url}`);
+    expect(missing.status).toBe(503);
+    expect(missing.headers.get("retry-after")).toBe("30");
+    expect(await missing.json()).toMatchObject({ code: "avatar_repair_pending" });
+    expect(await env.DB.prepare("SELECT object_key FROM profile_avatar_repair_jobs WHERE user_id = ?").bind(account.user_id).first())
+      .toEqual({ object_key: stored!.avatar_object_key });
+
+    // Even if the key reappears out-of-band, the D1 circuit prevents another
+    // GET from trusting it before the authenticated owner repair completes.
+    await env.ARCHIVE.put(stored!.avatar_object_key, bytes, { customMetadata: { sha256: stored!.avatar_sha256 } });
+    const circuit = await SELF.fetch(`https://edgechat.test${profile.profile.avatar_url}`);
+    expect(circuit.status).toBe(503);
+    expect(await circuit.json()).toMatchObject({ code: "avatar_repair_pending" });
+
+    const repaired = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", { method: "PUT", headers, body: bytes });
+    expect(repaired.status, await repaired.clone().text()).toBe(200);
+    expect(await env.DB.prepare("SELECT user_id FROM profile_avatar_repair_jobs WHERE user_id = ?").bind(account.user_id).first()).toBeNull();
+    const restored = await SELF.fetch(`https://edgechat.test${profile.profile.avatar_url}`);
+    expect(restored.status).toBe(200);
+    expect(new Uint8Array(await restored.arrayBuffer())).toEqual(bytes);
+    const usage = await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${account.access_token}` } });
+    expect(await usage.json()).toMatchObject({ avatar_bytes: 12, avatar_objects: 1, used_bytes: 12, used_objects: 1 });
+    expect((await env.ARCHIVE.list({ prefix: "profiles/avatars/" })).objects).toHaveLength(1);
+  });
+
   it("does not let routine avatar GC race a fresh write intent or delete the active avatar", async () => {
     const account = await register("profile_avatar_gc", await device("profile-avatar-gc-device"));
     const freshKey = `profiles/avatars/fresh-${crypto.randomUUID()}.webp`;

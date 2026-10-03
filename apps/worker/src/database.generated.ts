@@ -439,6 +439,19 @@ export interface ProfileAvatarDeletions {
   requested_at: number;
 }
 
+export interface ProfileAvatarRepairJobs {
+  attempts: Generated<number>;
+  avatar_sha256: string;
+  byte_size: number;
+  detected_at: number;
+  last_error: string | null;
+  lease_expires_at: number | null;
+  lease_token: string | null;
+  object_key: string;
+  updated_at: number;
+  user_id: string;
+}
+
 export interface PushSubscriptions {
   auth: string;
   created_at: number;
@@ -688,6 +701,7 @@ export interface DB {
   passkeys: Passkeys;
   pending_r2_writes: PendingR2Writes;
   profile_avatar_deletions: ProfileAvatarDeletions;
+  profile_avatar_repair_jobs: ProfileAvatarRepairJobs;
   push_subscriptions: PushSubscriptions;
   retention_object_deletions: RetentionObjectDeletions;
   room_device_keys: RoomDeviceKeys;

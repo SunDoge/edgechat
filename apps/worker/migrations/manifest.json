@@ -192,6 +192,10 @@
     {
       "file": "0048_profile_avatar_cleanup_claims.sql",
       "sha256": "6e41dae2c2c15abe03aaae14f55a7e52e5ba4a3956a5ee9a8e0bb69864db04dd"
+    },
+    {
+      "file": "0049_profile_avatar_repair.sql",
+      "sha256": "ee0906197afff7c4f0a00cd9e0dad74eba4c039cd51b906215446f339a5e618a"
     }
   ]
 }

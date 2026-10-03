@@ -31,6 +31,7 @@ const ATTACHMENT_REPAIR_LEASE_MS = 5 * 60 * 1_000;
 const ARCHIVE_REPAIR_LEASE_MS = 5 * 60 * 1_000;
 const PROFILE_AVATAR_WRITE_INTENT_GRACE_MS = 60 * 60 * 1_000;
 const PROFILE_AVATAR_DELETE_CLAIM_MS = 60 * 60 * 1_000;
+const PROFILE_AVATAR_REPAIR_LEASE_MS = 60 * 60 * 1_000;
 const BOT_TOKEN_MS = 365 * 24 * 60 * 60 * 1_000;
 const BOT_RATE_WINDOW_MS = 60_000;
 const BOT_DEFAULT_MESSAGES_PER_MINUTE = 60;
@@ -544,11 +545,12 @@ async function operatorReadiness(env: Env): Promise<Response> {
       SELECT requested_at FROM profile_avatar_deletions
     )) AS pending_object_deletions_oldest_at,
     (SELECT count(*) FROM history_repair_jobs) + (SELECT count(*) FROM attachment_repair_jobs)
-      + (SELECT count(*) FROM archive_segment_repair_jobs) AS repair_jobs,
+      + (SELECT count(*) FROM archive_segment_repair_jobs) + (SELECT count(*) FROM profile_avatar_repair_jobs) AS repair_jobs,
     (SELECT min(detected_at) FROM (
       SELECT detected_at FROM history_repair_jobs UNION ALL
       SELECT detected_at FROM attachment_repair_jobs UNION ALL
-      SELECT detected_at FROM archive_segment_repair_jobs
+      SELECT detected_at FROM archive_segment_repair_jobs UNION ALL
+      SELECT detected_at FROM profile_avatar_repair_jobs
     )) AS repair_jobs_oldest_at,
     (SELECT count(*) FROM account_deletions WHERE status != 'complete') AS account_deletions,
     (SELECT min(updated_at) FROM account_deletions WHERE status != 'complete') AS account_deletions_oldest_at,
@@ -1156,11 +1158,53 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
   if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "image/webp") throw new HttpError(415, "Avatar must be WebP", "invalid_avatar_type");
   const buffer = await request.arrayBuffer(); const bytes = new Uint8Array(buffer);
   if (bytes.byteLength !== declaredSize || !isWebp(bytes)) throw new HttpError(400, "Invalid WebP avatar", "invalid_avatar");
-  const digest = b64url(await crypto.subtle.digest("SHA-256", bytes));
+  const digestBytes = await crypto.subtle.digest("SHA-256", bytes);
+  const digest = b64url(digestBytes);
   const db = createDatabase(env.DB);
   const before = await db.selectFrom("users").select(["user_id", "display_name", "bio", "avatar_id", "avatar_object_key", "avatar_sha256", "avatar_bytes"])
     .where("user_id", "=", auth.userId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirstOrThrow();
-  if (before.avatar_sha256 === digest && before.avatar_id) return json({ profile: profileView(before) });
+  if (before.avatar_sha256 === digest && before.avatar_id && before.avatar_object_key) {
+    const repair = await db.selectFrom("profile_avatar_repair_jobs").select(["object_key", "avatar_sha256", "byte_size"])
+      .where("user_id", "=", auth.userId).executeTakeFirst();
+    if (!repair) return json({ profile: profileView(before) });
+    if (repair.object_key !== before.avatar_object_key || repair.avatar_sha256 !== digest || repair.byte_size !== bytes.byteLength) {
+      throw new Error("Stored profile avatar repair job does not match the active avatar");
+    }
+    const leaseToken = randomId(18); const leaseNow = Date.now();
+    const leased = await db.updateTable("profile_avatar_repair_jobs")
+      .set({ lease_token: leaseToken, lease_expires_at: leaseNow + PROFILE_AVATAR_REPAIR_LEASE_MS, updated_at: leaseNow })
+      .where("user_id", "=", auth.userId).where((eb) => eb.or([eb("lease_token", "is", null), eb("lease_expires_at", "<=", leaseNow)]))
+      .returning("user_id").executeTakeFirst();
+    if (!leased) throw new HttpError(409, "Profile avatar repair is already in progress", "avatar_upload_busy", { "retry-after": "30" });
+    try {
+      const stored = await objectStore(env).put(before.avatar_object_key, buffer, {
+        expectedSize: bytes.byteLength, checksumSha256: digestBytes, contentType: "image/webp",
+        cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
+      });
+      if (!stored || stored.size !== bytes.byteLength) throw new Error("Profile avatar repair returned invalid object metadata");
+      const completed = await db.deleteFrom("profile_avatar_repair_jobs").where("user_id", "=", auth.userId).where("lease_token", "=", leaseToken)
+        .where((eb) => eb.exists(eb.selectFrom("users").select("user_id").where("user_id", "=", auth.userId)
+          .where("avatar_object_key", "=", before.avatar_object_key).where("avatar_sha256", "=", digest).where("avatar_bytes", "=", bytes.byteLength)))
+        .returning("user_id").executeTakeFirst();
+      if (!completed) {
+        const current = await db.selectFrom("users").select(["avatar_object_key", "avatar_sha256", "avatar_bytes"])
+          .where("user_id", "=", auth.userId).executeTakeFirst();
+        if (current?.avatar_object_key === before.avatar_object_key && current.avatar_sha256 === digest && current.avatar_bytes === bytes.byteLength) {
+          return json({ profile: profileView(before) });
+        }
+        await objectStore(env).delete(before.avatar_object_key);
+        await db.deleteFrom("profile_avatar_repair_jobs").where("user_id", "=", auth.userId).where("lease_token", "=", leaseToken).execute();
+        throw new HttpError(409, "Profile changed while repairing the avatar", "profile_conflict");
+      }
+      return json({ profile: profileView(before) });
+    } catch (error) {
+      await db.updateTable("profile_avatar_repair_jobs").set({
+        attempts: sql<number>`attempts + 1`, last_error: (error instanceof Error ? error.message : "avatar repair failed").slice(0, 500),
+        lease_token: null, lease_expires_at: null, updated_at: Date.now(),
+      }).where("user_id", "=", auth.userId).where("lease_token", "=", leaseToken).execute();
+      throw error;
+    }
+  }
   const objectKey = `profiles/avatars/${await sha256(auth.userId)}/${digest}.webp`;
   const avatarId = randomId(18); const now = Date.now(); const limits = defaultStorageLimits(env);
   // This row doubles as a write intent. A crash after the R2 put but before
@@ -1169,7 +1213,7 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
     throw new HttpError(409, "Another profile avatar upload or cleanup is still in progress", "avatar_upload_busy", { "retry-after": "30" });
   }
   await objectStore(env).put(objectKey, buffer, {
-    expectedSize: bytes.byteLength, contentType: "image/webp", cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
+    expectedSize: bytes.byteLength, checksumSha256: digestBytes, contentType: "image/webp", cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
   });
   const eventId = `profile:${auth.userId}:${now}:${randomId(8)}`;
   const payload = profileUpdatePayload(auth.userId, before.display_name, avatarId);
@@ -1187,6 +1231,8 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
           <= COALESCE((SELECT object_limit FROM user_storage_limits WHERE user_id = ?5), ?8)`)
       .bind(avatarId, objectKey, digest, bytes.byteLength, auth.userId, before.avatar_sha256 ?? "", limits.bytes, limits.objects),
     ...profileUpdateStatements(env, auth.userId, eventId, payload, now, { avatarId }),
+    env.DB.prepare(`DELETE FROM profile_avatar_repair_jobs WHERE user_id = ?1
+      AND EXISTS (SELECT 1 FROM users WHERE user_id = ?1 AND avatar_object_key = ?2)`).bind(auth.userId, objectKey),
     env.DB.prepare(`DELETE FROM profile_avatar_deletions WHERE object_key = ?1
       AND EXISTS (SELECT 1 FROM users WHERE user_id = ?2 AND avatar_object_key = ?1)`).bind(objectKey, auth.userId),
     ...(before.avatar_object_key ? [env.DB.prepare(`INSERT OR IGNORE INTO profile_avatar_deletions
@@ -1220,6 +1266,8 @@ async function deleteProfileAvatar(env: Env, auth: AuthContext): Promise<Respons
     env.DB.prepare("UPDATE users SET avatar_id = NULL, avatar_object_key = NULL, avatar_sha256 = NULL, avatar_bytes = 0 WHERE user_id = ?1 AND avatar_object_key = ?2")
       .bind(auth.userId, before.avatar_object_key),
     ...profileUpdateStatements(env, auth.userId, eventId, profileUpdatePayload(auth.userId, before.display_name, null), now, { avatarId: null }),
+    env.DB.prepare(`DELETE FROM profile_avatar_repair_jobs WHERE user_id = ?1
+      AND EXISTS (SELECT 1 FROM users WHERE user_id = ?1 AND avatar_object_key IS NULL)`).bind(auth.userId),
     env.DB.prepare("INSERT OR IGNORE INTO profile_avatar_deletions (object_key, owner_user_id, byte_size, requested_at, attempts, last_error) VALUES (?1, ?2, ?3, ?4, 0, NULL)")
       .bind(before.avatar_object_key, auth.userId, before.avatar_bytes, now),
   ]);
@@ -1230,11 +1278,40 @@ async function deleteProfileAvatar(env: Env, auth: AuthContext): Promise<Respons
 
 async function publicProfileAvatar(env: Env, avatarId: string): Promise<Response> {
   if (!/^[A-Za-z0-9_-]{24}$/.test(avatarId)) throw new HttpError(404, "Avatar not found", "not_found");
-  const row = await createDatabase(env.DB).selectFrom("users").select(["avatar_object_key", "avatar_sha256", "avatar_bytes"])
-    .where("avatar_id", "=", avatarId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirst();
+  const db = createDatabase(env.DB);
+  const row = await db.selectFrom("users as u").leftJoin("profile_avatar_repair_jobs as repair", "repair.user_id", "u.user_id")
+    .select(["u.user_id", "u.avatar_object_key", "u.avatar_sha256", "u.avatar_bytes", "repair.user_id as repair_user_id"])
+    .where("u.avatar_id", "=", avatarId).where("u.deletion_requested_at", "is", null).where("u.deleted_at", "is", null).executeTakeFirst();
   if (!row?.avatar_object_key || !row.avatar_sha256) throw new HttpError(404, "Avatar not found", "not_found");
+  if (row.repair_user_id) throw new HttpError(503, "Avatar is awaiting an exact owner repair", "avatar_repair_pending", { "retry-after": "30" });
   const object = await objectStore(env).get(row.avatar_object_key);
-  if (!object || object.size !== row.avatar_bytes) throw new HttpError(503, "Avatar is temporarily unavailable", "avatar_unavailable");
+  const now = Date.now();
+  const markRepair = async (): Promise<boolean> => Boolean(await env.DB.prepare(`INSERT INTO profile_avatar_repair_jobs
+      (user_id, object_key, avatar_sha256, byte_size, detected_at, updated_at, attempts, last_error, lease_token, lease_expires_at)
+    SELECT user_id, avatar_object_key, avatar_sha256, avatar_bytes, ?1, ?1, 0, NULL, NULL, NULL
+    FROM users
+    WHERE user_id = ?2 AND avatar_id = ?3 AND avatar_object_key = ?4 AND avatar_sha256 = ?5 AND avatar_bytes = ?6
+      AND deletion_requested_at IS NULL AND deleted_at IS NULL
+    ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at
+      WHERE profile_avatar_repair_jobs.object_key = excluded.object_key
+        AND profile_avatar_repair_jobs.avatar_sha256 = excluded.avatar_sha256
+        AND profile_avatar_repair_jobs.byte_size = excluded.byte_size
+    RETURNING user_id`).bind(now, row.user_id, avatarId, row.avatar_object_key, row.avatar_sha256, row.avatar_bytes).first());
+  if (!object?.body) {
+    if (!(await markRepair())) throw new HttpError(404, "Avatar not found", "not_found");
+    throw new HttpError(503, "Avatar is temporarily unavailable and awaiting exact owner repair", "avatar_repair_pending", { "retry-after": "30" });
+  }
+  if (object.size !== row.avatar_bytes || object.metadata.sha256 !== row.avatar_sha256) {
+    await object.body.cancel().catch(() => undefined);
+    if (!(await markRepair())) throw new HttpError(404, "Avatar not found", "not_found");
+    try { await objectStore(env).delete(row.avatar_object_key); }
+    catch (error) {
+      await db.updateTable("profile_avatar_repair_jobs").set({
+        attempts: sql<number>`attempts + 1`, last_error: (error instanceof Error ? error.message : "corrupt avatar deletion failed").slice(0, 500), updated_at: Date.now(),
+      }).where("user_id", "=", row.user_id).execute();
+    }
+    throw new HttpError(503, "Avatar failed integrity validation and is awaiting exact owner repair", "avatar_repair_pending", { "retry-after": "30" });
+  }
   return new Response(object.body, { headers: {
     "content-type": "image/webp", "content-length": String(object.size), etag: `"${row.avatar_sha256}"`,
     "cache-control": "public, max-age=31536000, immutable", "cross-origin-resource-policy": "same-origin",

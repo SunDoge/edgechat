@@ -201,6 +201,16 @@ replacement path remains one PUT and one exact DELETE, and a provider deletion
 outage cannot turn repeated avatar changes into unbounded objects. No avatar
 path uses LIST, discovery HEAD, or GET for cleanup.
 
+The public avatar read also validates D1's expected size and SHA-256 metadata.
+The first missing or inconsistent object creates a D1 repair job; while that job
+exists, later reads fail from D1 without another object-store GET. The owner can
+select the same local image to acquire a bounded repair lease and overwrite the
+same content-addressed key with a provider-verified checksum. Completion removes
+the circuit without changing storage quota or object count. A lost repair
+response is served from the now-cleared D1 job on retry; a crash before commit
+leaves the job for lease-expiry retry. This path uses one repair PUT and no LIST
+or HEAD.
+
 Archive compaction likewise retries at most once with the lease's preallocated
 segment ID and byte-identical ciphertext. The Worker binds an already committed
 ID to its room, sequence range, size and digest; a lost-response retry is served
