@@ -168,6 +168,10 @@ The R2 adapter normalizes Range, metadata, SHA-256 mismatch and create-if-absent
 semantics. The SigV4 S3/B2 adapter must pass the same contract against the
 selected live provider before that provider is deployable. D1—not ETag or provider metadata—is
 authoritative for keys, sizes, digests, accounting, retention and repair state.
+Object metadata keys are restricted to lowercase snake_case before any provider
+request. This prevents case-insensitive S3/B2 headers from changing a key such
+as `roomId` during HEAD and breaking exact crash recovery while native R2 still
+appears to work.
 
 Normal attachment upload uses one client-chosen 192-bit opaque ID and one
 conditional PUT. D1 binds that ID to the uploader, room, size and ciphertext
@@ -220,9 +224,14 @@ or HEAD.
 Archive compaction likewise retries at most once with the lease's preallocated
 segment ID and byte-identical ciphertext. The Worker binds an already committed
 ID to its room, sequence range, size and digest; a lost-response retry is served
-from D1 before object-store access, while conflicting reuse is rejected. This
-preserves the device's OPFS repair copy without paying for a second PUT, HEAD or
-LIST after a successful commit. If both responses fail, the client resolves the
+from D1 before object-store access, while conflicting reuse is rejected. In the
+post-PUT/pre-D1 crash window, the exact pending intent permits one HEAD of that
+key: matching room/segment/range/size/digest metadata commits without a second
+PUT or request-body transfer, while a missing object falls through to the normal
+conditional PUT. A first attempt remains one PUT with no HEAD, and recovery uses
+neither GET nor LIST. This preserves the device's OPFS repair copy without
+retransmitting a 1–10 MiB segment after an ambiguous response. If both responses
+fail, the client resolves the
 same ID/range/size/digest: an existing D1 row is treated as committed, while an
 in-flight claim is marked cancelled before one exact DELETE. The uploader checks
 that marker and revalidates its lease after PUT, immediately before the D1
@@ -234,8 +243,9 @@ sync activity retry that bounded queue from the exact OPFS ciphertext. A new
 compaction for that room is refused while either state—or a post-commit
 `uploaded` retention acknowledgement—remains unresolved, so the room-keyed job
 cannot be overwritten. Recovery uses the committed row or the exact D1 write
-intent even after the original lease has expired; it performs no LIST, HEAD,
-GET, or speculative DELETE. A missing D1 intent is `absent`, and the
+intent even after the original lease has expired. This resolution endpoint (as
+distinct from retrying the upload itself) performs no LIST, HEAD, GET, or
+speculative DELETE. A missing D1 intent is `absent`, and the
 late-uploader lease check owns any eventual exact cleanup. Only an exact
 committed result is acknowledged as retained; only an exact abandoned/absent
 result permits the local repair copy to be removed. Committed metadata is never

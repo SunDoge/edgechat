@@ -2218,7 +2218,7 @@ async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: Au
   await stageR2Write(env, pending);
   try {
     const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.device-history-shard",
-      metadata: { linkId, transferId: transfer.transfer_id, targetDeviceId: (await db.selectFrom("device_links").select("device_id").where("link_id", "=", linkId).executeTakeFirstOrThrow()).device_id, shardIndex: String(shardIndex) } });
+      metadata: { link_id: linkId, transfer_id: transfer.transfer_id, target_device_id: (await db.selectFrom("device_links").select("device_id").where("link_id", "=", linkId).executeTakeFirstOrThrow()).device_id, shard_index: String(shardIndex) } });
     if (!object || object.size !== declaredSize) throw new Error("Device history shard length mismatch");
     const now = Date.now();
     await batch(env.DB, [
@@ -2311,7 +2311,7 @@ async function uploadDeviceLinkHistory(request: Request, env: Env, auth: AuthCon
   const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
   await stageR2Write(env, pending);
   try {
-    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.device-history", metadata: { linkId, targetDeviceId: link.device_id } });
+    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.device-history", metadata: { link_id: linkId, target_device_id: link.device_id } });
     if (!object || object.size !== declaredSize) throw new Error("Device history transfer length mismatch");
     await batch(env.DB, [
       db.updateTable("device_links").set({ history_object_key: objectKey, history_bytes: object.size, history_uploaded_at: Date.now(), history_source_device_id: auth.deviceId, updated_at: Date.now() }).where("link_id", "=", linkId),
@@ -4053,8 +4053,8 @@ async function uploadRoomPeerRecovery(request: Request, env: Env, auth: AuthCont
   await stageR2Write(env, pending);
   try {
     const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.room-recovery",
-      metadata: { recoveryId, roomId: recovery.room_id, sourceDeviceId: auth.deviceId, targetDeviceId: recovery.target_device_id,
-        afterSeq: String(recovery.after_seq), throughSeq: String(recovery.through_seq) } });
+      metadata: { recovery_id: recoveryId, room_id: recovery.room_id, source_device_id: auth.deviceId, target_device_id: recovery.target_device_id,
+        after_seq: String(recovery.after_seq), through_seq: String(recovery.through_seq) } });
     if (!object || object.size !== declaredSize) throw new Error("Peer recovery bundle length mismatch");
     const updated = await db.updateTable("room_peer_recoveries").set({ status: "ready", object_key: objectKey, ciphertext_bytes: object.size,
       lease_token_hash: null, lease_expires_at: null, updated_at: Date.now() }).where("recovery_id", "=", recoveryId)
@@ -4515,8 +4515,8 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
       // second streamed PUT plus its conflict HEAD. A missing object still
       // falls through to one PUT, and a first attempt never gains a HEAD.
       const recovered = await objectStore(env).head(key);
-      if (recovered && (recovered.size !== declaredSize || recovered.metadata.roomId !== roomId
-        || recovered.metadata.uploaderUserId !== auth.userId || recovered.metadata.sha256 !== suppliedDigest.text)) {
+      if (recovered && (recovered.size !== declaredSize || recovered.metadata.room_id !== roomId
+        || recovered.metadata.uploader_user_id !== auth.userId || recovered.metadata.sha256 !== suppliedDigest.text)) {
         await request.body.cancel().catch(() => undefined);
         throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
       }
@@ -4527,7 +4527,7 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
       const limited = exactLengthUploadStream(request.body, declaredSize);
       const put = objectStore(env).put(key, limited.body, {
         ifAbsent: true, expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream",
-        metadata: { roomId, uploaderUserId: auth.userId, sha256: suppliedDigest.text },
+        metadata: { room_id: roomId, uploader_user_id: auth.userId, sha256: suppliedDigest.text },
       });
       try {
         stored = (await Promise.all([put, limited.completed]))[0];
@@ -4540,8 +4540,8 @@ async function uploadAttachment(request: Request, env: Env, auth: AuthContext): 
     if (!stored || stored.size !== declaredSize) {
       if (stored) throw new HttpError(400, "Attachment length or digest mismatch", "invalid_attachment_digest");
       const recovered = await objectStore(env).head(key);
-      if (!recovered || recovered.size !== declaredSize || recovered.metadata.roomId !== roomId
-        || recovered.metadata.uploaderUserId !== auth.userId || recovered.metadata.sha256 !== suppliedDigest.text) {
+      if (!recovered || recovered.size !== declaredSize || recovered.metadata.room_id !== roomId
+        || recovered.metadata.uploader_user_id !== auth.userId || recovered.metadata.sha256 !== suppliedDigest.text) {
         releaseReservation = true;
         throw new HttpError(409, "Attachment ID is already in use", "attachment_id_conflict");
       }
@@ -4727,7 +4727,7 @@ async function uploadAttachmentRepair(request: Request, env: Env, auth: AuthCont
     try {
       stored = await objectStore(env).put(row.object_key, request.body, {
         ifAbsent: true, expectedSize: declaredSize, checksumSha256: digest,
-        contentType: "application/octet-stream", metadata: { roomId: row.room_id, sha256: row.ciphertext_sha256 },
+        contentType: "application/octet-stream", metadata: { room_id: row.room_id, sha256: row.ciphertext_sha256 },
       });
     } catch (error) {
       if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Attachment ciphertext digest mismatch", "invalid_attachment_digest");
@@ -4901,27 +4901,44 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
   const matchesCommitted = (row: { start_seq: number; end_seq: number; byte_size: number; ciphertext_sha256: string | null }): boolean => (
     row.start_seq === start && row.end_seq === end && row.byte_size === declaredSize && row.ciphertext_sha256 === suppliedDigest.text
   );
+  const matchesStored = (object: ObjectStoreObject): boolean => object.size === declaredSize
+    && object.metadata.room_id === roomId && object.metadata.segment_id === id
+    && object.metadata.start === String(start) && object.metadata.end === String(end)
+    && object.metadata.sha256 === suppliedDigest.text;
   try {
-    const limited = exactLengthUploadStream(prefix.body, declaredSize);
-    let stored: ObjectStoreObject | null;
-    try {
-      stored = (await Promise.all([
-        objectStore(env).put(objectKey, limited.body, { ifAbsent: true, expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream", metadata: { roomId, segmentId: id, start: String(start), end: String(end), sha256: suppliedDigest.text } }),
-        limited.completed,
-      ]))[0];
-    } catch (error) {
-      if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest"); }
-      if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length"); }
-      throw error;
-    }
-    if (!stored || stored.size !== declaredSize) {
-      if (stored) throw new HttpError(400, "Archive segment length or digest mismatch", "invalid_archive_digest");
-      const recovered = await objectStore(env).head(objectKey);
-      if (!recovered || recovered.size !== declaredSize || recovered.metadata.roomId !== roomId
-        || recovered.metadata.segmentId !== id || recovered.metadata.start !== String(start)
-        || recovered.metadata.end !== String(end) || recovered.metadata.sha256 !== suppliedDigest.text) {
-        releaseReservation = true;
+    let stored: ObjectStoreObject | null = null;
+    // A matching pre-existing write intent means an earlier conditional PUT
+    // may have landed before its response or D1 commit was lost. Probe that
+    // exact key first so a multi-megabyte ciphertext is not retransmitted.
+    // First attempts still go directly to one PUT without a discovery HEAD.
+    if (!reservationCreated) {
+      try { stored = await objectStore(env).head(objectKey); }
+      catch (error) { await prefix.body.cancel(error).catch(() => undefined); throw error; }
+      if (stored && !matchesStored(stored)) {
+        await prefix.body.cancel("archive segment conflict").catch(() => undefined);
         throw new HttpError(409, "Segment ID is already in use", "segment_conflict");
+      }
+      if (stored) await prefix.body.cancel("archive segment already uploaded").catch(() => undefined);
+    }
+    if (!stored) {
+      const limited = exactLengthUploadStream(prefix.body, declaredSize);
+      try {
+        stored = (await Promise.all([
+          objectStore(env).put(objectKey, limited.body, { ifAbsent: true, expectedSize: declaredSize, checksumSha256: suppliedDigest.bytes, contentType: "application/octet-stream", metadata: { room_id: roomId, segment_id: id, start: String(start), end: String(end), sha256: suppliedDigest.text } }),
+          limited.completed,
+        ]))[0];
+      } catch (error) {
+        if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest"); }
+        if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length"); }
+        throw error;
+      }
+      if (!stored || !matchesStored(stored)) {
+        if (stored) throw new HttpError(400, "Archive segment length or digest mismatch", "invalid_archive_digest");
+        const recovered = await objectStore(env).head(objectKey);
+        if (!recovered || !matchesStored(recovered)) {
+          releaseReservation = true;
+          throw new HttpError(409, "Segment ID is already in use", "segment_conflict");
+        }
       }
     }
     const liveClaim = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
@@ -5127,7 +5144,7 @@ async function uploadArchiveRepair(request: Request, env: Env, auth: AuthContext
     try {
       stored = await objectStore(env).put(row.object_key, request.body, {
         ifAbsent: true, expectedSize: declaredSize, checksumSha256: digest, contentType: "application/octet-stream",
-        metadata: { roomId: row.room_id, start: String(row.start_seq), end: String(row.end_seq), sha256: row.ciphertext_sha256 },
+        metadata: { room_id: row.room_id, start: String(row.start_seq), end: String(row.end_seq), sha256: row.ciphertext_sha256 },
       });
     } catch (error) {
       if (error instanceof ObjectStoreChecksumMismatchError) throw new HttpError(400, "Archive ciphertext digest mismatch", "invalid_archive_digest");

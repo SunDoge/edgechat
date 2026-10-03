@@ -1163,7 +1163,7 @@ describe("single-server durable delivery", () => {
         .bind(`attachments/${crashId}`, alice.user_id, roomId, crashDigest, Date.now()),
       env.DB.prepare("UPDATE user_storage_usage SET attachment_bytes = attachment_bytes + 1, attachment_objects = attachment_objects + 1 WHERE user_id = ?").bind(alice.user_id),
     ]);
-    await env.ARCHIVE.put(`attachments/${crashId}`, crashBody, { customMetadata: { roomId, uploaderUserId: alice.user_id, sha256: crashDigest } });
+    await env.ARCHIVE.put(`attachments/${crashId}`, crashBody, { customMetadata: { room_id: roomId, uploader_user_id: alice.user_id, sha256: crashDigest } });
     let retryBodyCancelled = false;
     const crashRetryBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
       start(controller) { controller.enqueue(new Uint8Array([100])); },
@@ -1969,6 +1969,58 @@ describe("single-server durable delivery", () => {
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
     expect((await env.DB.prepare("SELECT count(*) AS count FROM pending_r2_writes").first<{ count: number }>())?.count).toBe(0);
     const archiveDigest = await ciphertextDigest(ciphertext);
+    await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, account.device_id);
+
+    // Emulate a Worker crash after the object-store PUT landed but before the
+    // pending D1 write was committed. The retry may validate the bounded v3
+    // envelope prefix, but must cancel the remaining upload rather than send
+    // the same archive ciphertext a second time.
+    const crashSegmentId = "archive_segment_crash_0001"; const crashLeaseToken = "archive_compaction_crash_0001";
+    const crashObjectKey = `rooms/${encodeURIComponent(roomId)}/segments/000000000001-${crashSegmentId}.bin`;
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO pending_r2_writes
+        (object_key, owner_user_id, kind, expected_bytes, room_id, content_sha256, created_at, attempts, last_error)
+        VALUES (?, ?, 'archive', ?, ?, ?, ?, 0, NULL)`)
+        .bind(crashObjectKey, account.user_id, ciphertext.byteLength, roomId, archiveDigest, Date.now()),
+      env.DB.prepare("UPDATE user_storage_usage SET archive_bytes = archive_bytes + ?, archive_objects = archive_objects + 1, updated_at = ? WHERE user_id = ?")
+        .bind(ciphertext.byteLength, Date.now(), account.user_id),
+    ]);
+    await env.ARCHIVE.put(crashObjectKey, ciphertext, { customMetadata: {
+      room_id: roomId, segment_id: crashSegmentId, start: "1", end: "1", sha256: archiveDigest,
+    } });
+    expect((await env.ROOMS.getByName(roomId).acquireCompactionLease({
+      token: crashLeaseToken, device_id: account.device_id, segment_id: crashSegmentId, start_seq: 1, end_seq: 1, expires_at: Date.now() + 60_000,
+    }, Date.now())).acquired).toBe(true);
+    const crashPrefixLength = 40 + new DataView(ciphertext.buffer).getUint32(12); let crashRetryCancelled = false;
+    const crashRetryBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) { controller.enqueue(ciphertext.slice(0, crashPrefixLength)); },
+      cancel() { crashRetryCancelled = true; },
+    });
+    const crashRetryContext = createExecutionContext();
+    const crashRetryRequest = new Request(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
+      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-segment-id": crashSegmentId, "x-compaction-token": crashLeaseToken,
+        "x-start-seq": "1", "x-end-seq": "1", "content-length": String(ciphertext.byteLength), "x-content-sha256": archiveDigest }, body: crashRetryBody,
+    }) as Parameters<typeof worker.fetch>[0];
+    const crashRetry = await worker.fetch(crashRetryRequest, env as unknown as Env, crashRetryContext);
+    await waitOnExecutionContext(crashRetryContext);
+    expect(crashRetry.status, await crashRetry.clone().text()).toBe(201);
+    expect(crashRetryCancelled).toBe(true);
+    expect(new Uint8Array(await (await env.ARCHIVE.get(crashObjectKey))!.arrayBuffer())).toEqual(ciphertext);
+    expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(crashObjectKey).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT segment_id FROM archive_segments WHERE segment_id = ?").bind(crashSegmentId).first()).toEqual({ segment_id: crashSegmentId });
+
+    // Remove only this synthetic committed row/object so the existing normal
+    // upload and repair coverage below can keep exercising the same seq range.
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM archive_segments WHERE segment_id = ?").bind(crashSegmentId),
+      env.DB.prepare("UPDATE user_storage_usage SET archive_bytes = archive_bytes - ?, archive_objects = archive_objects - 1, updated_at = ? WHERE user_id = ?")
+        .bind(ciphertext.byteLength, Date.now(), account.user_id),
+    ]);
+    await env.ARCHIVE.delete(crashObjectKey);
+    expect((await env.ROOMS.getByName(roomId).acquireCompactionLease({
+      token: leaseToken, device_id: account.device_id, segment_id: segmentId, start_seq: 1, end_seq: 1, expires_at: Date.now() + 60_000,
+    }, Date.now())).acquired).toBe(true);
+
     const uploadHeaders = { authorization: `Bearer ${account.access_token}`, "x-segment-id": segmentId, "x-compaction-token": leaseToken,
       "x-start-seq": "1", "x-end-seq": "1", "content-length": String(ciphertext.byteLength), "x-content-sha256": archiveDigest };
     const upload = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {

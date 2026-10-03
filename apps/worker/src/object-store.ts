@@ -86,11 +86,24 @@ function isR2ChecksumMismatch(error: unknown): boolean {
   return error instanceof Error && error.message.includes("checksum you specified did not match");
 }
 
+function portableMetadata(metadata: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!metadata) return undefined;
+  for (const key of Object.keys(metadata)) {
+    // S3 transports metadata as HTTP headers, whose names are case
+    // insensitive and are normally surfaced in lowercase by HEAD/GET. Keep
+    // one provider-independent spelling so recovery comparisons work on R2,
+    // B2 and other S3-compatible stores.
+    if (!/^[a-z0-9_]+$/.test(key)) throw new Error(`Object metadata key is not portable: ${key}`);
+  }
+  return metadata;
+}
+
 /** Native R2 implementation of the provider-neutral exact-key object contract. */
 export class R2ObjectStore implements ObjectStore {
   constructor(private readonly bucket: R2Bucket) {}
 
   async put(key: string, body: ObjectStoreBody, options: ObjectStorePutOptions = {}): Promise<ObjectStoreObject | null> {
+    const metadata = portableMetadata(options.metadata);
     try {
       const stored = await this.bucket.put(key, body, {
         ...(options.ifAbsent ? { onlyIf: { etagDoesNotMatch: "*" } } : {}),
@@ -98,7 +111,7 @@ export class R2ObjectStore implements ObjectStore {
         ...((options.contentType || options.cacheControl) ? {
           httpMetadata: { contentType: options.contentType, cacheControl: options.cacheControl },
         } : {}),
-        ...(options.metadata ? { customMetadata: options.metadata } : {}),
+        ...(metadata ? { customMetadata: metadata } : {}),
       });
       return stored ? objectView(stored) : null;
     } catch (error) {
@@ -269,12 +282,13 @@ export class S3ObjectStore implements ObjectStore {
   async put(key: string, body: ObjectStoreBody, options: ObjectStorePutOptions = {}): Promise<ObjectStoreObject | null> {
     const size = options.expectedSize ?? inferredBodySize(body);
     if (size === null || !Number.isSafeInteger(size) || size < 0) throw new Error("S3 streaming PUT requires a valid expectedSize");
+    const metadata = portableMetadata(options.metadata);
     const headers = new Headers({ "content-length": String(size) });
     if (options.contentType) headers.set("content-type", options.contentType);
     if (options.cacheControl) headers.set("cache-control", options.cacheControl);
     if (options.ifAbsent) headers.set("if-none-match", "*");
     if (options.checksumSha256) headers.set("x-amz-content-sha256", checksumHex(options.checksumSha256));
-    for (const [name, value] of Object.entries(options.metadata ?? {})) headers.set(`x-amz-meta-${name}`, value);
+    for (const [name, value] of Object.entries(metadata ?? {})) headers.set(`x-amz-meta-${name}`, value);
     const response = await this.request(this.url(key), { method: "PUT", headers, body });
     if (options.ifAbsent && response.status === 412) {
       await response.body?.cancel().catch(() => undefined);
@@ -284,7 +298,7 @@ export class S3ObjectStore implements ObjectStore {
     await response.body?.cancel().catch(() => undefined);
     const entityTag = response.headers.get("etag");
     if (!entityTag) throw new ObjectStoreRequestError("put", response.status, "S3 PUT response omitted ETag");
-    return { key, size, entityTag, metadata: { ...(options.metadata ?? {}) } };
+    return { key, size, entityTag, metadata: { ...(metadata ?? {}) } };
   }
 
   async get(key: string, options: { rangeHeader?: string } = {}): Promise<ObjectStoreBodyObject | null> {

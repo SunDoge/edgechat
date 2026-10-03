@@ -71,7 +71,7 @@ describe("SigV4 S3 object-store contract", () => {
     const requests: Array<{ method: string; url: string; headers: Headers; body: Promise<ArrayBuffer> }> = [];
     const responses = [
       new Response(null, { status: 200, headers: { etag: '"put-etag"' } }),
-      new Response(null, { status: 200, headers: { etag: '"head-etag"', "content-length": "6", "x-amz-meta-sha256": "digest" } }),
+      new Response(null, { status: 200, headers: { etag: '"head-etag"', "content-length": "6", "x-amz-meta-sha256": "digest", "x-amz-meta-room_id": "!room:example.com" } }),
       new Response(new Uint8Array([30, 40, 50]), { status: 206, headers: {
         etag: '"get-etag"', "content-length": "3", "content-range": "bytes 2-4/6", "x-amz-meta-sha256": "digest",
       } }),
@@ -86,9 +86,9 @@ describe("SigV4 S3 object-store contract", () => {
     const value = new Uint8Array([10, 20, 30, 40, 50, 60]);
     const checksum = await crypto.subtle.digest("SHA-256", value);
     expect(await store.put("folder/a b&.bin", new Response(value).body!, { expectedSize: 6, checksumSha256: checksum,
-      contentType: "application/octet-stream", metadata: { sha256: "digest" } }))
-      .toEqual({ key: "folder/a b&.bin", size: 6, entityTag: '"put-etag"', metadata: { sha256: "digest" } });
-    expect(await store.head("folder/a b&.bin")).toEqual({ key: "folder/a b&.bin", size: 6, entityTag: '"head-etag"', metadata: { sha256: "digest" } });
+      contentType: "application/octet-stream", metadata: { sha256: "digest", room_id: "!room:example.com" } }))
+      .toEqual({ key: "folder/a b&.bin", size: 6, entityTag: '"put-etag"', metadata: { sha256: "digest", room_id: "!room:example.com" } });
+    expect(await store.head("folder/a b&.bin")).toEqual({ key: "folder/a b&.bin", size: 6, entityTag: '"head-etag"', metadata: { sha256: "digest", room_id: "!room:example.com" } });
     const ranged = await store.get("folder/a b&.bin", { rangeHeader: "bytes=2-4" });
     expect(ranged).toMatchObject({ size: 6, entityTag: '"get-etag"', metadata: { sha256: "digest" }, range: { offset: 2, length: 3 } });
     expect(await bytes(ranged!.body)).toEqual([30, 40, 50]);
@@ -98,10 +98,17 @@ describe("SigV4 S3 object-store contract", () => {
     expect(requests[0].url).toBe("https://s3.us-west-004.backblazeb2.com/edgechat-test/folder/a%20b%26.bin");
     expect(requests[0].headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
     expect(requests[0].headers.get("x-amz-content-sha256")).toMatch(/^[a-f0-9]{64}$/);
+    expect(requests[0].headers.get("x-amz-meta-room_id")).toBe("!room:example.com");
     expect([...new Uint8Array(await requests[0].body)]).toEqual([...value]);
     expect(requests[2].headers.get("range")).toBe("bytes=2-4");
     expect(requests[3].url).toBe("https://s3.us-west-004.backblazeb2.com/edgechat-test?delete");
     expect(new TextDecoder().decode(await requests[3].body)).toContain("<Key>folder/&lt;second&gt;&amp;.bin</Key>");
+  });
+
+  it("rejects metadata keys that cannot round-trip through S3 HEAD", async () => {
+    const store = new S3ObjectStore(s3Config, async () => { throw new Error("request must not be sent"); });
+    await expect(store.put("invalid-metadata.bin", new Uint8Array([1]), { metadata: { roomId: "room" } }))
+      .rejects.toThrow("Object metadata key is not portable: roomId");
   });
 
   it("normalizes conditional conflicts and refuses a full response to a range request", async () => {
