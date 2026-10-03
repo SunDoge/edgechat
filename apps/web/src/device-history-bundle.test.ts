@@ -21,7 +21,20 @@ describe("device history bundle", () => {
     expect((await openDeviceHistoryBundle(legacy)).databaseSnapshot).toBe(legacy);
     expect((await openDeviceHistoryBundle(legacy)).segments).toEqual([]);
     const bundle = await createDeviceHistoryBundle(legacy, [{ id: "attachment_opaque_003", ciphertext: new Blob([new Uint8Array([9])]) }]);
-    await expect(openDeviceHistoryBundle(bundle.slice(0, bundle.size - 1))).rejects.toThrow("损坏");
-    await expect(openDeviceHistoryBundle(new Blob([bundle, new Uint8Array([0])]))).rejects.toThrow("损坏");
+    await expect(openDeviceHistoryBundle(bundle.slice(0, bundle.size - 1))).rejects.toMatchObject({
+      code: "incomplete_package", messageKey: "deviceLink.error.historyIncomplete",
+    });
+    await expect(openDeviceHistoryBundle(new Blob([bundle, new Uint8Array([0])]))).rejects.toMatchObject({
+      code: "incomplete_package", messageKey: "deviceLink.error.historyIncomplete",
+    });
+  });
+
+  it("classifies invalid source snapshots without exposing local cache details", async () => {
+    await expect(createDeviceHistoryBundle(new Blob(), [])).rejects.toMatchObject({
+      code: "invalid_snapshot", messageKey: "deviceLink.error.historySnapshotInvalid",
+    });
+    await expect(createDeviceHistoryBundle(new Blob([new Uint8Array([1])]), [
+      { id: "attachment_opaque_004", ciphertext: new Blob() },
+    ])).rejects.toMatchObject({ code: "invalid_snapshot" });
   });
 });

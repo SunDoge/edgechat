@@ -56,7 +56,7 @@ import { PasswordChangeDialog } from "./components/PasswordChangeDialog";
 import { PasskeyDialog } from "./components/PasskeyDialog";
 import { activeIdentityDevices, deviceTrustState, verificationKey, type DeviceTrustState } from "./device-verification";
 import { ShareTargetDialog } from "./components/ShareTargetDialog";
-import { createDeviceHistoryManifest, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
+import { createDeviceHistoryManifest, DeviceHistoryTransferError, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
 import { deviceHistoryStagingFor } from "./device-history-staging";
 import { clearPendingDeviceLink } from "./device-linking";
 import { stagedMlsPosition } from "./mls-staging";
@@ -2893,8 +2893,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           view = { ...view, history_transfer_ready: true, history_transfer_bytes: uploadedBytes, history_source_device_id: currentIdentity.deviceId,
             history_transfer: { ...created.transfer, ready_shards: Array.from({ length: manifest.shard_count }, (_, index) => index), ciphertext_bytes: uploadedBytes } };
         } catch (cause) {
-          const message = cause instanceof Error ? cause.message : String(cause);
-          if (message.includes("迁移上限")) historyTransferSkipped = true;
+          if (cause instanceof DeviceHistoryTransferError && cause.code === "transfer_limit") historyTransferSkipped = true;
           else throw cause;
         }
       }

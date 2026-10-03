@@ -51,6 +51,8 @@ describe("local message catalog", () => {
     expect(translate("draft.preview", { text: "later" })).toBe("草稿：later");
     expect(translate("conversationExport.attachment", { kind: "图片", name: "photo.jpg", size: "2.0 KiB" })).toBe("图片：photo.jpg（2.0 KiB；文件内容未包含）");
     expect(translate("conversationExport.footer", { count: 12 })).toBe("共导出 12 条本机消息。");
+    expect(translate("deviceLink.error.historyDamaged")).toContain("重新发起设备链接");
+    expect(translate("deviceLink.error.historyTransferLimit")).toContain("不迁移历史");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {
