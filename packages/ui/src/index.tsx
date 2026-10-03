@@ -7,6 +7,16 @@ export function shouldSubmitComposer(event: { key: string; shiftKey: boolean; is
   return event.key === "Enter" && !event.shiftKey && !composing && !event.isComposing && event.keyCode !== 229;
 }
 
+export function transferredFiles(transfer: Pick<DataTransfer, "files" | "items">): File[] {
+  const direct = Array.from(transfer.files ?? []);
+  if (direct.length) return direct;
+  return Array.from(transfer.items ?? []).flatMap((item) => {
+    if (item.kind !== "file") return [];
+    const file = item.getAsFile();
+    return file ? [file] : [];
+  });
+}
+
 export function anchoredScrollTop(previousHeight: number, nextHeight: number, currentTop: number, clientHeight: number, nearBottom: boolean): number {
   if (nearBottom) return Math.max(0, nextHeight - clientHeight);
   return Math.max(0, currentTop + Math.max(0, nextHeight - previousHeight));
@@ -286,10 +296,13 @@ export function ChatComposer(props: {
   hasContent?: boolean;
   placeholder?: string;
   disabledReason?: string;
+  onFiles?: (files: File[]) => void;
+  dropLabel?: string;
 }) {
   let textarea: HTMLTextAreaElement | undefined;
   const descriptionId = createUniqueId();
   const [composing, setComposing] = createSignal(false);
+  const [draggingFiles, setDraggingFiles] = createSignal(false);
   createEffect(() => {
     props.value;
     if (!textarea) return;
@@ -307,11 +320,39 @@ export function ChatComposer(props: {
       (event.currentTarget as HTMLTextAreaElement).form?.requestSubmit();
     }
   }
-  return <form class={chatUi.composer} onSubmit={submit}>
+  function acceptsTransfer(transfer: DataTransfer): boolean {
+    return !props.disabled && Boolean(props.onFiles) && Array.from(transfer.types ?? []).includes("Files");
+  }
+  function dragOver(event: DragEvent) {
+    if (!event.dataTransfer || !acceptsTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDraggingFiles(true);
+  }
+  function drop(event: DragEvent) {
+    setDraggingFiles(false);
+    if (!event.dataTransfer || !acceptsTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    const files = transferredFiles(event.dataTransfer);
+    if (files.length) props.onFiles?.(files);
+  }
+  function paste(event: ClipboardEvent) {
+    if (props.disabled || !props.onFiles || !event.clipboardData) return;
+    const files = transferredFiles(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    props.onFiles(files);
+  }
+  return <form class={`${chatUi.composer} relative ${draggingFiles() ? "ring-2 ring-brand bg-brand-soft" : ""}`} onSubmit={submit}
+    onDragEnter={dragOver} onDragOver={dragOver} onDragLeave={(event) => {
+      const related = event.relatedTarget;
+      if (!related || !event.currentTarget.contains(related as Node)) setDraggingFiles(false);
+    }} onDragEnd={() => setDraggingFiles(false)} onDrop={drop}>
     {props.accessory}
-    <textarea class={chatUi.textarea} ref={textarea} value={props.value} disabled={props.disabled} onInput={(event) => props.onChange(event.currentTarget.value)} onKeyDown={keyDown}
+    <textarea class={chatUi.textarea} ref={textarea} value={props.value} disabled={props.disabled} onInput={(event) => props.onChange(event.currentTarget.value)} onKeyDown={keyDown} onPaste={paste}
       onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} rows={1} name="message" placeholder={props.placeholder ?? "写一条消息"} aria-label="消息" aria-describedby={props.disabled && props.disabledReason ? descriptionId : undefined}/>
     <button class={chatUi.send} type="submit" disabled={props.disabled || !canSend()}>发送</button>
+    {draggingFiles() ? <span class="pointer-events-none absolute inset-0 grid place-items-center rounded-xl bg-brand-soft/95 text-sm font-semibold text-brand" role="status">{props.dropLabel ?? "松开以添加文件"}</span> : null}
     {props.disabled && props.disabledReason ? <span id={descriptionId} class="sr-only">{props.disabledReason}</span> : null}
   </form>;
 }

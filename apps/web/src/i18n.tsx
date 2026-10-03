@@ -100,6 +100,8 @@ export const zhHansMessages = {
   "workspace.leave.detail": "等待群主设备上线并安全更新群聊。在完成前你仍可查看已有消息，但不能发送新内容。",
   "workspace.leave.cancel": "取消退出",
   "workspace.composer.pendingAttachments": "待发送附件",
+  "workspace.composer.dropFiles": "松开以添加文件",
+  "workspace.composer.invalidFile": "无法添加空文件或名称不安全的文件",
   "workspace.composer.imageQuality.optimized": "图片：节省空间",
   "workspace.composer.imageQuality.original": "图片：原图",
   "workspace.composer.imageQuality.optimizedHelp": "发送前在本机缩放并移除相机元数据，只上传一个较小的加密对象",

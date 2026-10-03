@@ -7,7 +7,7 @@ import { avatarColor, initials, roomTitle } from "../presenters";
 import { SHARE_TARGET_MAX_FILES, SHARE_TARGET_MAX_TEXT, sharedComposerText, type ShareTargetError, type StagedShare } from "../share-target";
 import { Avatar, Dialog } from "./primitives";
 import { operationErrorMessage } from "../operation-errors";
-import { hasOptimizableOutgoingImages, type OutgoingImageMode } from "../outgoing-media";
+import { hasOptimizableOutgoingImages, type OutgoingImageMode } from "../outgoing-media-policy";
 
 export function ShareTargetDialog(props: {
   share: StagedShare;

@@ -1,24 +1,17 @@
-export type OutgoingImageMode = "optimized" | "original";
+import { canOptimizeOutgoingImage, type OutgoingImageMode } from "./outgoing-media-policy";
+
+export { canOptimizeOutgoingImage, hasOptimizableOutgoingImages, type OutgoingImageMode } from "./outgoing-media-policy";
 export type OutgoingFilePreparation = {
   file: File;
   outcome: "optimized" | "original" | "unsupported";
   savedBytes: number;
 };
 
-const OPTIMIZABLE_IMAGE_TYPES = new Set(["image/jpeg", "image/png"]);
 const MIN_OPTIMIZE_BYTES = 128 * 1024;
 const MAX_HEADER_BYTES = 256 * 1024;
 const MAX_SOURCE_EDGE = 16_384;
 const MAX_SOURCE_PIXELS = 40_000_000;
 const TARGET_EDGE = 2_048;
-
-export function canOptimizeOutgoingImage(file: Pick<File, "type">): boolean {
-  return OPTIMIZABLE_IMAGE_TYPES.has(file.type.toLowerCase());
-}
-
-export function hasOptimizableOutgoingImages(files: readonly Pick<File, "type">[]): boolean {
-  return files.some(canOptimizeOutgoingImage);
-}
 
 function pngDimensions(bytes: Uint8Array): { width: number; height: number } | null {
   const signature = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -67,7 +60,7 @@ function jpegDimensions(bytes: Uint8Array): { width: number; height: number } | 
 }
 
 export async function outgoingImageDimensions(file: Blob): Promise<{ width: number; height: number } | null> {
-  if (!OPTIMIZABLE_IMAGE_TYPES.has(file.type.toLowerCase())) return null;
+  if (!canOptimizeOutgoingImage(file)) return null;
   const bytes = new Uint8Array(await file.slice(0, Math.min(file.size, MAX_HEADER_BYTES)).arrayBuffer());
   const dimensions = file.type.toLowerCase() === "image/png" ? pngDimensions(bytes) : jpegDimensions(bytes);
   if (!dimensions || dimensions.width < 1 || dimensions.height < 1 || dimensions.width > MAX_SOURCE_EDGE || dimensions.height > MAX_SOURCE_EDGE
