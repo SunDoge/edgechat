@@ -5,7 +5,7 @@ import { openRoomPeerRecovery, sealRoomPeerRecovery, type RoomPeerRecoveryContex
 
 const roomId = "!peer-recovery:example.com" as RoomId;
 function event(seq: number): RoomEvent {
-  return { event_id: `event-${seq}`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "sender-device",
+  return { event_id: `$test-event-${seq}:example.com`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "sender-device",
     type: "message.text", created_at: seq, ciphertext: `ciphertext-${seq}`, metadata: { mls_epoch: 1 }, signature: `signature-${seq}` };
 }
 

@@ -1,6 +1,6 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { canonicalDraftEnvelopeBytes, canonicalEventBytes, type ClientEvent, type DraftEnvelope, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
+import { canonicalDraftEnvelopeBytes, canonicalEventBytes, type ClientEvent, type DraftEnvelope, type EventId, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
 import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, processPendingAttachmentDeletions, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
 import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push";
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
@@ -10,6 +10,10 @@ import { HttpError } from "../src/http";
 function b64url(bytes: ArrayBuffer): string {
   let value = ""; for (const byte of new Uint8Array(bytes)) value += String.fromCharCode(byte);
   return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function eventId(domain = "localhost"): EventId {
+  return `$${crypto.randomUUID()}:${domain}`;
 }
 
 async function ciphertextDigest(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
@@ -489,7 +493,7 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(alice.user_id).first()).toEqual({ attachment_bytes: 0, attachment_objects: 0 });
 
     const attachmentIds = [await upload([4, 5, 6]), await upload([7, 8])];
-    const unsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.file", created_at: Date.now(), ciphertext: "opaque-multi-attachment-envelope", metadata: { mls_epoch: 1, attachment_ids: attachmentIds } };
+    const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.file", created_at: Date.now(), ciphertext: "opaque-multi-attachment-envelope", metadata: { mls_epoch: 1, attachment_ids: attachmentIds } };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(unsigned)));
     const sent = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unsigned, signature }) });
     expect(sent.status, await sent.clone().text()).toBe(201);
@@ -502,7 +506,7 @@ describe("single-server durable delivery", () => {
     expect(forwardRoom.status, await forwardRoom.clone().text()).toBe(201);
     await acceptRequest(forwardRoomId, charlie.access_token);
     const aliases = ["multi_forward_alias_0001", "multi_forward_alias_0002"];
-    const forwardUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: forwardRoomId, sender: bob.user_id, device_id: bob.device_id, type: "message.file", created_at: Date.now(), ciphertext: "opaque-forwarded-multi-envelope", metadata: { mls_epoch: 1, attachment_ids: aliases, forward_source_attachment_ids: attachmentIds } };
+    const forwardUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: forwardRoomId, sender: bob.user_id, device_id: bob.device_id, type: "message.file", created_at: Date.now(), ciphertext: "opaque-forwarded-multi-envelope", metadata: { mls_epoch: 1, attachment_ids: aliases, forward_source_attachment_ids: attachmentIds } };
     const forwardSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(forwardUnsigned)));
     const forwarded = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(forwardRoomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...forwardUnsigned, signature: forwardSignature }) });
     expect(forwarded.status, await forwarded.clone().text()).toBe(201);
@@ -630,7 +634,7 @@ describe("single-server durable delivery", () => {
     expect(claimed.key_packages).toMatchObject([{ device_id: carol.device_id, user_id: carol.user_id }]);
 
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      event_id: eventId(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
       type: "control.group.commit", created_at: Date.now(), ciphertext: "opaque-add-member-commit",
       metadata: { mls_epoch: 2, membership_action: "add", target_user_id: carol.user_id, target_device_ids: [carol.device_id] },
     };
@@ -664,7 +668,7 @@ describe("single-server durable delivery", () => {
     expect(await conflict.json()).toMatchObject({ code: "event_id_conflict" });
 
     const profileUnsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      event_id: eventId(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
       type: "control.room.profile", created_at: Date.now(), ciphertext: "opaque-encrypted-room-profile",
       metadata: { mls_epoch: 2, room_profile_avatar_id: null, room_profile_previous_avatar_id: null },
     };
@@ -680,7 +684,7 @@ describe("single-server durable delivery", () => {
     });
     expect(avatarUpload.status, await avatarUpload.clone().text()).toBe(201);
     const avatarId = (await avatarUpload.json() as { attachment_id: string }).attachment_id;
-    const avatarUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(),
+    const avatarUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: eventId(), created_at: Date.now(),
       metadata: { mls_epoch: 2, room_profile_avatar_id: avatarId, room_profile_previous_avatar_id: null } };
     const avatarEvent = { ...avatarUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(avatarUnsigned))) };
     const avatarResponse = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(avatarEvent) });
@@ -704,7 +708,7 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT attachment_id FROM attachment_deletions WHERE attachment_id = ?").bind(avatarId).first()).toBeNull();
     expect(await env.ARCHIVE.get(avatarObject!.object_key)).not.toBeNull();
 
-    const renameUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(),
+    const renameUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: eventId(), created_at: Date.now(),
       metadata: { mls_epoch: 2, room_profile_avatar_id: avatarId, room_profile_previous_avatar_id: avatarId } };
     const renameEvent = { ...renameUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(renameUnsigned))) };
     const renamed = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(renameEvent) });
@@ -712,7 +716,7 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT attachment_id,profile_seq FROM room_profile_attachments WHERE room_id = ?").bind(groupRoom).first()).toEqual({ attachment_id: avatarId, profile_seq: 4 });
     expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
 
-    const removeAvatarUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(),
+    const removeAvatarUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: eventId(), created_at: Date.now(),
       metadata: { mls_epoch: 2, room_profile_avatar_id: null, room_profile_previous_avatar_id: avatarId } };
     const removeAvatarEvent = { ...removeAvatarUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(removeAvatarUnsigned))) };
     const removedAvatar = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, { method: "POST", headers, body: JSON.stringify(removeAvatarEvent) });
@@ -724,7 +728,7 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT attachment_bytes,attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(alice.user_id).first())
       .toEqual({ attachment_bytes: 0, attachment_objects: 0 });
 
-    const memberProfileUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), sender: carol.user_id, device_id: carol.device_id, created_at: Date.now() };
+    const memberProfileUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: eventId(), sender: carol.user_id, device_id: carol.device_id, created_at: Date.now() };
     const memberProfile = { ...memberProfileUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, carolDevice.signing.privateKey, canonicalEventBytes(memberProfileUnsigned))) };
     const forbiddenProfile = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, {
       method: "POST", headers: { authorization: `Bearer ${carol.access_token}`, "content-type": "application/json" }, body: JSON.stringify(memberProfile),
@@ -750,7 +754,7 @@ describe("single-server durable delivery", () => {
     expect(await (await SELF.fetch("https://edgechat.test/api/v1/room-leave-tasks", { headers: { authorization: `Bearer ${bob.access_token}` } })).json())
       .toEqual({ tasks: [] });
 
-    const blockedMessageUnsigned: Omit<ClientEvent, "signature"> = { ...memberProfileUnsigned, event_id: crypto.randomUUID(), type: "message.text", ciphertext: "opaque-message", created_at: Date.now() };
+    const blockedMessageUnsigned: Omit<ClientEvent, "signature"> = { ...memberProfileUnsigned, event_id: eventId(), type: "message.text", ciphertext: "opaque-message", created_at: Date.now() };
     const blockedMessage = { ...blockedMessageUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, carolDevice.signing.privateKey, canonicalEventBytes(blockedMessageUnsigned))) };
     const blockedMessageResponse = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}/events`, {
       method: "POST", headers: carolHeaders, body: JSON.stringify(blockedMessage),
@@ -766,7 +770,7 @@ describe("single-server durable delivery", () => {
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 
     const removeUnsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      event_id: eventId(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
       type: "control.group.commit", created_at: Date.now(), ciphertext: "opaque-remove-member-commit",
       metadata: { mls_epoch: 3, membership_action: "remove", target_user_id: carol.user_id,
         target_device_ids: [carol.device_id], leave_request_id: leaveRequest.request_id },
@@ -799,7 +803,7 @@ describe("single-server durable delivery", () => {
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(groupRoom)}`, { headers: carolHeaders })).status).toBe(404);
 
     const transferUnsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
+      event_id: eventId(), room_id: groupRoom, sender: alice.user_id, device_id: alice.device_id,
       type: "control.owner.transfer", created_at: Date.now(), ciphertext: "opaque-encrypted-owner-transfer",
       metadata: { mls_epoch: 3, target_user_id: bob.user_id },
     };
@@ -813,7 +817,7 @@ describe("single-server durable delivery", () => {
     const transferRetry = await SELF.fetch(transferEndpoint, { method: "POST", headers, body: JSON.stringify(transferEvent) });
     expect(transferRetry.status, await transferRetry.clone().text()).toBe(200);
     expect(await transferRetry.json()).toMatchObject({ event: { event_id: transferEvent.event_id } });
-    const formerOwnerProfileUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(), metadata: { mls_epoch: 3, room_profile_avatar_id: null, room_profile_previous_avatar_id: null } };
+    const formerOwnerProfileUnsigned: Omit<ClientEvent, "signature"> = { ...profileUnsigned, event_id: eventId(), created_at: Date.now(), metadata: { mls_epoch: 3, room_profile_avatar_id: null, room_profile_previous_avatar_id: null } };
     const formerOwnerProfile = { ...formerOwnerProfileUnsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(formerOwnerProfileUnsigned))) };
     const formerOwnerProfileResponse = await SELF.fetch(transferEndpoint, { method: "POST", headers, body: JSON.stringify(formerOwnerProfile) });
     expect(formerOwnerProfileResponse.status).toBe(403);
@@ -975,7 +979,7 @@ describe("single-server durable delivery", () => {
     expect(attachmentUpload.status, await attachmentUpload.clone().text()).toBe(201);
     const attachmentId = (await attachmentUpload.json() as { attachment_id: string }).attachment_id;
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+      event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
       type: "message.file", created_at: Date.now(), ciphertext: "repairable-ciphertext", metadata: { mls_epoch: 1, attachment_id: attachmentId },
     };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, currentDevice.signing.privateKey, canonicalEventBytes(unsigned)));
@@ -1017,6 +1021,12 @@ describe("single-server durable delivery", () => {
     });
     expect(retryLeaseResponse.status).toBe(201);
     const retryLease = await retryLeaseResponse.json() as { token: string; generation: number };
+
+    const remoteRepair = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/repair/events`, {
+      method: "POST", headers, body: JSON.stringify({ token: retryLease.token, generation: retryLease.generation, events: [{ ...accepted, event_id: eventId("remote.test") }] }),
+    });
+    expect(remoteRepair.status).toBe(400);
+    expect(await remoteRepair.json()).toMatchObject({ code: "federation_disabled" });
 
     const repaired = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/repair/events`, {
       method: "POST", headers, body: JSON.stringify({ token: retryLease.token, generation: retryLease.generation, events: [accepted] }),
@@ -1081,7 +1091,7 @@ describe("single-server durable delivery", () => {
     expect(upload.status, await upload.clone().text()).toBe(201);
     const attachmentId = (await upload.json() as { attachment_id: string }).attachment_id;
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+      event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
       type: "message.file", created_at: Date.now(), ciphertext: "encrypted-file-envelope", metadata: { mls_epoch: 1, attachment_id: attachmentId },
     };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, currentDevice.signing.privateKey, canonicalEventBytes(unsigned)));
@@ -1140,7 +1150,7 @@ describe("single-server durable delivery", () => {
     expect((await SELF.fetch("https://edgechat.test/api/v1/rooms", { method: "POST", headers,
       body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }) })).status).toBe(201);
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+      event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
       type: "message.text", created_at: Date.now(), ciphertext: "archive-source-ciphertext", metadata: { mls_epoch: 1 },
     };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, currentDevice.signing.privateKey, canonicalEventBytes(unsigned)));
@@ -1245,7 +1255,7 @@ describe("single-server durable delivery", () => {
     expect(retentionAck.status).toBe(200);
     expect(await retentionAck.json()).toEqual({ attachment_id: attachmentId });
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+      event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
       type: "message.file", created_at: Date.now(), ciphertext: "local-long-term-ciphertext", metadata: { mls_epoch: 1, attachment_id: attachmentId },
     };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, currentDevice.signing.privateKey, canonicalEventBytes(unsigned)));
@@ -1257,7 +1267,7 @@ describe("single-server durable delivery", () => {
       body: JSON.stringify({ room_id: forwardedRoomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }) })).status).toBe(201);
     const grantId = crypto.randomUUID();
     const forwardUnsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: forwardedRoomId, sender: account.user_id, device_id: account.device_id,
+      event_id: eventId(), room_id: forwardedRoomId, sender: account.user_id, device_id: account.device_id,
       type: "message.file", created_at: Date.now(), ciphertext: "forwarded-local-ciphertext",
       metadata: { mls_epoch: 1, attachment_id: grantId, forward_source_attachment_id: attachmentId },
     };
@@ -1354,7 +1364,7 @@ describe("single-server durable delivery", () => {
       body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }) })).status).toBe(201);
     const firstAt = Date.now() - 2_000; const secondAt = Date.now(); const acceptedAt: number[] = [];
     for (const [index, createdAt] of [firstAt, secondAt].entries()) {
-      const unsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+      const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
         type: "message.text", created_at: createdAt, ciphertext: `cipher-${index + 1}`, metadata: { mls_epoch: 1 } };
       const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, currentDevice.signing.privateKey, canonicalEventBytes(unsigned)));
       const response = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers, body: JSON.stringify({ ...unsigned, signature }) });
@@ -1441,7 +1451,7 @@ describe("single-server durable delivery", () => {
       body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }),
     });
     expect(room.status, await room.clone().text()).toBe(201);
-    const unsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id, type: "message.text", created_at: Date.now(), ciphertext: "sent-after-backup", metadata: { mls_epoch: 1 } };
+    const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id, type: "message.text", created_at: Date.now(), ciphertext: "sent-after-backup", metadata: { mls_epoch: 1 } };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, currentDevice.signing.privateKey, canonicalEventBytes(unsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unsigned, signature }) })).status).toBe(201);
     const stale = await SELF.fetch("https://edgechat.test/api/v1/login", {
@@ -1470,7 +1480,7 @@ describe("single-server durable delivery", () => {
     expect(room.status, await room.clone().text()).toBe(201);
     const lateDevice = await device("link-late-password-device");
     const lateSession = await loginDevice(account.user_id, lateDevice);
-    const unauthorizedUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: lateSession.device_id, type: "message.text", created_at: Date.now(), ciphertext: "not-an-mls-member", metadata: { mls_epoch: 1 } };
+    const unauthorizedUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: lateSession.device_id, type: "message.text", created_at: Date.now(), ciphertext: "not-an-mls-member", metadata: { mls_epoch: 1 } };
     const unauthorizedSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, lateDevice.signing.privateKey, canonicalEventBytes(unauthorizedUnsigned)));
     const unauthorized = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${lateSession.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unauthorizedUnsigned, signature: unauthorizedSignature }) });
     expect(unauthorized.status).toBe(403);
@@ -1503,7 +1513,7 @@ describe("single-server durable delivery", () => {
     expect(noSessionYet.status).toBe(401);
 
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+      event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
       type: "control.device.add", created_at: Date.now(), ciphertext: "opaque-mls-add-commit",
       metadata: { mls_epoch: 2, target_device_id: linkedDevice.id, link_id: link.link_id },
     };
@@ -1604,7 +1614,7 @@ describe("single-server durable delivery", () => {
       body: JSON.stringify({ room_id: roomId, kind: "direct", members: [peer.user_id], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: claims.key_packages.map((item) => item.device_id), mls_claim_ids: claims.key_packages.map((item) => item.claim_id) }),
     });
     expect(created.status, await created.clone().text()).toBe(201);
-    const beforeRemovalUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id, type: "message.text", created_at: Date.now(), ciphertext: "accepted-before-removal", metadata: { mls_epoch: 1 } };
+    const beforeRemovalUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id, type: "message.text", created_at: Date.now(), ciphertext: "accepted-before-removal", metadata: { mls_epoch: 1 } };
     const beforeRemovalSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, primaryDevice.signing.privateKey, canonicalEventBytes(beforeRemovalUnsigned)));
     const retryAcceptedMessage = () => SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${owner.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...beforeRemovalUnsigned, signature: beforeRemovalSignature }) });
     expect((await retryAcceptedMessage()).status).toBe(201);
@@ -1628,7 +1638,7 @@ describe("single-server durable delivery", () => {
     expect(await SELF.fetch("https://edgechat.test/api/v1/device-revocations", { headers: { authorization: `Bearer ${owner.access_token}` } }).then((response) => response.json())).toMatchObject({ revocations: [{ revocation_id: job.revocation_id, target_device_id: secondary.device_id, status: "pending" }] });
 
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id,
+      event_id: eventId(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id,
       type: "control.device.revoke", created_at: Date.now(), ciphertext: "opaque-mls-remove-commit",
       metadata: { mls_epoch: 2, target_device_id: secondary.device_id, revocation_id: job.revocation_id },
     };
@@ -1646,7 +1656,7 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT removed_epoch, removed_at FROM room_devices WHERE room_id = ? AND device_id = ?").bind(roomId, secondary.device_id).first()).toMatchObject({ removed_epoch: 2 });
     expect(await env.DB.prepare("SELECT event_type FROM room_events WHERE event_id = ?").bind(unsigned.event_id).first()).toMatchObject({ event_type: "control.device.revoke" });
     expect(await env.DB.prepare("SELECT count(*) AS count FROM room_events WHERE event_id = ?").bind(unsigned.event_id).first()).toMatchObject({ count: 1 });
-    const staleUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id, type: "message.text", created_at: Date.now(), ciphertext: "old-epoch-ciphertext", metadata: { mls_epoch: 1 } };
+    const staleUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id, type: "message.text", created_at: Date.now(), ciphertext: "old-epoch-ciphertext", metadata: { mls_epoch: 1 } };
     const staleSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, primaryDevice.signing.privateKey, canonicalEventBytes(staleUnsigned)));
     const stale = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${owner.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...staleUnsigned, signature: staleSignature }) });
     expect(stale.status).toBe(409);
@@ -1714,16 +1724,32 @@ describe("single-server durable delivery", () => {
     const usage = await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${alice.access_token}` } });
     expect(await usage.json()).toMatchObject({ attachment_bytes: 4, attachment_objects: 1, archive_bytes: 0, used_bytes: 4 });
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id,
+      event_id: eventId(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id,
       type: "message.text", created_at: Date.now(), ciphertext: "opaque-AES-GCM-envelope", metadata: { mls_epoch: 1, attachment_id: uploadedAttachment.attachment_id },
     };
+    const submitWithEventId = async (candidate: string) => {
+      const candidateUnsigned = { ...unsigned, event_id: candidate as EventId, metadata: { mls_epoch: 1 } };
+      const candidateSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(candidateUnsigned)));
+      return SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, {
+        method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...candidateUnsigned, signature: candidateSignature }),
+      });
+    };
+    const objectsBeforeRejectedEvents = (await env.ARCHIVE.list()).objects.length;
+    const malformedEventId = await submitWithEventId(crypto.randomUUID());
+    expect(malformedEventId.status).toBe(400);
+    expect(await malformedEventId.json()).toMatchObject({ code: "invalid_event" });
+    const remoteEventId = await submitWithEventId(eventId("remote.test"));
+    expect(remoteEventId.status).toBe(400);
+    expect(await remoteEventId.json()).toMatchObject({ code: "federation_disabled" });
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM room_events WHERE room_id = ?").bind(roomId).first()).toEqual({ count: 0 });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(objectsBeforeRejectedEvents);
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(unsigned)));
     const sent = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, {
       method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unsigned, signature }),
     });
     expect(sent.status, await sent.clone().text()).toBe(201);
     const forgedControlUnsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id,
+      event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id,
       type: "control.device.add", created_at: Date.now(), ciphertext: "forged-membership-commit",
       metadata: { mls_epoch: 2, target_device_id: "attacker-device", link_id: "not-a-real-link" },
     };
@@ -1763,7 +1789,7 @@ describe("single-server durable delivery", () => {
     await acceptRequest(forwardRoomId, charlie.access_token);
     const forwardGrantId = "forward_attachment_000001";
     const forwardUnsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: forwardRoomId, sender: bob.user_id, device_id: bob.device_id,
+      event_id: eventId(), room_id: forwardRoomId, sender: bob.user_id, device_id: bob.device_id,
       type: "message.file", created_at: Date.now(), ciphertext: "opaque-forwarded-envelope",
       metadata: { mls_epoch: 1, attachment_id: forwardGrantId, forward_source_attachment_id: uploadedAttachment.attachment_id },
     };
@@ -1813,22 +1839,22 @@ describe("single-server durable delivery", () => {
     const abandonMissing = await SELF.fetch("https://edgechat.test/api/v1/attachments/abandon", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ attachment_ids: [missing.attachment_id] }) });
     expect(await abandonMissing.json()).toEqual({ abandoned: 1 });
 
-    const bobEditUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.edit", created_at: Date.now(), ciphertext: "opaque-edit", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
+    const bobEditUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.edit", created_at: Date.now(), ciphertext: "opaque-edit", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
     const bobEditSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(bobEditUnsigned)));
     const cannotEditAnotherSender = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...bobEditUnsigned, signature: bobEditSignature }) });
     expect(cannotEditAnotherSender.status).toBe(403);
     expect(await cannotEditAnotherSender.json()).toMatchObject({ code: "edit_forbidden" });
 
-    const editUnsigned: Omit<ClientEvent, "signature"> = { ...bobEditUnsigned, event_id: crypto.randomUUID(), sender: alice.user_id, device_id: alice.device_id };
+    const editUnsigned: Omit<ClientEvent, "signature"> = { ...bobEditUnsigned, event_id: eventId(), sender: alice.user_id, device_id: alice.device_id };
     const editSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(editUnsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...editUnsigned, signature: editSignature }) })).status).toBe(201);
 
-    const reactionUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.reaction", created_at: Date.now(), ciphertext: "opaque-reaction", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
+    const reactionUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.reaction", created_at: Date.now(), ciphertext: "opaque-reaction", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
     const reactionSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(reactionUnsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...reactionUnsigned, signature: reactionSignature }) })).status).toBe(201);
     expect(await env.DB.prepare("SELECT event_type, event_json FROM room_events WHERE event_id = ?").bind(reactionUnsigned.event_id).first()).toMatchObject({ event_type: "message.reaction" });
 
-    const receiptUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "receipt.read", created_at: Date.now(), ciphertext: "opaque-mls-read-receipt", metadata: { mls_epoch: 1 } };
+    const receiptUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "receipt.read", created_at: Date.now(), ciphertext: "opaque-mls-read-receipt", metadata: { mls_epoch: 1 } };
     const receiptSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(receiptUnsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...receiptUnsigned, signature: receiptSignature }) })).status).toBe(201);
     const storedReceipt = await env.DB.prepare("SELECT event_type, event_json FROM room_events WHERE event_id = ?").bind(receiptUnsigned.event_id).first<{ event_type: string; event_json: string }>();
@@ -1837,7 +1863,7 @@ describe("single-server durable delivery", () => {
     expect(storedReceipt?.event_json).not.toContain("up_to_seq");
 
     const objectsBeforeExpiryPolicy = (await env.ARCHIVE.list()).objects.length;
-    const expiryUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "control.message-expiry", created_at: Date.now(), ciphertext: "opaque-mls-expiry-policy", metadata: { mls_epoch: 1 } };
+    const expiryUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "control.message-expiry", created_at: Date.now(), ciphertext: "opaque-mls-expiry-policy", metadata: { mls_epoch: 1 } };
     const expirySignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(expiryUnsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...expiryUnsigned, signature: expirySignature }) })).status).toBe(201);
     const storedExpiry = await env.DB.prepare("SELECT event_type, event_json FROM room_events WHERE event_id = ?").bind(expiryUnsigned.event_id).first<{ event_type: string; event_json: string }>();
@@ -1846,7 +1872,7 @@ describe("single-server durable delivery", () => {
     expect(storedExpiry?.event_json).not.toContain("expires_in_seconds");
     expect((await env.ARCHIVE.list()).objects).toHaveLength(objectsBeforeExpiryPolicy);
 
-    const contactUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.contact", created_at: Date.now(), ciphertext: "opaque-mls-contact-card", metadata: { mls_epoch: 1 } };
+    const contactUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.contact", created_at: Date.now(), ciphertext: "opaque-mls-contact-card", metadata: { mls_epoch: 1 } };
     const contactSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(contactUnsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...contactUnsigned, signature: contactSignature }) })).status).toBe(201);
     const storedContact = await env.DB.prepare("SELECT event_type, event_json FROM room_events WHERE event_id = ?").bind(contactUnsigned.event_id).first<{ event_type: string; event_json: string }>();
@@ -1856,12 +1882,12 @@ describe("single-server durable delivery", () => {
     expect(storedContact?.event_json).not.toContain("user_id");
     expect((await env.ARCHIVE.list()).objects).toHaveLength(objectsBeforeExpiryPolicy);
 
-    const contactWithAttachmentUnsigned: Omit<ClientEvent, "signature"> = { ...contactUnsigned, event_id: crypto.randomUUID(), metadata: { mls_epoch: 1, attachment_id: "not-an-attachment" } };
+    const contactWithAttachmentUnsigned: Omit<ClientEvent, "signature"> = { ...contactUnsigned, event_id: eventId(), metadata: { mls_epoch: 1, attachment_id: "not-an-attachment" } };
     const contactWithAttachmentSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(contactWithAttachmentUnsigned)));
     const contactWithAttachment = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...contactWithAttachmentUnsigned, signature: contactWithAttachmentSignature }) });
     expect(contactWithAttachment.status).toBe(400); expect(await contactWithAttachment.json()).toMatchObject({ code: "invalid_attachment" });
 
-    const durableTypingUnsigned: Omit<ClientEvent, "signature"> = { ...receiptUnsigned, event_id: crypto.randomUUID(), type: "typing.start", ciphertext: "must-not-be-stored" };
+    const durableTypingUnsigned: Omit<ClientEvent, "signature"> = { ...receiptUnsigned, event_id: eventId(), type: "typing.start", ciphertext: "must-not-be-stored" };
     const durableTypingSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(durableTypingUnsigned)));
     const durableTyping = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...durableTypingUnsigned, signature: durableTypingSignature }) });
     expect(durableTyping.status).toBe(409);
@@ -1873,12 +1899,12 @@ describe("single-server durable delivery", () => {
     const memberLease = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}` } });
     expect(memberLease.status).toBe(403);
 
-    const bobDeleteUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.delete", created_at: Date.now(), ciphertext: "opaque-delete", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
+    const bobDeleteUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.delete", created_at: Date.now(), ciphertext: "opaque-delete", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
     const bobDeleteSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(bobDeleteUnsigned)));
     const cannotDeleteAnotherSender = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...bobDeleteUnsigned, signature: bobDeleteSignature }) });
     expect(cannotDeleteAnotherSender.status).toBe(403);
 
-    const deleteUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.delete", created_at: Date.now(), ciphertext: "opaque-delete", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
+    const deleteUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.delete", created_at: Date.now(), ciphertext: "opaque-delete", metadata: { mls_epoch: 1, target_event_id: unsigned.event_id } };
     const deleteSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(deleteUnsigned)));
     const deleteRequest = () => SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...deleteUnsigned, signature: deleteSignature }) });
     expect((await deleteRequest()).status).toBe(201);
@@ -1891,7 +1917,7 @@ describe("single-server durable delivery", () => {
     expect(await usageAfterDelete.json()).toMatchObject({ attachment_bytes: 4, attachment_objects: 1 });
     expect((await deleteRequest()).status).toBe(201);
 
-    const deleteForwardUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: forwardRoomId, sender: bob.user_id, device_id: bob.device_id, type: "message.delete", created_at: Date.now(), ciphertext: "opaque-forward-delete", metadata: { mls_epoch: 1, target_event_id: forwardUnsigned.event_id } };
+    const deleteForwardUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: forwardRoomId, sender: bob.user_id, device_id: bob.device_id, type: "message.delete", created_at: Date.now(), ciphertext: "opaque-forward-delete", metadata: { mls_epoch: 1, target_event_id: forwardUnsigned.event_id } };
     const deleteForwardSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(deleteForwardUnsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(forwardRoomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...deleteForwardUnsigned, signature: deleteForwardSignature }) })).status).toBe(201);
     expect(committed && await env.ARCHIVE.get(committed.object_key)).toBeNull();
@@ -1912,7 +1938,7 @@ describe("single-server durable delivery", () => {
     const blockedClaim = await SELF.fetch("https://edgechat.test/api/v1/mls/key-packages/claim", { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ user_ids: [alice.user_id], room_id: "!blocked-room-000001:localhost" }) });
     expect(blockedClaim.status).toBe(403);
     expect(await blockedClaim.json()).toMatchObject({ code: "interaction_not_allowed" });
-    const blockedUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.text", created_at: Date.now(), ciphertext: "must-not-be-ordered", metadata: { mls_epoch: 1 } };
+    const blockedUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id, type: "message.text", created_at: Date.now(), ciphertext: "must-not-be-ordered", metadata: { mls_epoch: 1 } };
     const blockedSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(blockedUnsigned)));
     const blockedSend = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...blockedUnsigned, signature: blockedSignature }) });
     expect(blockedSend.status).toBe(403);
@@ -1927,7 +1953,7 @@ describe("single-server durable delivery", () => {
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 
     expect((await SELF.fetch(`https://edgechat.test/api/v1/users/${encodeURIComponent(bob.user_id)}/block`, { method: "DELETE", headers: { authorization: `Bearer ${alice.access_token}` } })).status).toBe(204);
-    const restoredUnsigned: Omit<ClientEvent, "signature"> = { ...blockedUnsigned, event_id: crypto.randomUUID(), created_at: Date.now(), ciphertext: "allowed-after-unblock" };
+    const restoredUnsigned: Omit<ClientEvent, "signature"> = { ...blockedUnsigned, event_id: eventId(), created_at: Date.now(), ciphertext: "allowed-after-unblock" };
     const restoredSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, bobDevice.signing.privateKey, canonicalEventBytes(restoredUnsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...restoredUnsigned, signature: restoredSignature }) })).status).toBe(201);
 
@@ -2056,17 +2082,17 @@ describe("single-server durable delivery", () => {
     expect(uploadBeforeAccept.status).toBe(409);
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 
-    const signText = async (eventId: string) => {
+    const signText = async (eventId: EventId) => {
       const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId, room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.text", created_at: Date.now(), ciphertext: "opaque-request-text", metadata: { mls_epoch: 1 } };
       return { ...unsigned, signature: b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(unsigned))) };
     };
-    const contactUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.contact", created_at: Date.now(), ciphertext: "opaque-request-contact", metadata: { mls_epoch: 1 } };
+    const contactUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.contact", created_at: Date.now(), ciphertext: "opaque-request-contact", metadata: { mls_epoch: 1 } };
     const contactSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(contactUnsigned)));
     const contactRequest = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...contactUnsigned, signature: contactSignature }) });
     expect(contactRequest.status).toBe(409); expect(await contactRequest.json()).toMatchObject({ code: "message_request_text_only" });
-    const first = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify(await signText(crypto.randomUUID())) });
+    const first = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify(await signText(eventId())) });
     expect(first.status, await first.clone().text()).toBe(201);
-    const second = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify(await signText(crypto.randomUUID())) });
+    const second = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify(await signText(eventId())) });
     expect(second.status).toBe(429); expect(await second.json()).toMatchObject({ code: "message_request_message_limit" });
 
     await acceptRequest(roomId, bob.access_token);
@@ -2084,7 +2110,7 @@ describe("single-server durable delivery", () => {
     const claims = await claim.json() as { key_packages: Array<{ claim_id: string; device_id: string }> };
     const created = await SELF.fetch("https://edgechat.test/api/v1/rooms", { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ room_id: roomId, kind: "direct", members: [bob.user_id], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: claims.key_packages.map((item) => item.device_id), mls_claim_ids: claims.key_packages.map((item) => item.claim_id) }) });
     expect(created.status, await created.clone().text()).toBe(201);
-    const unsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.text", created_at: Date.now(), ciphertext: "opaque-reported-text", metadata: { mls_epoch: 1 } };
+    const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id, type: "message.text", created_at: Date.now(), ciphertext: "opaque-reported-text", metadata: { mls_epoch: 1 } };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, aliceDevice.signing.privateKey, canonicalEventBytes(unsigned)));
     expect((await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unsigned, signature }) })).status).toBe(201);
     const reported = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/report`, { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ category: "spam", event_id: unsigned.event_id }) });
@@ -2148,30 +2174,30 @@ describe("single-server durable delivery", () => {
     const botRoomBody = await botRooms.json() as { rooms: Array<{ room_id: string }> };
     expect(botRoomBody.rooms.map((item) => item.room_id)).toEqual([roomId]);
     await env.DB.prepare("UPDATE bot_integrations SET max_messages_per_minute = 1 WHERE bot_id = ?").bind(bot.bot_id).run();
-    const wrongBotUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: bot.device_id, type: "message.text", created_at: Date.now(), ciphertext: "wrong-bot-provenance", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: "bot_wrong" } };
+    const wrongBotUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: owner.user_id, device_id: bot.device_id, type: "message.text", created_at: Date.now(), ciphertext: "wrong-bot-provenance", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: "bot_wrong" } };
     const wrongBotSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, botDevice.signing.privateKey, canonicalEventBytes(wrongBotUnsigned)));
     const wrongBot = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bot.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...wrongBotUnsigned, signature: wrongBotSignature }) });
     expect(wrongBot.status).toBe(403);
     expect(await wrongBot.json()).toMatchObject({ code: "bot_provenance_mismatch" });
 
-    const spoofedBotUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id, type: "message.text", created_at: Date.now(), ciphertext: "human-spoofed-bot-provenance", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: bot.bot_id } };
+    const spoofedBotUnsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id, type: "message.text", created_at: Date.now(), ciphertext: "human-spoofed-bot-provenance", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: bot.bot_id } };
     const spoofedBotSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, ownerDevice.signing.privateKey, canonicalEventBytes(spoofedBotUnsigned)));
     const spoofedBot = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${owner.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...spoofedBotUnsigned, signature: spoofedBotSignature }) });
     expect(spoofedBot.status).toBe(403);
     expect(await spoofedBot.json()).toMatchObject({ code: "bot_provenance_forbidden" });
 
-    const unsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: bot.device_id, type: "message.text", created_at: Date.now(), ciphertext: "opaque-bot-ciphertext", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: bot.bot_id } };
+    const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId(), room_id: roomId, sender: owner.user_id, device_id: bot.device_id, type: "message.text", created_at: Date.now(), ciphertext: "opaque-bot-ciphertext", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: bot.bot_id } };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, botDevice.signing.privateKey, canonicalEventBytes(unsigned)));
     const sent = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bot.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unsigned, signature }) });
     expect(sent.status, await sent.clone().text()).toBe(201);
     const idempotentRetry = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bot.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unsigned, signature }) });
     expect(idempotentRetry.status).toBe(201);
-    const secondUnsigned: Omit<ClientEvent, "signature"> = { ...unsigned, event_id: crypto.randomUUID(), created_at: Date.now(), ciphertext: "second-opaque-bot-ciphertext" };
+    const secondUnsigned: Omit<ClientEvent, "signature"> = { ...unsigned, event_id: eventId(), created_at: Date.now(), ciphertext: "second-opaque-bot-ciphertext" };
     const secondSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, botDevice.signing.privateKey, canonicalEventBytes(secondUnsigned)));
     const rateLimited = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bot.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...secondUnsigned, signature: secondSignature }) });
     expect(rateLimited.status).toBe(429);
     expect(rateLimited.headers.get("retry-after")).toBe("60");
-    const receiptUnsigned: Omit<ClientEvent, "signature"> = { ...unsigned, event_id: crypto.randomUUID(), type: "receipt.read", created_at: Date.now(), ciphertext: "opaque-receipt" };
+    const receiptUnsigned: Omit<ClientEvent, "signature"> = { ...unsigned, event_id: eventId(), type: "receipt.read", created_at: Date.now(), ciphertext: "opaque-receipt" };
     const receiptSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, botDevice.signing.privateKey, canonicalEventBytes(receiptUnsigned)));
     const deniedCapability = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bot.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...receiptUnsigned, signature: receiptSignature }) });
     expect(deniedCapability.status).toBe(403);
@@ -2286,7 +2312,7 @@ describe("single-server durable delivery", () => {
     });
     const { attachment_id: attachmentId } = await attachment.json() as { attachment_id: string };
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
+      event_id: eventId(), room_id: roomId, sender: account.user_id, device_id: account.device_id,
       type: "message.text", created_at: Date.now(), ciphertext: "opaque-export-ciphertext",
       metadata: { mls_epoch: 1, attachment_id: attachmentId },
     };
@@ -2340,7 +2366,7 @@ describe("single-server durable delivery", () => {
     });
     const { attachment_id: attachmentId } = await upload.json() as { attachment_id: string };
     const unsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id,
+      event_id: eventId(), room_id: roomId, sender: alice.user_id, device_id: alice.device_id,
       type: "message.file", created_at: Date.now(), ciphertext: "retained-shared-ciphertext",
       metadata: { mls_epoch: 1, attachment_id: attachmentId },
     };
@@ -2366,7 +2392,7 @@ describe("single-server durable delivery", () => {
     const tasks = await SELF.fetch("https://edgechat.test/api/v1/account-removals", { headers: { authorization: `Bearer ${bob.access_token}` } }).then((response) => response.json()) as { tasks: Array<{ deletion_id: string; room_id: RoomId; target_user_id: UserId; expected_epoch: number }> };
     expect(tasks.tasks).toEqual([{ deletion_id: deletionJob.deletion_id, room_id: roomId, expected_epoch: 2, target_user_id: alice.user_id, target_device_ids: [alice.device_id], name: null, kind: "direct" }]);
     const removalUnsigned: Omit<ClientEvent, "signature"> = {
-      event_id: crypto.randomUUID(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id,
+      event_id: eventId(), room_id: roomId, sender: bob.user_id, device_id: bob.device_id,
       type: "control.group.commit", created_at: Date.now(), ciphertext: "opaque-mls-account-removal-commit",
       metadata: { mls_epoch: 2, account_deletion_id: deletionJob.deletion_id, target_user_id: alice.user_id },
     };

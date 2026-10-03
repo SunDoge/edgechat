@@ -6,7 +6,7 @@ import { eventReceiptKeyStatus, issueAcceptanceReceipt, repairReceiptsEnabled, v
 
 const roomId = "!receiptrotation01:localhost" as RoomId;
 const event: ClientEvent = {
-  event_id: "receipt-rotation-event", room_id: roomId, sender: "@alice:localhost" as UserId, device_id: "device-a",
+  event_id: "$receipt-rotation-event:localhost", room_id: roomId, sender: "@alice:localhost" as UserId, device_id: "device-a",
   type: "message.text", created_at: 1, ciphertext: "opaque", metadata: { mls_epoch: 1 }, signature: "signature",
 };
 const oldSecret = "old-event-receipt-secret-with-at-least-32-bytes";

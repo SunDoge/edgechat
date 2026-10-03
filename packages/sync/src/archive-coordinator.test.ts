@@ -8,7 +8,7 @@ import { ArchiveCoordinator } from "./archive-coordinator";
 const roomId = "!0123456789abcdef:example.com" as RoomId;
 const lease: CompactionLease = { room_id: roomId, token: "lease-token-000000000", device_id: "device", segment_id: "segment-000000000001", start_seq: 1, end_seq: 3, expires_at: Date.now() + 60_000 };
 const events = Array.from({ length: 3 }, (_, index): RoomEvent => ({
-  event_id: `event-${index}`, room_id: roomId, seq: index + 1, sender: "@alice:example.com", device_id: "device",
+  event_id: `$test-event-${index}:example.com`, room_id: roomId, seq: index + 1, sender: "@alice:example.com", device_id: "device",
   type: "message.text", created_at: index, ciphertext: `cipher-${index}`, metadata: {}, signature: "signature",
 }));
 

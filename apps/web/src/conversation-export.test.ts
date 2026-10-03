@@ -6,7 +6,7 @@ import { conversationExportFilename, formatConversationMessage, streamConversati
 const room = "!roomroomroomroom:example.com" as RoomId;
 function message(seq: number, overrides: Partial<LocalMessage> = {}): LocalMessage {
   return {
-    event_id: `event-${seq}`, message_id: `$message-${seq}:example.com`, room_id: room, seq,
+    event_id: `$test-event-${seq}:example.com`, message_id: `$message-${seq}:example.com`, room_id: room, seq,
     sender: "@alice:example.com", device_id: "device", event_type: "message.text", created_at: new Date(2026, 9, 3, 9, 5, seq).getTime(),
     ciphertext: "server ciphertext", plaintext: "hello", payload: { version: 2, message_id: `$message-${seq}:example.com`, parts: [{ part_id: "text", kind: "text", text: "hello" }] },
     deleted_at: null, deleted_by: null, delete_event_id: null, edited_at: null, edit_event_id: null, expires_at: null,

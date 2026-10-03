@@ -6,12 +6,12 @@ import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
   return {
-    event_id: `event-${seq}`, room_id: "!repair:example.com", seq,
+    event_id: `$test-event-${seq}:example.com`, room_id: "!repair:example.com", seq,
     sender: "@alice:example.com", device_id: "device-1", type: "message.text",
     created_at: seq, ciphertext: `ciphertext-${seq}`, metadata: {}, signature: `signature-${seq}`,
     acceptance_receipt: {
       version: 1, key_id: "v1", room_id: "!repair:example.com", seq,
-      event_id: `event-${seq}`, event_hash: `hash-${seq}`, accepted_at: seq, retention_generation: generation, mac: `mac-${seq}`,
+      event_id: `$test-event-${seq}:example.com`, event_hash: `hash-${seq}`, accepted_at: seq, retention_generation: generation, mac: `mac-${seq}`,
     },
   } as RoomEvent;
 }
@@ -159,7 +159,7 @@ describe("SyncEngine event ingestion", () => {
       saveDecryptedEvent: async () => undefined,
     } as unknown as LocalDatabase;
     const event = {
-      event_id: "event-1", room_id: "!room:example.com", seq: 1,
+      event_id: "$test-event-1:example.com", room_id: "!room:example.com", seq: 1,
       sender: "@alice:example.com", device_id: "device-1", type: "message.text",
       created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature",
     } as RoomEvent;
@@ -181,7 +181,7 @@ describe("SyncEngine event ingestion", () => {
 
   it("prepares a newly available room before decrypting its first event", async () => {
     const order: string[] = [];
-    const event = { event_id: "event-2", room_id: "!room:example.com", seq: 1, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    const event = { event_id: "$test-event-2:example.com", room_id: "!room:example.com", seq: 1, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
     const api = {
       sync: async () => ({ next_cursor: 2, has_more: false, items: [
         { cursor: 1, kind: "room.event.available", room_id: event.room_id, seq: null, payload: { type: "room.available" } },
@@ -238,17 +238,17 @@ describe("SyncEngine event ingestion", () => {
       saveDecryptedEvent: async (event: RoomEvent) => { saved.push(event.event_id); },
     } as unknown as LocalDatabase;
     const base = { room_id: "!room:example.com", sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as const;
-    const bad = { ...base, event_id: "bad", seq: 1 } as RoomEvent;
-    const good = { ...base, event_id: "good", seq: 2 } as RoomEvent;
+    const bad = { ...base, event_id: "$bad-event:example.com", seq: 1 } as RoomEvent;
+    const good = { ...base, event_id: "$good-event:example.com", seq: 2 } as RoomEvent;
     const engine = new SyncEngine(new ApiClient(""), db, async (event) => {
-      if (event.event_id === "bad") throw new Error("invalid encrypted payload");
+      if (event.event_id === "$bad-event:example.com") throw new Error("invalid encrypted payload");
       return { plaintext: "ok", payload: {} };
     });
     const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
     await Promise.all([ingest(bad), ingest(good)]);
-    expect(quarantined).toEqual(["bad"]);
-    expect(saved).toEqual(["good"]);
-    expect(Array.from(processed)).toEqual(["bad", "good"]);
+    expect(quarantined).toEqual(["$bad-event:example.com"]);
+    expect(saved).toEqual(["$good-event:example.com"]);
+    expect(Array.from(processed)).toEqual(["$bad-event:example.com", "$good-event:example.com"]);
   });
 
   it("publishes processed only after the decrypted local projection is durable", async () => {
@@ -259,7 +259,7 @@ describe("SyncEngine event ingestion", () => {
       markProcessed: async () => { order.push("marked"); },
       saveDecryptedEvent: async () => { order.push("saved"); },
     } as unknown as LocalDatabase;
-    const event = { event_id: "event-order", room_id: "!room:example.com", seq: 1, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    const event = { event_id: "$test-event-order:example.com", room_id: "!room:example.com", seq: 1, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
     const engine = new SyncEngine(new ApiClient(""), db, async () => ({ plaintext: "hello", payload: {} }));
     engine.addEventListener("processed", () => order.push("processed"));
     const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
@@ -269,7 +269,7 @@ describe("SyncEngine event ingestion", () => {
 
   it("replays a staged plaintext projection after MLS state advanced but the browser crashed", async () => {
     const roomId = "!staged-recovery:example.com" as const;
-    const event = { event_id: "staged-event-1", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+    const event = { event_id: "$staged-event-1:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
       type: "message.text" as const, created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
     let staged = true; const order: string[] = [];
     const db = {
@@ -294,7 +294,7 @@ describe("SyncEngine event ingestion", () => {
 
   it("keeps staged plaintext retryable when the local projection cannot be persisted", async () => {
     const roomId = "!staged-write-failure:example.com" as const;
-    const event = { event_id: "staged-event-write-failure", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+    const event = { event_id: "$staged-event-write-failure:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
       type: "message.edit" as const, created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
     const removeStagedDecryptedEvent = vi.fn(async () => undefined);
     const quarantineEvent = vi.fn(async () => undefined);
@@ -317,7 +317,7 @@ describe("SyncEngine event ingestion", () => {
       roomSequenceState: async () => ({ room_id: "!room:example.com", baseline_seq: 7, processed_through_seq: 7 }),
       hasMessage: async () => false,
     } as unknown as LocalDatabase;
-    const event = { event_id: "join-commit", room_id: "!room:example.com", seq: 7, sender: "@alice:example.com", device_id: "device-1", type: "control.device.add", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    const event = { event_id: "$join-commit:example.com", room_id: "!room:example.com", seq: 7, sender: "@alice:example.com", device_id: "device-1", type: "control.device.add", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
     const engine = new SyncEngine(new ApiClient(""), db, decrypt);
     const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
     await expect(ingest(event)).resolves.toBeUndefined();
@@ -330,7 +330,7 @@ describe("SyncEngine event ingestion", () => {
       roomSequenceState: async () => ({ room_id: "!room:example.com", baseline_seq: 0, processed_through_seq: 3 }),
       hasMessage: async () => false,
     } as unknown as LocalDatabase;
-    const event = { event_id: "event-5", room_id: "!room:example.com", seq: 5, sender: "@alice:example.com", device_id: "device-1", type: "control.group.commit", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    const event = { event_id: "$test-event-5:example.com", room_id: "!room:example.com", seq: 5, sender: "@alice:example.com", device_id: "device-1", type: "control.group.commit", created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
     const engine = new SyncEngine(new ApiClient(""), db, decrypt);
     const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
     await expect(ingest(event)).rejects.toEqual(expect.objectContaining<Partial<RoomSequenceGapError>>({ roomId: event.room_id, processedThrough: 3, receivedSeq: 5 }));
@@ -339,7 +339,7 @@ describe("SyncEngine event ingestion", () => {
 
   it("range-recovers an archived gap in order before processing the durable tail", async () => {
     const roomId = "!room:example.com" as const;
-    const makeEvent = (seq: number) => ({ event_id: `event-${seq}`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: seq, ciphertext: `cipher-${seq}`, metadata: {}, signature: `signature-${seq}` } as RoomEvent);
+    const makeEvent = (seq: number) => ({ event_id: `$test-event-${seq}:example.com`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: seq, ciphertext: `cipher-${seq}`, metadata: {}, signature: `signature-${seq}` } as RoomEvent);
     const archived = [makeEvent(1), makeEvent(2), makeEvent(3)]; const tail = makeEvent(4);
     const key = crypto.getRandomValues(new Uint8Array(32)); const envelope = new Uint8Array(96).fill(9);
     const segment = await buildSegment(roomId, "archive_segment_gap_001", archived, key, envelope, 180);
@@ -367,8 +367,8 @@ describe("SyncEngine event ingestion", () => {
 
   it("defers a room after intentional cloud GC without stalling unrelated rooms or the global cursor", async () => {
     const roomId = "!room:example.com" as const;
-    const event = { event_id: "event-3", room_id: roomId, seq: 3, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 3, ciphertext: "cipher-3", metadata: {}, signature: "signature-3" } as RoomEvent;
-    const other = { ...event, event_id: "other-1", room_id: "!other:example.com" as const, seq: 1, ciphertext: "other-cipher" } as RoomEvent;
+    const event = { event_id: "$test-event-3:example.com", room_id: roomId, seq: 3, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 3, ciphertext: "cipher-3", metadata: {}, signature: "signature-3" } as RoomEvent;
+    const other = { ...event, event_id: "$other-event-1:example.com", room_id: "!other:example.com" as const, seq: 1, ciphertext: "other-cipher" } as RoomEvent;
     const api = {
       sync: vi.fn(async () => ({ next_cursor: 4, has_more: false, items: [
         { cursor: 3, kind: "room.event", room_id: roomId, seq: 3, payload: event },
@@ -398,7 +398,7 @@ describe("SyncEngine event ingestion", () => {
 
   it("restores a deferred-room block after reload and drains it only after peer recovery", async () => {
     const roomId = "!deferred-room:example.com" as const;
-    const event = { event_id: "event-2", room_id: roomId, seq: 2, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 2, ciphertext: "cipher-2", metadata: {}, signature: "signature-2" } as RoomEvent;
+    const event = { event_id: "$test-event-2:example.com", room_id: roomId, seq: 2, sender: "@alice:example.com", device_id: "device-1", type: "message.text", created_at: 2, ciphertext: "cipher-2", metadata: {}, signature: "signature-2" } as RoomEvent;
     let through = 0; let rows = [event];
     const db = {
       getCursor: async () => 9, setCursor: vi.fn(async () => undefined),
@@ -426,9 +426,9 @@ describe("SyncEngine event ingestion", () => {
 
   it("ingests an exact peer-recovery range before draining the deferred tail", async () => {
     const roomId = "!peer-recover:example.com" as const;
-    const recovery = [1, 2].map((seq) => ({ event_id: `event-${seq}`, room_id: roomId, seq, sender: "@alice:example.com",
+    const recovery = [1, 2].map((seq) => ({ event_id: `$test-event-${seq}:example.com`, room_id: roomId, seq, sender: "@alice:example.com",
       device_id: "device-1", type: "message.text", created_at: seq, ciphertext: `cipher-${seq}`, metadata: {}, signature: `signature-${seq}` })) as RoomEvent[];
-    const deferred = { ...recovery[1], event_id: "event-3", seq: 3, ciphertext: "cipher-3" } as RoomEvent;
+    const deferred = { ...recovery[1], event_id: "$test-event-3:example.com", seq: 3, ciphertext: "cipher-3" } as RoomEvent;
     let through = 0; let tail = [deferred];
     const db = {
       roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: through }), hasMessage: async () => false,
@@ -793,7 +793,7 @@ describe("ProgressiveHistoryIndexer", () => {
   it("coalesces the device envelope and index read before ordered chunk processing", async () => {
     const roomId = "!archive-index:example.com" as const;
     const events: RoomEvent[] = Array.from({ length: 4 }, (_, index) => ({
-      event_id: `archive-event-${index}`, room_id: roomId, seq: index + 1,
+      event_id: `$archive-event-${index}:example.com`, room_id: roomId, seq: index + 1,
       sender: "@alice:example.com", device_id: "alice-device", type: "message.text" as const,
       created_at: index, ciphertext: `cipher-${index}`, metadata: {}, signature: `signature-${index}`,
     } as RoomEvent));
@@ -834,7 +834,7 @@ describe("ArchiveSegmentReader metadata cache", () => {
   it("reuses authenticated immutable metadata while range-fetching only requested chunks", async () => {
     const roomId = "!archive-cache:example.com" as const;
     const events = [1, 2].map((seq) => ({
-      event_id: `cache-event-${seq}`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "alice-device",
+      event_id: `$cache-event-${seq}:example.com`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "alice-device",
       type: "message.text" as const, created_at: seq, ciphertext: `cipher-${seq}`, metadata: {}, signature: `signature-${seq}`,
     } as RoomEvent));
     const key = crypto.getRandomValues(new Uint8Array(32)); const envelope = new Uint8Array(96).fill(4);
@@ -859,7 +859,7 @@ describe("ArchiveSegmentReader metadata cache", () => {
 
   it("uses a linked-device OPFS segment without R2 and evicts a corrupted local copy before retrying", async () => {
     const roomId = "!archive-local:example.com" as const;
-    const event = { event_id: "local-event-1", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "alice-device",
+    const event = { event_id: "$local-event-1:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "alice-device",
       type: "message.text" as const, created_at: 1, ciphertext: "cipher", metadata: {}, signature: "signature" } as RoomEvent;
     const key = crypto.getRandomValues(new Uint8Array(32)); const envelope = new Uint8Array(96).fill(8);
     const built = await buildSegment(roomId, "archive_local_segment_1", [event], key, envelope, 180);
@@ -889,7 +889,7 @@ describe("OrderedArchiveCatchUp", () => {
     ];
     const api = { archivePlan: vi.fn(async () => ({ segments, has_more: false })) } as unknown as ApiClient;
     const reader = { read: vi.fn(async (_roomId: string, segment: typeof segments[number], sequences?: number[]) => (sequences ?? []).map((seq) => ({
-      event_id: `event-${seq}`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "device",
+      event_id: `$test-event-${seq}:example.com`, room_id: roomId, seq, sender: "@alice:example.com", device_id: "device",
       type: "message.text" as const, created_at: seq, ciphertext: "ciphertext", metadata: {}, signature: "signature",
     }))) } as unknown as ArchiveSegmentReader;
     const ingested: number[] = [];

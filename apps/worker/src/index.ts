@@ -1,4 +1,4 @@
-import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, isNamespacedRoomId, isNamespacedUserId, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, isNamespacedEventId, isNamespacedRoomId, isNamespacedUserId, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
 import { sql } from "kysely";
 import { authenticate, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
@@ -1176,7 +1176,7 @@ async function appendRoomEvent(env: Env, roomId: RoomId, event: ClientEvent, cur
   return result.event;
 }
 
-function assertLocalId(id: string, prefix: "@" | "!", env: Env): void {
+function assertLocalId(id: string, prefix: "@" | "!" | "$", env: Env): void {
   if (!id.startsWith(prefix) || id.slice(id.lastIndexOf(":") + 1) !== env.SERVER_NAME) {
     throw new HttpError(400, "Remote identifiers are disabled in Phase 1", "federation_disabled");
   }
@@ -2997,7 +2997,8 @@ async function encryptedDrafts(url: URL, env: Env, auth: AuthContext): Promise<R
 async function verifyEvent(env: Env, auth: AuthContext, body: Record<string, unknown>, roomId: RoomId): Promise<ClientEvent> {
   const event = body as Partial<ClientEvent>;
   if (event.room_id !== roomId || event.sender !== auth.userId || event.device_id !== auth.deviceId) throw new HttpError(400, "Event identity mismatch", "invalid_event");
-  if (typeof event.event_id !== "string" || event.event_id.length > 96 || !roomEventTypes.includes(event.type as never)) throw new HttpError(400, "Invalid event envelope", "invalid_event");
+  if (typeof event.event_id !== "string" || event.event_id.length > 96 || !isNamespacedEventId(event.event_id) || !roomEventTypes.includes(event.type as never)) throw new HttpError(400, "Invalid event envelope", "invalid_event");
+  assertLocalId(event.event_id, "$", env);
   if (typeof event.created_at !== "number" || Math.abs(Date.now() - event.created_at) > 24 * 60 * 60 * 1_000) throw new HttpError(400, "Invalid event time", "invalid_event");
   if (typeof event.ciphertext !== "string" || event.ciphertext.length > 200_000 || !event.metadata || typeof event.metadata !== "object" || typeof event.signature !== "string") throw new HttpError(400, "Invalid encrypted event", "invalid_event");
   const complete = event as ClientEvent;
@@ -3726,7 +3727,7 @@ async function historyRepairJobs(request: Request, env: Env, auth: AuthContext):
   return json({ jobs: page, next_cursor: hasMore ? page.at(-1)?.room_id ?? null : null });
 }
 
-function parseRepairEvents(value: unknown, roomId: RoomId): RoomEvent[] {
+function parseRepairEvents(value: unknown, roomId: RoomId, env: Env): RoomEvent[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > REPAIR_MAX_UPLOAD_EVENTS) {
     throw new HttpError(400, `Repair upload must contain 1-${REPAIR_MAX_UPLOAD_EVENTS} events`, "invalid_repair_events");
   }
@@ -3734,13 +3735,14 @@ function parseRepairEvents(value: unknown, roomId: RoomId): RoomEvent[] {
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new HttpError(400, "Invalid repaired event", "invalid_repair_event");
     const event = item as Partial<RoomEvent>;
     const receipt = event.acceptance_receipt as Partial<EventAcceptanceReceipt> | undefined;
-    if (event.room_id !== roomId || typeof event.event_id !== "string" || event.event_id.length > 96
+    if (event.room_id !== roomId || typeof event.event_id !== "string" || event.event_id.length > 96 || !isNamespacedEventId(event.event_id)
       || typeof event.sender !== "string" || typeof event.device_id !== "string" || !roomEventTypes.includes(event.type as never)
       || !Number.isSafeInteger(event.seq) || Number(event.seq) < 1 || !Number.isSafeInteger(event.created_at) || Number(event.created_at) < 0
       || typeof event.ciphertext !== "string" || event.ciphertext.length > 200_000 || !event.metadata || typeof event.metadata !== "object" || Array.isArray(event.metadata)
       || typeof event.signature !== "string" || event.signature.length > 1_024 || !receipt || typeof receipt.mac !== "string") {
       throw new HttpError(400, "Invalid repaired event", "invalid_repair_event");
     }
+    assertLocalId(event.event_id, "$", env);
     return event as RoomEvent;
   });
 }
@@ -3780,7 +3782,7 @@ async function uploadRepairEvents(request: Request, env: Env, auth: AuthContext,
   const body = await readJson(request, 4_500_000);
   const token = stringField(body, "token", 128); const generation = Number(body.generation);
   if (!Number.isSafeInteger(generation) || generation < 1) throw new HttpError(400, "Invalid repair generation", "invalid_repair_generation");
-  const events = parseRepairEvents(body.events, roomId);
+  const events = parseRepairEvents(body.events, roomId, env);
   await verifyRepairEvents(env, roomId, events);
   const db = createDatabase(env.DB);
   const seqs = events.map((event) => event.seq); const ids = events.map((event) => event.event_id);

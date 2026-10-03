@@ -3,7 +3,7 @@ import type { LocalDatabase, OutboxItem } from "@edgechat/db";
 import type { ClientEvent, RoomEvent } from "@edgechat/protocol";
 import { OutboxEngine } from "./outbox";
 
-const event = { event_id: "event-1", room_id: "!0123456789abcdef:example.com", sender: "@alice:example.com", device_id: "device", type: "message.text", created_at: 1, ciphertext: "stable-ciphertext", metadata: {}, signature: "signature" } as ClientEvent;
+const event = { event_id: "$test-event-1:example.com", room_id: "!0123456789abcdef:example.com", sender: "@alice:example.com", device_id: "device", type: "message.text", created_at: 1, ciphertext: "stable-ciphertext", metadata: {}, signature: "signature" } as ClientEvent;
 const item = { event_id: event.event_id, message_id: "$message:example.com", room_id: event.room_id, event, plaintext: "hello", payload: { version: 2 }, status: "pending", attempts: 0, next_attempt_at: 0, last_error: null, created_at: 1, updated_at: 1 } satisfies OutboxItem;
 
 function database(initial: OutboxItem[]) {
@@ -76,26 +76,26 @@ describe("OutboxEngine", () => {
   });
 
   it("commits an accepted delete as a local tombstone instead of a timeline message", async () => {
-    const deleteEvent = { ...event, event_id: "delete-1", type: "message.delete" } as ClientEvent;
+    const deleteEvent = { ...event, event_id: "$delete-1:example.com", type: "message.delete" } as ClientEvent;
     const deleteItem = { ...item, event_id: deleteEvent.event_id, event: deleteEvent, payload: { version: 1, kind: "message.delete", target: { kind: "message", message_id: "$message1:example.com", room_id: event.room_id }, deleted_at: 2 } } satisfies OutboxItem;
     const db = database([deleteItem]);
     const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...deleteEvent, seq: 8 } as RoomEvent })) }, db.value, () => true);
     await engine.start(); engine.stop();
-    expect(db.value.applyMessageTombstone).toHaveBeenCalledWith(expect.objectContaining({ event_id: "delete-1", seq: 8 }), "$message1:example.com");
+    expect(db.value.applyMessageTombstone).toHaveBeenCalledWith(expect.objectContaining({ event_id: "$delete-1:example.com", seq: 8 }), "$message1:example.com");
     expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
     expect(db.calls).toEqual(["sending", "tombstoned", "removed"]);
   });
 
   it("projects accepted edits and reactions without creating timeline rows", async () => {
     const target = { kind: "message" as const, message_id: "$message1:example.com" as const, room_id: event.room_id };
-    const editEvent = { ...event, event_id: "edit-1", type: "message.edit" as const };
+    const editEvent = { ...event, event_id: "$edit-event-1:example.com", type: "message.edit" as const } satisfies ClientEvent;
     const editPayload = { version: 1 as const, kind: "message.edit" as const, target, text: "updated", edited_at: 2 };
     const editDb = database([{ ...item, event_id: editEvent.event_id, event: editEvent, payload: editPayload }]);
     const editEngine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...editEvent, seq: 2 } as RoomEvent })) }, editDb.value, () => true);
     await editEngine.start(); editEngine.stop();
     expect(editDb.calls).toEqual(["sending", "edited", "removed"]);
 
-    const reactionEvent = { ...event, event_id: "reaction-1", type: "message.reaction" as const };
+    const reactionEvent = { ...event, event_id: "$reaction-1:example.com", type: "message.reaction" as const } satisfies ClientEvent;
     const reactionPayload = { version: 1 as const, kind: "message.reaction" as const, target, reaction: "👍", updated_at: 3 };
     const reactionDb = database([{ ...item, event_id: reactionEvent.event_id, event: reactionEvent, payload: reactionPayload }]);
     const reactionEngine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...reactionEvent, seq: 3 } as RoomEvent })) }, reactionDb.value, () => true);
@@ -104,52 +104,52 @@ describe("OutboxEngine", () => {
   });
 
   it("projects an accepted encrypted read receipt without creating a timeline row", async () => {
-    const receiptEvent = { ...event, event_id: "receipt-1", type: "receipt.read" as const };
+    const receiptEvent = { ...event, event_id: "$receipt-1:example.com", type: "receipt.read" as const } satisfies ClientEvent;
     const receiptPayload = { version: 1 as const, kind: "receipt.read" as const, room_id: event.room_id, up_to_seq: 9, read_at: 4 };
     const db = database([{ ...item, event_id: receiptEvent.event_id, event: receiptEvent, payload: receiptPayload }]);
     const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...receiptEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);
     await engine.start(); engine.stop();
-    expect(db.value.applyReadReceipt).toHaveBeenCalledWith(expect.objectContaining({ event_id: "receipt-1", seq: 10 }), receiptPayload, true);
+    expect(db.value.applyReadReceipt).toHaveBeenCalledWith(expect.objectContaining({ event_id: "$receipt-1:example.com", seq: 10 }), receiptPayload, true);
     expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
     expect(db.calls).toEqual(["sending", "read", "removed"]);
   });
 
   it("projects an accepted encrypted delivery receipt without creating a timeline row", async () => {
-    const receiptEvent = { ...event, event_id: "delivery-1", type: "receipt.delivered" as const };
+    const receiptEvent = { ...event, event_id: "$delivery-1:example.com", type: "receipt.delivered" as const } satisfies ClientEvent;
     const receiptPayload = { version: 1 as const, kind: "receipt.delivered" as const, room_id: event.room_id, up_to_seq: 9, delivered_at: 4 };
     const db = database([{ ...item, event_id: receiptEvent.event_id, event: receiptEvent, payload: receiptPayload }]);
     const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...receiptEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);
     await engine.start(); engine.stop();
-    expect(db.value.applyDeliveryReceipt).toHaveBeenCalledWith(expect.objectContaining({ event_id: "delivery-1", seq: 10 }), receiptPayload, true);
+    expect(db.value.applyDeliveryReceipt).toHaveBeenCalledWith(expect.objectContaining({ event_id: "$delivery-1:example.com", seq: 10 }), receiptPayload, true);
     expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
     expect(db.calls).toEqual(["sending", "delivered", "removed"]);
   });
 
   it("projects an accepted encrypted expiry policy without creating a timeline row", async () => {
-    const policyEvent = { ...event, event_id: "expiry-1", type: "control.message-expiry" as const };
+    const policyEvent = { ...event, event_id: "$expiry-1:example.com", type: "control.message-expiry" as const } satisfies ClientEvent;
     const policyPayload = { version: 1 as const, kind: "room.message-expiry" as const, expires_in_seconds: 86_400 as const, updated_at: 4 };
     const db = database([{ ...item, event_id: policyEvent.event_id, event: policyEvent, payload: policyPayload }]);
     const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...policyEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);
     await engine.start(); engine.stop();
-    expect(db.value.applyMessageExpiryPolicy).toHaveBeenCalledWith(expect.objectContaining({ event_id: "expiry-1", seq: 10 }), policyPayload);
+    expect(db.value.applyMessageExpiryPolicy).toHaveBeenCalledWith(expect.objectContaining({ event_id: "$expiry-1:example.com", seq: 10 }), policyPayload);
     expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
     expect(db.calls).toEqual(["sending", "expiry-policy", "removed"]);
   });
 
   it("projects an accepted encrypted room profile without creating a timeline row", async () => {
-    const profileEvent = { ...event, event_id: "profile-1", type: "control.room.profile" as const };
+    const profileEvent = { ...event, event_id: "$profile-1:example.com", type: "control.room.profile" as const } satisfies ClientEvent;
     const profilePayload = { version: 1 as const, kind: "room.profile" as const, name: "Weekend plans", avatar: null, updated_at: 4 };
     const db = database([{ ...item, event_id: profileEvent.event_id, event: profileEvent, payload: profilePayload }]);
     const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...profileEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);
     await engine.start(); engine.stop();
-    expect(db.value.applyRoomProfile).toHaveBeenCalledWith(expect.objectContaining({ event_id: "profile-1", seq: 10 }), profilePayload);
+    expect(db.value.applyRoomProfile).toHaveBeenCalledWith(expect.objectContaining({ event_id: "$profile-1:example.com", seq: 10 }), profilePayload);
     expect(db.value.saveDecryptedEvent).not.toHaveBeenCalled();
     expect(db.calls).toEqual(["sending", "room-profile", "removed"]);
   });
 
   it("removes an accepted ownership transfer without creating a timeline row", async () => {
-    const transferEvent = { ...event, event_id: "owner-transfer-1", type: "control.owner.transfer" as const,
-      metadata: { mls_epoch: 1, target_user_id: "@bob:example.com" } };
+    const transferEvent = { ...event, event_id: "$owner-transfer-1:example.com", type: "control.owner.transfer" as const,
+      metadata: { mls_epoch: 1, target_user_id: "@bob:example.com" } } satisfies ClientEvent;
     const transferPayload = { version: 1 as const, kind: "room.owner-transfer" as const, target_user_id: "@bob:example.com" as const, updated_at: 4 };
     const db = database([{ ...item, event_id: transferEvent.event_id, event: transferEvent, payload: transferPayload }]);
     const engine = new OutboxEngine({ sendEvent: vi.fn(async () => ({ event: { ...transferEvent, seq: 10 } as RoomEvent })) }, db.value, () => true);

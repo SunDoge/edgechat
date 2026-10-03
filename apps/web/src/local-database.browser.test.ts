@@ -50,7 +50,7 @@ describe("real browser local database", () => {
     const roomId = "!browser-storage-test:example.com" as RoomId;
     const messageId = "$browser-storage-message:example.com";
     const event = {
-      event_id: "browser-storage-event",
+      event_id: "$browser-storage-event:example.com",
       room_id: roomId,
       seq: 1,
       sender: "@alice:example.com",
@@ -97,7 +97,7 @@ describe("real browser local database", () => {
     const roomId = "!browser-outbox-test:example.com" as RoomId;
     const messageId = "$browser-outbox-message:example.com";
     const event = {
-      event_id: "browser-outbox-event",
+      event_id: "$browser-outbox-event:example.com",
       room_id: roomId,
       sender: "@alice:example.com",
       device_id: "browser-device",

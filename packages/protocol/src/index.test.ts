@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
+import { assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -7,6 +7,8 @@ describe("federation-ready identifiers", () => {
     expect(isNamespacedUserId("@alice:example.com")).toBe(true);
     expect(isNamespacedUserId("alice")).toBe(false);
     expect(isNamespacedRoomId("!0123456789abcdef:example.com")).toBe(true);
+    expect(isNamespacedEventId("$01234567:example.com")).toBe(true);
+    expect(isNamespacedEventId("$01234567")).toBe(false);
     expect(isNamespacedMessageId("$01234567:example.com")).toBe(true);
     expect(isNamespacedMessageId("01234567")).toBe(false);
   });
@@ -57,7 +59,7 @@ describe("federation-ready identifiers", () => {
   });
 
   it("canonically binds acceptance receipts to signed envelopes and assigned sequences", () => {
-    const event: ClientEvent = { event_id: "event", room_id: "!0123456789abcdef:example.com", sender: "@alice:example.com", device_id: "phone", type: "message.text", created_at: 1, ciphertext: "cipher", metadata: { mls_epoch: 1 }, signature: "signature" };
+    const event: ClientEvent = { event_id: "$01234567:example.com", room_id: "!0123456789abcdef:example.com", sender: "@alice:example.com", device_id: "phone", type: "message.text", created_at: 1, ciphertext: "cipher", metadata: { mls_epoch: 1 }, signature: "signature" };
     expect(new TextDecoder().decode(canonicalSignedEventBytes(event))).toContain('\"signature\":\"signature\"');
     const receipt = { version: 1 as const, key_id: "v1", room_id: event.room_id, seq: 7, event_id: event.event_id, event_hash: "hash", retention_generation: 2, accepted_at: 3 };
     expect(JSON.parse(new TextDecoder().decode(canonicalAcceptanceReceiptBytes(receipt)))).toEqual(receipt);

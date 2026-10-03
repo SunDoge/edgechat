@@ -139,7 +139,7 @@ Inside a group, each account may hide another active member without changing mem
 - Logical messages: the initial event ID, stable across future edits/reactions
 - Message parts and attachments: independent opaque IDs scoped through the logical message
 
-`SERVER_NAME` is part of every user/room ID from day one. Phase 1's `LocalFederationTransport` rejects IDs whose domain is not local. A room belongs to exactly one home server and one Durable Object. Room events are a linear stream (`1, 2, 3…`), not a DAG.
+`SERVER_NAME` is part of every user, room, and event ID from day one. Phase 1's `LocalFederationTransport` rejects IDs whose domain is not local. The Worker applies the same canonical/local event-ID check before both normal ordering and client-assisted history repair, so an accepted event can always be used as a globally scoped logical-message reference. A room belongs to exactly one home server and one Durable Object. Room events are a linear stream (`1, 2, 3…`), not a DAG. Rejected identifiers create no D1 event row, Durable Object state, or R2 operation.
 
 Each browser device owns an Ed25519 MLS credential and a pool of one-time X25519 KeyPackages. Room creation consumes one KeyPackage for every other active device, creates an MLS group locally, and stores the resulting Welcome plus public ratchet tree as that device's onboarding packet. The founder retains its secret tree only in the local vault.
 

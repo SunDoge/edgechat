@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ClientEvent, RoomId, UserId } from "@edgechat/protocol";
+import type { ClientEvent, EventId, RoomId, UserId } from "@edgechat/protocol";
 import { verifyAcceptanceReceipt } from "../src/receipt";
 
 const roomId = "!0123456789abcdef:localhost" as RoomId;
@@ -18,8 +18,12 @@ beforeEach(async () => {
   ]);
 });
 
+function eventId(id: string): EventId {
+  return `$test-event-${id}:localhost`;
+}
+
 function event(id: string, sender = alice, epoch = 1): ClientEvent {
-  return { event_id: id, room_id: roomId, sender, device_id: "device-a", type: "message.text", created_at: Date.now(), ciphertext: "opaque-ciphertext", metadata: { mls_epoch: epoch }, signature: "signature" };
+  return { event_id: eventId(id), room_id: roomId, sender, device_id: "device-a", type: "message.text", created_at: Date.now(), ciphertext: "opaque-ciphertext", metadata: { mls_epoch: epoch }, signature: "signature" };
 }
 
 describe("RoomDurableObject", () => {
@@ -44,7 +48,7 @@ describe("RoomDurableObject", () => {
     expect(await room.isActiveMember("@mallory:localhost" as UserId)).toBe(false);
     expect(await room.isActiveMember(alice)).toBe(true);
     await room.appendEvent(event("cipher-only"), 1);
-    const row = await env.DB.prepare("SELECT event_json FROM room_events WHERE event_id = ?").bind("cipher-only").first<{ event_json: string }>();
+    const row = await env.DB.prepare("SELECT event_json FROM room_events WHERE event_id = ?").bind(eventId("cipher-only")).first<{ event_json: string }>();
     expect(row?.event_json).toContain("opaque-ciphertext");
     expect(row?.event_json).not.toContain("plaintext");
   });
@@ -92,7 +96,7 @@ describe("RoomDurableObject", () => {
     if (!second.ok) throw new Error("second event was not accepted");
     const advanced = await room.advanceRetentionBefore(Date.now() + 1_000, 1, 1);
     expect(advanced).toMatchObject({ floor_seq: 1, generation: 2, current_seq: 2, deleted_events: 1, advanced: true });
-    expect(await room.getEvents(null, 20)).toMatchObject([{ event_id: "retention-two", seq: 2 }]);
+    expect(await room.getEvents(null, 20)).toMatchObject([{ event_id: eventId("retention-two"), seq: 2 }]);
     expect(await room.advanceRetentionBefore(0, 500, 1)).toMatchObject({ floor_seq: 1, generation: 2, advanced: false });
     const lease = { token_hash: "post-gc", device_id: "device-a", start_seq: 2, end_seq: 2, generation: 2, expires_at: Date.now() + 60_000 };
     expect(await room.acquireRepairLease(lease, Date.now())).toMatchObject({ acquired: true });

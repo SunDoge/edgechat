@@ -83,7 +83,7 @@ export function serverSupports(protocol: ServerProtocolCapabilities | undefined,
 export type UserId = `@${string}:${string}`;
 export type RoomId = `!${string}:${string}`;
 export type DeviceId = string;
-export type EventId = string;
+export type EventId = `$${string}:${string}`;
 export type MessageId = `$${string}:${string}`;
 export type AttachmentId = string;
 export type MessagePartId = string;
@@ -320,8 +320,11 @@ export function isNamespacedUserId(value: string): value is UserId {
 export function isNamespacedRoomId(value: string): value is RoomId {
   return /^![A-Za-z0-9_-]{16,}:[a-z0-9.-]+$/i.test(value);
 }
-export function isNamespacedMessageId(value: string): value is MessageId {
+export function isNamespacedEventId(value: string): value is EventId {
   return /^\$[A-Za-z0-9_-]{8,}:[a-z0-9.-]+$/i.test(value);
+}
+export function isNamespacedMessageId(value: string): value is MessageId {
+  return isNamespacedEventId(value);
 }
 export function isMessageDeletePayload(value: unknown): value is MessageDeletePayload {
   if (!value || typeof value !== "object") return false;

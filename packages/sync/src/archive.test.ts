@@ -5,7 +5,7 @@ import { buildSegment, decodeSegmentChunk, decodeSegmentHeader, decodeSegmentInd
 const roomId = "!0123456789abcdef:example.com" as RoomId;
 const keyEnvelope = new Uint8Array(64).fill(7);
 const events = Array.from({ length: 8 }, (_, index): RoomEvent => ({
-  event_id: `event-${index}`, room_id: roomId, seq: index + 1, sender: "@alice:example.com",
+  event_id: `$test-event-${index}:example.com`, room_id: roomId, seq: index + 1, sender: "@alice:example.com",
   device_id: "device", type: "message.text", created_at: index, ciphertext: `cipher-${index}`,
   metadata: {}, signature: "signature",
 }));
