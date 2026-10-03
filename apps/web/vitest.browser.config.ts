@@ -21,7 +21,19 @@ const executablePath = browserName === "firefox" ? configuredFirefox : browserNa
 export default defineConfig({
   plugins: [tailwindcss(), solid()],
   optimizeDeps: {
-    include: ["@electric-sql/pglite"],
+    // The tab-handoff test loads the complete application in same-origin
+    // iframes. Pre-bundle every dependency Vite otherwise discovers during
+    // that cold start: an optimizer-triggered page reload can strand an
+    // iframe before main.tsx acquires its tab lease, leaving a blank document
+    // until the test times out.
+    include: [
+      "@electric-sql/pglite",
+      "@paddor/zrip",
+      "@simplewebauthn/browser",
+      "clsx",
+      "dexie",
+      "uqr",
+    ],
   },
   test: {
     include: ["src/**/*.browser.test.ts"],
