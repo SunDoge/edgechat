@@ -3,6 +3,7 @@ import { browserSupportsWebAuthn, startRegistration, type PublicKeyCredentialCre
 import type { ApiClient, PasskeySummary } from "@edgechat/sync";
 import { Dialog, Input } from "./primitives";
 import { useI18n } from "../i18n";
+import { authErrorMessage } from "../auth-errors";
 
 export function PasskeyDialog(props: { api: ApiClient; accountCredential?: string; onClose: () => void }) {
   const { t, locale } = useI18n();
@@ -19,7 +20,7 @@ export function PasskeyDialog(props: { api: ApiClient; accountCredential?: strin
   async function refresh() {
     setLoading(true);
     try { setPasskeys((await props.api.passkeys()).passkeys); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("passkeys.error.load")); }
+    catch (cause) { setError(authErrorMessage(cause, t, t("passkeys.error.load"))); }
     finally { setLoading(false); }
   }
   onMount(() => void refresh());
@@ -38,7 +39,9 @@ export function PasskeyDialog(props: { api: ApiClient; accountCredential?: strin
       });
       setPassword(""); await refresh();
     } catch (cause) {
-      setError(cause instanceof Error && cause.name !== "NotAllowedError" ? cause.message : t("passkeys.error.cancelled"));
+      setError(cause instanceof Error && cause.name === "NotAllowedError"
+        ? t("passkeys.error.cancelled")
+        : authErrorMessage(cause, t, t("passkeys.error.add")));
     } finally { setBusy(false); }
   }
 
@@ -47,7 +50,7 @@ export function PasskeyDialog(props: { api: ApiClient; accountCredential?: strin
     if (deleteCandidate() !== credentialId) { setDeleteCandidate(credentialId); return; }
     setBusy(true); setError("");
     try { await props.api.deletePasskey(credentialId, reauthenticationCredential()); setPassword(""); setDeleteCandidate(null); await refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("passkeys.error.delete")); }
+    catch (cause) { setError(authErrorMessage(cause, t, t("passkeys.error.delete"))); }
     finally { setBusy(false); }
   }
 

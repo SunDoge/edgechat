@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient } from "@edgechat/sync";
+import { ApiError, type ApiClient } from "@edgechat/sync";
 
 const webauthn = vi.hoisted(() => ({
   startRegistration: vi.fn(async () => ({
@@ -68,5 +68,15 @@ describe("PasskeyDialog", () => {
     input("#passkey-name", "Laptop");
     [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "添加通行密钥")!.click();
     await vi.waitFor(() => expect(api.passkeyRegistrationOptions).toHaveBeenCalledWith("z".repeat(43), "Laptop"));
+  });
+
+  it("does not expose raw server diagnostics", async () => {
+    const api = {
+      passkeys: vi.fn(async () => { throw new ApiError("d1 trace and internal table", 503, "internal_error"); }),
+    };
+    const root = document.createElement("div"); document.body.append(root);
+    dispose = render(() => <PasskeyDialog api={api as unknown as ApiClient} onClose={vi.fn()}/>, root);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("服务器暂时不可用，请稍后再试"));
+    expect(document.body.textContent).not.toContain("d1 trace");
   });
 });

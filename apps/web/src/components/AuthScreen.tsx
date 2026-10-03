@@ -12,6 +12,7 @@ import { DeviceLinkSetup } from "./DeviceLinkSetup";
 import { BackupRestoreForm } from "./BackupRestoreForm";
 import { profileSessionKey } from "../local-profiles";
 import { useI18n } from "../i18n";
+import { UserFacingError } from "../operation-errors";
 
 export function AuthScreen(props: { profileId: string; accountHint?: string | null; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string) => Promise<void>; onManageProfiles: () => void }) {
   const { t } = useI18n();
@@ -73,7 +74,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
 
   async function prepareDevice(requireExisting = false) {
     const existing = await loadIdentity(props.profileId);
-    if (requireExisting && !existing) throw new Error(t("auth.passkey.deviceLinkRequired"));
+    if (requireExisting && !existing) throw new UserFacingError(t("auth.passkey.deviceLinkRequired"));
     const identity = existing ?? await props.core.createIdentity();
     const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
     const publicKeys = await props.core.exportPublicIdentity(identity);
@@ -97,7 +98,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
       const pending = await props.api.passkeyAuthenticationOptions(username());
       const assertion = await startAuthentication({ optionsJSON: pending.options as unknown as PublicKeyCredentialRequestOptionsJSON });
       const { stored, mls, device } = await prepareDevice(true);
-      if ("backup_checkpoint" in device) throw new Error(t("auth.passkey.backupPasswordRequired"));
+      if ("backup_checkpoint" in device) throw new UserFacingError(t("auth.passkey.backupPasswordRequired"));
       const result = await props.api.loginWithPasskey({
         user_id: username(), challenge_id: pending.challenge_id, challenge: pending.challenge,
         response: assertion, device,
@@ -147,7 +148,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     if (!receipt) return;
     setAppealBusy(true); setAppealError("");
     try { setAppealStatus((await props.api.accountAppealStatus(receipt)).status); }
-    catch (cause) { setAppealError(cause instanceof Error ? cause.message : t("auth.appeal.status.error")); }
+    catch (cause) { setAppealError(authErrorMessage(cause, t, t("auth.appeal.status.error"))); }
     finally { setAppealBusy(false); }
   }
 
@@ -157,7 +158,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
       const result = await props.api.createAccountAppeal(username(), localAccountCredential() || password(), appealCategory());
       localStorage.setItem(appealReceiptKey, result.receipt);
       setAppealReceipt(result.receipt); setAppealStatus(result.status);
-    } catch (cause) { setAppealError(cause instanceof Error ? cause.message : t("auth.appeal.submit.error")); }
+    } catch (cause) { setAppealError(authErrorMessage(cause, t, t("auth.appeal.submit.error"))); }
     finally { setAppealBusy(false); }
   }
 

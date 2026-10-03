@@ -1,5 +1,6 @@
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@edgechat/sync";
 import { PasswordChangeDialog } from "./PasswordChangeDialog";
 
 let dispose: (() => void) | undefined;
@@ -31,5 +32,17 @@ describe("PasswordChangeDialog", () => {
     input("current-account-password", "same-password"); input("new-account-password", "same-password"); input("new-account-password-confirmation", "different-password");
     expect(document.body.textContent).toContain("新密码不能与当前密码相同");
     expect(document.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
+  });
+
+  it("translates authentication failures instead of displaying server text", async () => {
+    const change = vi.fn(async () => { throw new ApiError("password verifier internals", 401, "invalid_credentials"); });
+    const root = document.createElement("div"); document.body.append(root);
+    dispose = render(() => <PasswordChangeDialog onChange={change} onClose={() => undefined}/>, root);
+    input("current-account-password", "old-correct-password");
+    input("new-account-password", "new-correct-password");
+    input("new-account-password-confirmation", "new-correct-password");
+    document.querySelector<HTMLFormElement>("form")?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("用户名或密码不正确"));
+    expect(document.body.textContent).not.toContain("verifier internals");
   });
 });

@@ -1,6 +1,7 @@
 import { Show, createSignal } from "solid-js";
 import { useI18n } from "../i18n";
 import { Dialog, Input } from "./primitives";
+import { authErrorMessage } from "../auth-errors";
 
 export function PasswordChangeDialog(props: {
   onChange: (currentPassword: string, newPassword: string, logoutOtherDevices: boolean) => Promise<void>;
@@ -21,7 +22,7 @@ export function PasswordChangeDialog(props: {
     if (!valid() || busy()) return;
     setBusy(true); setError("");
     try { await props.onChange(currentPassword(), newPassword(), logoutOtherDevices()); props.onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("passwordChange.error")); }
+    catch (cause) { setError(authErrorMessage(cause, t, t("passwordChange.error"))); }
     finally { setBusy(false); }
   }
 
