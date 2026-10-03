@@ -1,10 +1,8 @@
 import { For, Show, createEffect, createSignal } from "solid-js";
-import { IconBell, IconCloudLock, IconDeviceDesktop, IconDeviceMobileDown, IconDownload, IconEdit, IconKey, IconLink, IconLogout, IconPhoto, IconQrcode, IconSearch, IconShieldLock, IconSwitchHorizontal, IconTrash } from "@tabler/icons-solidjs";
-import type { ImageSearchResult, SearchResult } from "@edgechat/db";
+import { IconBell, IconCloudLock, IconDeviceDesktop, IconDeviceMobileDown, IconDownload, IconEdit, IconKey, IconLink, IconLogout, IconQrcode, IconShieldLock, IconSwitchHorizontal, IconTrash } from "@tabler/icons-solidjs";
 import { deviceFingerprint } from "@edgechat/messaging-core";
 import type { RoomId, UserProfile } from "@edgechat/protocol";
 import type { InvitationPolicy, StorageUsage } from "@edgechat/sync";
-import { userName } from "../presenters";
 import type { PwaInstallState } from "../pwa-install";
 import type { PushStatus } from "../push-subscription";
 import type { LocalStorageHealth, PersistenceRequestResult } from "../local-storage-health";
@@ -21,33 +19,11 @@ import { operationErrorMessage } from "../operation-errors";
 export type DeviceRow = { device_id: string; display_name: string; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
 export type DeviceRevocationProgress = { status: "working" | "failed"; completed: number; total: number; error?: string };
 
-export type LocalSearchResult = SearchResult | ImageSearchResult;
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-}
-
-export function SearchDialog(props: { query: string; results: LocalSearchResult[]; coverageComplete: boolean; semanticEnabled: boolean; semanticStatus: "idle" | "loading" | "ready" | "error"; onEnableSemantic: () => void; onDisableSemantic: () => Promise<void>; onQuery: (value: string) => void; onSelect: (roomId: RoomId, messageId: string) => void; onClose: () => void }) {
-  const { t } = useI18n();
-  const [semanticDisableBusy, setSemanticDisableBusy] = createSignal(false);
-  async function disableSemantic(): Promise<void> {
-    if (semanticDisableBusy()) return;
-    setSemanticDisableBusy(true);
-    try { await props.onDisableSemantic(); }
-    finally { setSemanticDisableBusy(false); }
-  }
-  return <Dialog id="message-search" title={t("search.title")} description={props.semanticEnabled ? t("search.description.semantic") : t("search.description.text")} onClose={props.onClose}>
-    <div class="p-5"><label class="relative" for="message-search-input"><span class="sr-only">{t("search.keyword")}</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="message-search-input" name="message_search" class="h-10 w-full rounded-lg pl-9 pr-3 ring-1 ring-neutral-300 outline-none focus:ring-2 focus:ring-brand" value={props.query} onInput={(event) => props.onQuery(event.currentTarget.value)} placeholder={props.semanticEnabled ? t("search.placeholder.semantic") : t("search.placeholder.text")} autofocus/></label>
-      <Show when={props.semanticEnabled} fallback={<div class="mt-3 flex items-start justify-between gap-3 rounded-lg bg-neutral-50 p-3 ring-1 ring-black/5"><div class="min-w-0"><strong class="block text-sm font-medium text-ink">{t("search.semantic.offTitle")}</strong><p class="mt-1 text-xs/5 text-muted">{t("search.semantic.offDescription")}</p></div><button type="button" class="min-h-10 shrink-0 rounded-lg bg-white px-3 text-sm font-semibold text-brand ring-1 ring-brand/25 hover:bg-brand-soft" onClick={props.onEnableSemantic}>{t("search.semantic.enable")}</button></div>}>
-        <div class="mt-3 flex items-start justify-between gap-3"><p class="min-w-0 text-xs/5 text-muted">{props.semanticStatus === "loading" ? t("search.semantic.loading") : props.semanticStatus === "error" ? t("search.semantic.error") : props.coverageComplete ? t("search.coverage.complete") : t("search.coverage.incomplete")}</p><button type="button" disabled={semanticDisableBusy()} class="shrink-0 text-xs font-semibold text-muted underline-offset-2 hover:text-ink hover:underline disabled:opacity-50" onClick={() => void disableSemantic()}>{semanticDisableBusy() ? t("search.semantic.clearing") : t("search.semantic.disable")}</button></div>
-        <p class="mt-1 text-[11px]/4 text-muted">{t("search.semantic.storageNotice")}</p>
-      </Show>
-      <Show when={!props.semanticEnabled}><p class="mt-3 text-xs text-muted">{props.coverageComplete ? t("search.textCoverage.complete") : t("search.textCoverage.incomplete")}</p></Show>
-      <div class="mt-4 divide-y divide-black/5"><For each={props.results}>{(result) => <button type="button" class="w-full py-3 text-left" onClick={() => props.onSelect(result.room_id, result.message_id)}><Show when={result.kind === "image"} fallback={<p class="line-clamp-2 text-sm/5 text-ink">{(result as SearchResult).plaintext}</p>}><p class="flex items-center gap-2 text-sm/5 font-medium text-ink"><IconPhoto class="size-4 stroke-muted"/>{(result as ImageSearchResult).name}<span class="text-xs font-normal text-muted">{t("search.similarity", { score: Math.round((result as ImageSearchResult).score * 100) })}</span></p></Show><small class="mt-1 block text-xs text-muted">{userName(result.sender)} · #{result.seq}</small></button>}</For></div></div>
-  </Dialog>;
 }
 
 export function DevicesDialog(props: { devices: DeviceRow[]; revocations: Record<string, DeviceRevocationProgress>; profile: UserProfile | null; storage: StorageUsage | null; localStorageHealth: LocalStorageHealth | null; backup: LocalBackupExport | null; invitationPolicy: InvitationPolicy | null; installState: PwaInstallState; currentDeviceId: string; pushAvailable: boolean; pushStatus: PushStatus; voiceRecordingAvailable: boolean; passwordChangeSupported: boolean; passkeysSupported: boolean; linkPreviews: boolean; presenceSharing: boolean; exportBusy: boolean; onEditProfile: () => void; onInvitationPolicy: (policy: InvitationPolicy) => Promise<void>; onLinkPreviews: (enabled: boolean) => Promise<void>; onPresenceSharing: (enabled: boolean) => Promise<void>; onRequestPersistence: () => Promise<PersistenceRequestResult>; onInstall: () => void; onLinkDevice: () => void; onEnablePush: () => void; onDisablePush: () => void; onBackup: () => void; onChangePassword: () => void; onManagePasskeys: () => void; onExport: () => void; onDeleteAccount: () => void; onRevoke: (deviceId: string) => void; onLogout: () => void; onClose: () => void }) {
