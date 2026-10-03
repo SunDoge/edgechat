@@ -130,6 +130,9 @@ try {
   invariant(!initial.allNames.includes("edgechat-shell-stale-build"), "Activated Service Worker retained a stale EdgeChat shell");
   invariant(initial.allNames.includes("unrelated-origin-cache"), "Activated Service Worker deleted an unrelated origin cache");
 
+  await page.goto(origin, { waitUntil: "domcontentloaded" });
+  await page.locator("#root > *").waitFor({ state: "visible", timeout: 30_000 });
+
   servedServiceWorker = replacementServiceWorker;
   await page.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update(); });
   await page.waitForFunction(async () => (await navigator.serviceWorker.getRegistration())?.waiting?.state === "installed");
@@ -147,16 +150,14 @@ try {
   invariant(waiting.activeStillControls, "Replacement Service Worker took control before confirmation");
   invariant(waiting.names.length === 2, `Expected active and waiting shell caches, found ${waiting.names.length}`);
 
-  await page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.getRegistration();
-    const worker = registration?.waiting;
-    if (!worker) throw new Error("Replacement Service Worker is not waiting");
-    await new Promise((resolvePromise, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Timed out waiting for confirmed Service Worker activation")), 10_000);
-      navigator.serviceWorker.addEventListener("controllerchange", () => { clearTimeout(timeout); resolvePromise(); }, { once: true });
-      worker.postMessage({ type: "SKIP_WAITING" });
-    });
-  });
+  const updateTitle = page.getByText("新版本已准备好", { exact: true });
+  const updateButton = page.getByRole("button", { name: "更新并重启", exact: true });
+  await updateTitle.waitFor({ state: "visible", timeout: 10_000 });
+  await updateButton.waitFor({ state: "visible" });
+  const reloaded = page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame());
+  await updateButton.click();
+  await reloaded;
+  await page.waitForLoadState("domcontentloaded");
   await page.waitForFunction(async () => {
     const registration = await navigator.serviceWorker.getRegistration();
     return !registration?.waiting && registration?.active === navigator.serviceWorker.controller;
@@ -221,7 +222,7 @@ try {
   invariant(serviceWorkerRequests >= 2, `Expected initial and update Service Worker requests, saw ${serviceWorkerRequests}`);
 
   await context.close();
-  console.log(`PWA ${requestedBrowser} install/update/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
+  console.log(`PWA ${requestedBrowser} rendered-update/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
 } finally {
   await browser?.close();
   await new Promise((resolvePromise) => server.close(resolvePromise));
