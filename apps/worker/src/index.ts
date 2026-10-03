@@ -4748,6 +4748,15 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
       await finalizePendingR2Cleanup(env, [liveClaim as PendingR2Write]);
       throw new HttpError(409, "Archive upload was cancelled", "archive_upload_cancelled");
     }
+    // A streamed object-store upload can outlive its lease. Revalidate at the
+    // commit boundary so a released or expired lease cannot make a late object
+    // authoritative. This is a DO check, not an R2/S3 read.
+    if (!(await env.ROOMS.getByName(roomId).validateCompactionLease(leaseToken, auth.deviceId, id, start, end, Date.now()))) {
+      await db.updateTable("pending_r2_writes").set({ cancelled_at: Date.now() }).where("object_key", "=", objectKey).execute();
+      await objectStore(env).delete(objectKey);
+      await finalizePendingR2Cleanup(env, [liveClaim as PendingR2Write]);
+      throw new HttpError(409, "Compaction lease expired while uploading", "invalid_compaction_lease");
+    }
     await batch(env.DB, [
       db.insertInto("archive_segments")
         .columns(["segment_id", "room_id", "start_seq", "end_seq", "object_key", "byte_size", "ciphertext_sha256", "created_at"])
@@ -4795,26 +4804,41 @@ async function cancelArchiveSegmentUpload(request: Request, env: Env, auth: Auth
     if (!matchesCommitted(committed)) throw new HttpError(409, "Segment ID was committed for different ciphertext", "segment_conflict");
     return json({ segment_id: segmentId, state: "committed" });
   }
-  if (!(await env.ROOMS.getByName(roomId).validateCompactionLease(leaseToken, auth.deviceId, segmentId, start, end, Date.now()))) {
-    committed = await committedState();
-    if (committed && matchesCommitted(committed)) return json({ segment_id: segmentId, state: "committed" });
-    throw new HttpError(409, "Compaction lease is missing or expired", "invalid_compaction_lease");
-  }
   const room = await db.selectFrom("rooms").select("created_by").where("room_id", "=", roomId).executeTakeFirstOrThrow();
   const objectKey = `rooms/${encodeURIComponent(roomId)}/segments/${String(start).padStart(12, "0")}-${segmentId}.bin`;
+  const expectedPending: PendingR2Write = { object_key: objectKey, owner_user_id: room.created_by, kind: "archive", expected_bytes: declaredSize, room_id: roomId, content_sha256: suppliedDigest.text };
+  const exactPending = () => db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+    .where("object_key", "=", objectKey).where("owner_user_id", "=", room.created_by).where("kind", "=", "archive")
+    .where("room_id", "=", roomId).where("expected_bytes", "=", declaredSize).where("content_sha256", "=", suppliedDigest.text).executeTakeFirst();
+  const pendingForKey = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+    .where("object_key", "=", objectKey).executeTakeFirst();
+  if (pendingForKey && !pendingR2WriteMatches(pendingForKey as PendingR2Write, expectedPending)) {
+    throw new HttpError(409, "Segment ID has a different pending ciphertext", "segment_conflict");
+  }
+  const pendingBeforeValidation = pendingForKey;
+  const leaseValid = await env.ROOMS.getByName(roomId).validateCompactionLease(leaseToken, auth.deviceId, segmentId, start, end, Date.now());
+  if (!leaseValid && !pendingBeforeValidation) {
+    committed = await committedState();
+    if (committed) {
+      if (!matchesCommitted(committed)) throw new HttpError(409, "Segment ID was committed for different ciphertext", "segment_conflict");
+      return json({ segment_id: segmentId, state: "committed" });
+    }
+    // D1 has neither a commit nor an exact write intent, so no object-store
+    // lookup is needed. A late uploader revalidates its lease before commit and
+    // exact-deletes its own object if it arrives after this response.
+    return json({ segment_id: segmentId, state: "absent" });
+  }
   const now = Date.now();
   await db.updateTable("pending_r2_writes").set({ cancelled_at: now })
     .where("object_key", "=", objectKey).where("owner_user_id", "=", room.created_by).where("kind", "=", "archive").where("room_id", "=", roomId)
     .where("expected_bytes", "=", declaredSize).where("content_sha256", "=", suppliedDigest.text).execute();
-  const pending = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
-    .where("object_key", "=", objectKey).where("owner_user_id", "=", room.created_by).where("kind", "=", "archive")
-    .where("room_id", "=", roomId).where("expected_bytes", "=", declaredSize).where("content_sha256", "=", suppliedDigest.text)
-    .where("cancelled_at", "is not", null).executeTakeFirst();
+  const pending = await exactPending();
   if (!pending) {
     committed = await committedState();
     if (committed && matchesCommitted(committed)) return json({ segment_id: segmentId, state: "committed" });
-    await objectStore(env).delete(objectKey);
-    await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
+    if (leaseValid) {
+      await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
+    }
     return json({ segment_id: segmentId, state: "absent" });
   }
   await objectStore(env).delete(objectKey);

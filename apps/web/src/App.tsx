@@ -1228,7 +1228,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       void repairCloudAttachments().catch(() => undefined);
       void repairCloudArchive().catch(() => undefined);
       void processPeerRecoveries().catch(() => undefined);
-      void archiveRef?.reconcileRetentionAcks().catch(() => undefined);
+      void archiveRef?.reconcilePendingUploads().then(() => archiveRef?.reconcileRetentionAcks()).catch(() => undefined);
       void pullRemoteDrafts().then(() => processDraftSync()).catch((cause) => {
         console.warn(JSON.stringify({ message: "cross-device draft sync failed", error: cause instanceof Error ? cause.message : String(cause) }));
       });
@@ -1459,7 +1459,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!currentSession?.archive_compaction_enabled || !currentIdentity || !currentMls || !roomIds || connectionState() !== "online") return;
     const builder = new ArchiveSegmentBuilder();
     const coordinator = new ArchiveCoordinator(api, db, builder, wrapArchiveKey, archiveSegmentCache); archiveRef = coordinator;
-    void coordinator.reconcileRetentionAcks().catch(() => undefined);
+    void coordinator.reconcilePendingUploads().then(() => coordinator.reconcileRetentionAcks()).catch(() => undefined);
     const timers = roomIds.split("|").map((roomId, index) => window.setTimeout(() => void coordinator.compact(roomId as RoomId).catch((error) => setNotice(error instanceof Error ? `历史归档失败：${error.message}` : "历史归档失败")), 2_000 + index * 500));
     onCleanup(() => { timers.forEach(window.clearTimeout); if (archiveRef === coordinator) archiveRef = null; coordinator.close(); });
   });

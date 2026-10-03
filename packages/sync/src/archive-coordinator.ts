@@ -1,4 +1,4 @@
-import type { LocalDatabase } from "@edgechat/db";
+import type { LocalDatabase, PendingArchiveUploadResolution } from "@edgechat/db";
 import type { RoomEvent, RoomId } from "@edgechat/protocol";
 import type { ApiClient, CompactionLease } from "./index";
 import { ArchiveSegmentBuilder } from "./archive-builder";
@@ -31,6 +31,7 @@ export class ArchiveCoordinator extends EventTarget {
     let lease: CompactionLease | null = null;
     let cached = false; let uploaded = false;
     let cacheRemovalConfirmed = false;
+    let uploadStateUnknown = false;
     try {
       try { lease = await this.api.acquireCompactionLease(roomId); }
       catch (error) { if (error && typeof error === "object" && "code" in error && error.code === "compaction_busy") return false; throw error; }
@@ -64,7 +65,7 @@ export class ArchiveCoordinator extends EventTarget {
         // its object; a late PUT observes that marker and deletes itself.
         let resolution: Awaited<ReturnType<ApiClient["cancelArchiveSegmentUpload"]>> | null = null;
         try { resolution = await this.api.cancelArchiveSegmentUpload(roomId, lease.segment_id, lease.token, lease.start_seq, lease.end_seq, body); }
-        catch { /* Keep the local ciphertext when server state is unknowable. */ }
+        catch { uploadStateUnknown = true; /* Keep the local ciphertext when server state is unknowable. */ }
         if (resolution?.state === "committed") uploaded = true;
         else {
           cacheRemovalConfirmed = resolution?.state === "abandoned" || resolution?.state === "absent";
@@ -78,7 +79,7 @@ export class ArchiveCoordinator extends EventTarget {
     } catch (error) {
       if (lease) {
         const detail = error instanceof Error ? error.message : String(error);
-        if (!uploaded) await this.job(lease, "failed", detail).catch(() => undefined);
+        if (!uploaded) await this.job(lease, uploadStateUnknown ? "upload_unknown" : "failed", detail).catch(() => undefined);
         if (!uploaded) await this.api.releaseCompactionLease(roomId, lease.token).catch(() => undefined);
         this.emit(roomId, "failed", detail);
       }
@@ -86,11 +87,51 @@ export class ArchiveCoordinator extends EventTarget {
       throw error;
     } finally {
       this.active.delete(roomId);
-      if (!this.active.size) {
-        for (const resolve of this.idleWaiters) resolve();
-        this.idleWaiters.clear();
+      this.resolveIdleWaiters();
+    }
+  }
+
+  /** Resolve uploads whose two upload responses and immediate status request were all lost. */
+  async reconcilePendingUploads(): Promise<number> {
+    if (this.closed || !this.cache) return 0;
+    let resolved = 0;
+    for (const pending of await this.db.pendingArchiveUploadResolutions()) {
+      if (this.closed || this.active.has(pending.room_id)) continue;
+      this.active.add(pending.room_id);
+      try {
+        const body = await this.cache.get(pending.segment_id);
+        if (!body) {
+          await this.savePendingJob(pending, "failed", "Local archive repair copy is missing; server TTL cleanup will reclaim any pending object");
+          resolved += 1;
+          continue;
+        }
+        let resolution: Awaited<ReturnType<ApiClient["cancelArchiveSegmentUpload"]>>;
+        try {
+          resolution = await this.api.cancelArchiveSegmentUpload(
+            pending.room_id, pending.segment_id, pending.lease_token, pending.start_seq, pending.end_seq, body,
+          );
+        } catch {
+          continue;
+        }
+        if (resolution.state === "committed") {
+          await this.savePendingJob(pending, "uploaded");
+          try {
+            await this.api.acknowledgeArchiveSegmentRetention(pending.segment_id);
+          } catch (error) {
+            if (!(error && typeof error === "object" && "status" in error && error.status === 404)) continue;
+          }
+          await this.db.completeArchiveRetentionAck(pending.room_id, pending.segment_id);
+        } else {
+          await this.cache.remove(pending.segment_id);
+          await this.savePendingJob(pending, "failed", "Archive upload was not committed; local repair copy removed after exact server resolution");
+        }
+        resolved += 1;
+      } finally {
+        this.active.delete(pending.room_id);
+        this.resolveIdleWaiters();
       }
     }
+    return resolved;
   }
 
   /** Retry only locally recorded post-upload acknowledgements; never recreates a GC'd server segment. */
@@ -141,8 +182,18 @@ export class ArchiveCoordinator extends EventTarget {
     return ordered;
   }
 
-  private job(lease: CompactionLease, status: "leased" | "key_wrapped" | "building" | "uploading" | "uploaded" | "complete" | "failed", error?: string): Promise<void> {
+  private job(lease: CompactionLease, status: "leased" | "key_wrapped" | "building" | "uploading" | "upload_unknown" | "uploaded" | "complete" | "failed", error?: string): Promise<void> {
     return this.db.saveCompactionJob({ room_id: lease.room_id, segment_id: lease.segment_id, lease_token: lease.token, start_seq: lease.start_seq, end_seq: lease.end_seq, expires_at: lease.expires_at, status, error });
+  }
+
+  private savePendingJob(pending: PendingArchiveUploadResolution, status: "uploaded" | "failed", error?: string): Promise<void> {
+    return this.db.saveCompactionJob({ ...pending, status, error });
+  }
+
+  private resolveIdleWaiters(): void {
+    if (this.active.size) return;
+    for (const resolve of this.idleWaiters) resolve();
+    this.idleWaiters.clear();
   }
 
   private emit(roomId: RoomId, state: ArchiveCoordinatorStatus["state"], detail?: string): void {

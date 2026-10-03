@@ -1742,6 +1742,10 @@ describe("single-server durable delivery", () => {
     });
     const cancelledObjectKey = `rooms/${encodeURIComponent(roomId)}/segments/000000000001-${cancelledSegmentId}.bin`;
     await vi.waitFor(async () => expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(cancelledObjectKey).first()).toEqual({ object_key: cancelledObjectKey }));
+    // A tab may release its lease before it gets back online. The exact D1
+    // write intent must still be enough to abandon this one object without a
+    // provider LIST/HEAD request.
+    await env.ROOMS.getByName(roomId).releaseCompactionLease(cancelledLeaseToken, account.device_id);
     const cancelled = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${cancelledSegmentId}/upload`, {
       method: "DELETE", headers: { authorization: `Bearer ${account.access_token}`, "x-compaction-token": cancelledLeaseToken,
         "x-start-seq": "1", "x-end-seq": "1", "x-ciphertext-bytes": String(cancelledCiphertext.byteLength), "x-content-sha256": cancelledDigest },

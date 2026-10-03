@@ -351,7 +351,10 @@ export type ImageSearchResult = Pick<LocalMessage, "message_id" | "room_id" | "s
   kind: "image"; attachment_id: string; name: string; score: number;
 };
 type ImageEmbeddingRow = Omit<ImageSearchResult, "kind" | "score"> & { embedding: Uint8Array; dimensions: number };
-export type CompactionJobStatus = "leased" | "key_wrapped" | "building" | "uploading" | "uploaded" | "complete" | "failed";
+export type CompactionJobStatus = "leased" | "key_wrapped" | "building" | "uploading" | "upload_unknown" | "uploaded" | "complete" | "failed";
+export type PendingArchiveUploadResolution = {
+  room_id: RoomId; segment_id: string; lease_token: string; start_seq: number; end_seq: number; expires_at: number;
+};
 export type PendingArchiveRetentionAck = { room_id: RoomId; segment_id: string };
 export type LocalArchiveSegmentMetadata = {
   segment_id: string; room_id: RoomId; start_seq: number; end_seq: number; byte_size: number;
@@ -1705,6 +1708,15 @@ export class LocalDatabase {
     return this.query<PendingArchiveRetentionAck>(
       "SELECT room_id, segment_id FROM compaction_jobs WHERE status = 'uploaded' ORDER BY updated_at",
     );
+  }
+
+  async pendingArchiveUploadResolutions(limit = 25): Promise<PendingArchiveUploadResolution[]> {
+    const boundedLimit = Number.isInteger(limit) ? Math.min(100, Math.max(1, limit)) : 25;
+    const rows = await this.query<PendingArchiveUploadResolution>(
+      "SELECT room_id, segment_id, lease_token, start_seq, end_seq, expires_at FROM compaction_jobs WHERE status = 'upload_unknown' ORDER BY updated_at LIMIT $1",
+      [boundedLimit],
+    );
+    return rows.map((row) => ({ ...row, start_seq: Number(row.start_seq), end_seq: Number(row.end_seq), expires_at: Number(row.expires_at) }));
   }
 
   async completeArchiveRetentionAck(roomId: RoomId, segmentId: string): Promise<void> {

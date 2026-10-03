@@ -295,11 +295,11 @@ describe("PGlite local full-text index", () => {
     await db.exec(LOCAL_SCHEMA);
     const key = crypto.getRandomValues(new Uint8Array(32));
     await db.query("INSERT INTO archive_keys VALUES ($1,$2,$3,1,100,$4)", ["segment", "!0123456789abcdef:example.com", key, Date.now()]);
-    await db.query("INSERT INTO compaction_jobs VALUES ($1,$2,$3,1,100,$4,'building',NULL,$5)", ["!0123456789abcdef:example.com", "segment", "lease", Date.now() + 60_000, Date.now()]);
+    await db.query("INSERT INTO compaction_jobs VALUES ($1,$2,$3,1,100,$4,'upload_unknown','offline',$5)", ["!0123456789abcdef:example.com", "segment", "lease", Date.now() + 60_000, Date.now()]);
     const keyResult = await db.query<{ segment_key: Uint8Array }>("SELECT segment_key FROM archive_keys WHERE segment_id = 'segment'");
     const jobResult = await db.query<{ status: string }>("SELECT status FROM compaction_jobs");
     expect(Array.from(keyResult.rows[0].segment_key)).toEqual(Array.from(key));
-    expect(jobResult.rows[0].status).toBe("building");
+    expect(jobResult.rows[0].status).toBe("upload_unknown");
     await db.close();
   });
 

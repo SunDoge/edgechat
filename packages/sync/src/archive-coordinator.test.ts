@@ -147,20 +147,63 @@ describe("ArchiveCoordinator", () => {
   });
 
   it("retains the local failed segment while server upload state is unknowable", async () => {
+    const statuses: string[] = [];
     const api = {
       acquireCompactionLease: vi.fn(async () => lease), history: vi.fn(async () => ({ events, segments: [] })),
       uploadSegment: vi.fn(async () => { throw new Error("upload failed"); }),
       cancelArchiveSegmentUpload: vi.fn(async () => { throw new TypeError("offline"); }),
       releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
-    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
+    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async (job: { status: string }) => { statuses.push(job.status); }) } as unknown as LocalDatabase;
     const builder = { build: vi.fn(async () => new Uint8Array([1, 2, 3])), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
     const cache = { get: vi.fn(), put: vi.fn(async () => true), remove: vi.fn(async () => undefined) };
     const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
 
     await expect(coordinator.compact(roomId)).rejects.toThrow("upload failed");
+    expect(statuses.at(-1)).toBe("upload_unknown");
     expect(cache.remove).not.toHaveBeenCalled();
     expect(api.releaseCompactionLease).toHaveBeenCalledWith(roomId, lease.token);
+  });
+
+  it("resolves an ambiguous upload after reconnect and acknowledges a committed segment", async () => {
+    const statuses: string[] = [];
+    const api = {
+      cancelArchiveSegmentUpload: vi.fn(async () => ({ segment_id: lease.segment_id, state: "committed" as const })),
+      acknowledgeArchiveSegmentRetention: vi.fn(async () => ({ segment_id: lease.segment_id })),
+    } as unknown as ApiClient;
+    const db = {
+      pendingArchiveUploadResolutions: vi.fn(async () => [{ room_id: roomId, segment_id: lease.segment_id, lease_token: lease.token, start_seq: 1, end_seq: 3, expires_at: lease.expires_at }]),
+      saveCompactionJob: vi.fn(async (job: { status: string }) => { statuses.push(job.status); }),
+      completeArchiveRetentionAck: vi.fn(async () => { statuses.push("complete"); }),
+    } as unknown as LocalDatabase;
+    const builder = { close: vi.fn() } as unknown as ArchiveSegmentBuilder;
+    const body = new Uint8Array([1, 2, 3]).buffer;
+    const cache = { get: vi.fn(async () => body), put: vi.fn(), remove: vi.fn() };
+    const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
+
+    await expect(coordinator.reconcilePendingUploads()).resolves.toBe(1);
+    expect(api.cancelArchiveSegmentUpload).toHaveBeenCalledWith(roomId, lease.segment_id, lease.token, 1, 3, body);
+    expect(api.acknowledgeArchiveSegmentRetention).toHaveBeenCalledWith(lease.segment_id);
+    expect(statuses).toEqual(["uploaded", "complete"]);
+    expect(cache.remove).not.toHaveBeenCalled();
+  });
+
+  it("removes an ambiguous local copy only after reconnect confirms server abandonment", async () => {
+    const statuses: Array<{ status: string; error?: string }> = [];
+    const api = {
+      cancelArchiveSegmentUpload: vi.fn(async () => ({ segment_id: lease.segment_id, state: "abandoned" as const })),
+    } as unknown as ApiClient;
+    const db = {
+      pendingArchiveUploadResolutions: vi.fn(async () => [{ room_id: roomId, segment_id: lease.segment_id, lease_token: lease.token, start_seq: 1, end_seq: 3, expires_at: lease.expires_at }]),
+      saveCompactionJob: vi.fn(async (job: { status: string; error?: string }) => { statuses.push(job); }),
+    } as unknown as LocalDatabase;
+    const builder = { close: vi.fn() } as unknown as ArchiveSegmentBuilder;
+    const cache = { get: vi.fn(async () => new Uint8Array([1, 2, 3]).buffer), put: vi.fn(), remove: vi.fn(async () => undefined) };
+    const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
+
+    await expect(coordinator.reconcilePendingUploads()).resolves.toBe(1);
+    expect(cache.remove).toHaveBeenCalledWith(lease.segment_id);
+    expect(statuses.at(-1)).toMatchObject({ status: "failed", error: expect.stringContaining("not committed") });
   });
 
   it("releases the lease when building fails", async () => {
