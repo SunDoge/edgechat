@@ -25,6 +25,17 @@ describe("ArchiveCoordinator", () => {
     expect(builder.close).toHaveBeenCalledOnce();
   });
 
+  it("does not overwrite a room's crash-recovery or retention-ack job", async () => {
+    const api = { acquireCompactionLease: vi.fn() } as unknown as ApiClient;
+    const db = { hasPendingArchiveRecovery: vi.fn(async () => true) } as unknown as LocalDatabase;
+    const builder = { build: vi.fn(), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
+    const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64));
+
+    await expect(coordinator.compact(roomId)).resolves.toBe(false);
+    expect(db.hasPendingArchiveRecovery).toHaveBeenCalledWith(roomId);
+    expect(api.acquireCompactionLease).not.toHaveBeenCalled();
+  });
+
   it("quiesces only after an admitted compaction has fully settled", async () => {
     let finishUpload!: () => void;
     const uploadGate = new Promise<void>((resolve) => { finishUpload = resolve; });
@@ -34,7 +45,7 @@ describe("ArchiveCoordinator", () => {
       acknowledgeArchiveSegmentRetention: vi.fn(async () => ({ segment_id: lease.segment_id })),
       releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
-    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
+    const db = { hasPendingArchiveRecovery: vi.fn(async () => false), saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
     const builder = { build: vi.fn(async () => new Uint8Array([1, 2, 3])), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
     const cache = { get: vi.fn(), put: vi.fn(async () => true), remove: vi.fn(async () => undefined) };
     const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
@@ -66,6 +77,7 @@ describe("ArchiveCoordinator", () => {
       releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
     const db = {
+      hasPendingArchiveRecovery: vi.fn(async () => false),
       saveArchiveKey: vi.fn(async () => { calls.push("save-key"); }),
       saveCompactionJob: vi.fn(async () => undefined),
     } as unknown as LocalDatabase;
@@ -93,6 +105,7 @@ describe("ArchiveCoordinator", () => {
       releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
     const db = {
+      hasPendingArchiveRecovery: vi.fn(async () => false),
       saveArchiveKey: vi.fn(async () => undefined),
       saveCompactionJob: vi.fn(async (job: { status: string }) => { statuses.push(job.status); }),
       pendingArchiveRetentionAcks: vi.fn(async () => [{ room_id: roomId, segment_id: lease.segment_id }]),
@@ -109,6 +122,22 @@ describe("ArchiveCoordinator", () => {
     expect(statuses.at(-1)).toBe("complete");
   });
 
+  it("does not claim retention or permanently block compaction when the local uploaded copy was evicted", async () => {
+    const api = { acknowledgeArchiveSegmentRetention: vi.fn() } as unknown as ApiClient;
+    const db = {
+      pendingArchiveRetentionAcks: vi.fn(async () => [{ room_id: roomId, segment_id: lease.segment_id }]),
+      failArchiveRetentionAck: vi.fn(async () => undefined),
+    } as unknown as LocalDatabase;
+    const builder = { close: vi.fn() } as unknown as ArchiveSegmentBuilder;
+    const cache = { get: vi.fn(async () => null), put: vi.fn(), remove: vi.fn() };
+    const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
+
+    await expect(coordinator.reconcileRetentionAcks()).resolves.toBe(0);
+    expect(api.acknowledgeArchiveSegmentRetention).not.toHaveBeenCalled();
+    expect(db.failArchiveRetentionAck).toHaveBeenCalledWith(roomId, lease.segment_id, expect.stringContaining("not acknowledged"));
+    expect(coordinator.isBusy()).toBe(false);
+  });
+
   it("keeps and acknowledges the local segment when cancellation proves the upload committed", async () => {
     const api = {
       acquireCompactionLease: vi.fn(async () => lease), history: vi.fn(async () => ({ events, segments: [] })),
@@ -117,7 +146,7 @@ describe("ArchiveCoordinator", () => {
       acknowledgeArchiveSegmentRetention: vi.fn(async () => ({ segment_id: lease.segment_id })),
       releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
-    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
+    const db = { hasPendingArchiveRecovery: vi.fn(async () => false), saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
     const builder = { build: vi.fn(async () => new Uint8Array([1, 2, 3])), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
     const cache = { get: vi.fn(), put: vi.fn(async () => true), remove: vi.fn(async () => undefined) };
     const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
@@ -136,7 +165,7 @@ describe("ArchiveCoordinator", () => {
       cancelArchiveSegmentUpload: vi.fn(async () => ({ segment_id: lease.segment_id, state: "abandoned" as const })),
       releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
-    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
+    const db = { hasPendingArchiveRecovery: vi.fn(async () => false), saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
     const builder = { build: vi.fn(async () => new Uint8Array([1, 2, 3])), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
     const cache = { get: vi.fn(), put: vi.fn(async () => true), remove: vi.fn(async () => undefined) };
     const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
@@ -154,7 +183,7 @@ describe("ArchiveCoordinator", () => {
       cancelArchiveSegmentUpload: vi.fn(async () => { throw new TypeError("offline"); }),
       releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
-    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async (job: { status: string }) => { statuses.push(job.status); }) } as unknown as LocalDatabase;
+    const db = { hasPendingArchiveRecovery: vi.fn(async () => false), saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async (job: { status: string }) => { statuses.push(job.status); }) } as unknown as LocalDatabase;
     const builder = { build: vi.fn(async () => new Uint8Array([1, 2, 3])), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
     const cache = { get: vi.fn(), put: vi.fn(async () => true), remove: vi.fn(async () => undefined) };
     const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64), cache);
@@ -211,7 +240,7 @@ describe("ArchiveCoordinator", () => {
       acquireCompactionLease: vi.fn(async () => lease), history: vi.fn(async () => ({ events, segments: [] })),
       uploadSegment: vi.fn(), releaseCompactionLease: vi.fn(async () => undefined),
     } as unknown as ApiClient;
-    const db = { saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
+    const db = { hasPendingArchiveRecovery: vi.fn(async () => false), saveArchiveKey: vi.fn(async () => undefined), saveCompactionJob: vi.fn(async () => undefined) } as unknown as LocalDatabase;
     const builder = { build: vi.fn(async () => { throw new Error("codec failed"); }), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
     const coordinator = new ArchiveCoordinator(api, db, builder, async () => new Uint8Array(64));
     await expect(coordinator.compact(roomId)).rejects.toThrow("codec failed");

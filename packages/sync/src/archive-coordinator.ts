@@ -27,6 +27,11 @@ export class ArchiveCoordinator extends EventTarget {
 
   async compact(roomId: RoomId): Promise<boolean> {
     if (this.closed || this.active.has(roomId)) return false;
+    // Never overwrite the room-keyed recovery record. `uploading` may be a tab
+    // crash after the OPFS write, `upload_unknown` needs exact server
+    // resolution, and `uploaded` still needs its retention acknowledgement.
+    if (await this.db.hasPendingArchiveRecovery(roomId)) return false;
+    if (this.closed || this.active.has(roomId)) return false;
     this.active.add(roomId);
     let lease: CompactionLease | null = null;
     let cached = false; let uploaded = false;
@@ -136,17 +141,27 @@ export class ArchiveCoordinator extends EventTarget {
 
   /** Retry only locally recorded post-upload acknowledgements; never recreates a GC'd server segment. */
   async reconcileRetentionAcks(): Promise<number> {
-    if (!this.cache) return 0;
+    if (this.closed || !this.cache) return 0;
     let completed = 0;
     for (const pending of await this.db.pendingArchiveRetentionAcks()) {
-      if (!(await this.cache.get(pending.segment_id))) continue;
+      if (this.closed || this.active.has(pending.room_id)) continue;
+      this.active.add(pending.room_id);
       try {
-        await this.api.acknowledgeArchiveSegmentRetention(pending.segment_id);
-      } catch (error) {
-        if (!(error && typeof error === "object" && "status" in error && error.status === 404)) continue;
+        if (!(await this.cache.get(pending.segment_id))) {
+          await this.db.failArchiveRetentionAck(pending.room_id, pending.segment_id, "Local archive copy is missing; retention was not acknowledged");
+          continue;
+        }
+        try {
+          await this.api.acknowledgeArchiveSegmentRetention(pending.segment_id);
+        } catch (error) {
+          if (!(error && typeof error === "object" && "status" in error && error.status === 404)) continue;
+        }
+        await this.db.completeArchiveRetentionAck(pending.room_id, pending.segment_id);
+        completed += 1;
+      } finally {
+        this.active.delete(pending.room_id);
+        this.resolveIdleWaiters();
       }
-      await this.db.completeArchiveRetentionAck(pending.room_id, pending.segment_id);
-      completed += 1;
     }
     return completed;
   }

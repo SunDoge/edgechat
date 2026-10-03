@@ -1713,16 +1713,31 @@ export class LocalDatabase {
   async pendingArchiveUploadResolutions(limit = 25): Promise<PendingArchiveUploadResolution[]> {
     const boundedLimit = Number.isInteger(limit) ? Math.min(100, Math.max(1, limit)) : 25;
     const rows = await this.query<PendingArchiveUploadResolution>(
-      "SELECT room_id, segment_id, lease_token, start_seq, end_seq, expires_at FROM compaction_jobs WHERE status = 'upload_unknown' ORDER BY updated_at LIMIT $1",
+      "SELECT room_id, segment_id, lease_token, start_seq, end_seq, expires_at FROM compaction_jobs WHERE status IN ('uploading', 'upload_unknown') ORDER BY updated_at LIMIT $1",
       [boundedLimit],
     );
     return rows.map((row) => ({ ...row, start_seq: Number(row.start_seq), end_seq: Number(row.end_seq), expires_at: Number(row.expires_at) }));
+  }
+
+  async hasPendingArchiveRecovery(roomId: RoomId): Promise<boolean> {
+    const [row] = await this.query<{ pending: number }>(
+      "SELECT 1 AS pending FROM compaction_jobs WHERE room_id = $1 AND status IN ('uploading', 'upload_unknown', 'uploaded') LIMIT 1",
+      [roomId],
+    );
+    return row !== undefined;
   }
 
   async completeArchiveRetentionAck(roomId: RoomId, segmentId: string): Promise<void> {
     await this.query(
       "UPDATE compaction_jobs SET status = 'complete', error = NULL, updated_at = $3 WHERE room_id = $1 AND segment_id = $2 AND status = 'uploaded'",
       [roomId, segmentId, Date.now()],
+    );
+  }
+
+  async failArchiveRetentionAck(roomId: RoomId, segmentId: string, error: string): Promise<void> {
+    await this.query(
+      "UPDATE compaction_jobs SET status = 'failed', error = $3, updated_at = $4 WHERE room_id = $1 AND segment_id = $2 AND status = 'uploaded'",
+      [roomId, segmentId, error, Date.now()],
     );
   }
 

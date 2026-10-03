@@ -190,11 +190,14 @@ in-flight claim is marked cancelled before one exact DELETE. The uploader checks
 that marker and revalidates its lease after PUT, immediately before the D1
 commit, and removes a late object itself.
 
-If the immediate resolution request is also offline, PGlite records
-`upload_unknown` and keeps the exact OPFS ciphertext. Startup and later durable
-sync activity retry that bounded queue. Recovery uses the committed row or the
-exact D1 write intent even after the original lease has expired; it performs no
-LIST, HEAD, GET, or speculative DELETE. A missing D1 intent is `absent`, and the
+If the page crashes after recording `uploading`, or the immediate resolution
+request is also offline and records `upload_unknown`, startup and later durable
+sync activity retry that bounded queue from the exact OPFS ciphertext. A new
+compaction for that room is refused while either state—or a post-commit
+`uploaded` retention acknowledgement—remains unresolved, so the room-keyed job
+cannot be overwritten. Recovery uses the committed row or the exact D1 write
+intent even after the original lease has expired; it performs no LIST, HEAD,
+GET, or speculative DELETE. A missing D1 intent is `absent`, and the
 late-uploader lease check owns any eventual exact cleanup. Only an exact
 committed result is acknowledged as retained; only an exact abandoned/absent
 result permits the local repair copy to be removed. Committed metadata is never
