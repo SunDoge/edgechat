@@ -690,6 +690,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(input.roomId)) throw new Error("发送队列尚未就绪");
     const previousState = currentMls.exportState();
+    let signedEvent: ClientEvent | null = null;
+    let stageAttempted = false;
     try {
       const ciphertext = encodeBase64Url(currentMls.encryptMessage(input.roomId, encoder.encode(JSON.stringify(input.payload))));
       const nextState = currentMls.exportState();
@@ -699,9 +701,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         metadata: { mls_epoch: currentMls.epoch(input.roomId), ...input.metadata },
       };
       const signature = await core.sign(currentIdentity, canonicalEventBytes(unsigned));
+      signedEvent = { ...unsigned, signature };
       mlsProjectionBarrier.add(input.eventId);
       setLocalProjectionRecoveries((current) => ({ ...current, [input.eventId]: input.roomId }));
-      await db.stageOutgoingEvent({ ...unsigned, signature }, input.plaintext ?? "", input.payload, new Uint8Array(previousState), new Uint8Array(nextState));
+      stageAttempted = true;
+      await db.stageOutgoingEvent(signedEvent, input.plaintext ?? "", input.payload, new Uint8Array(previousState), new Uint8Array(nextState));
       await persistMls(currentMls);
       await db.promoteStagedOutgoingEvent(input.eventId);
       mlsProjectionBarrier.settle(input.eventId);
@@ -711,10 +715,22 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       // If staging committed but its response or a later write failed, replay
       // that exact ciphertext transition. Otherwise roll back the in-memory
       // MLS ratchet so a failed local admission consumes no generation.
-      const [staged, promoted] = await Promise.all([
-        db.stagedOutgoingEvents(500).then((rows) => rows.find(({ event }) => event.event_id === input.eventId)).catch(() => undefined),
-        db.outbox(input.roomId).then((rows) => rows.some(({ event }) => event.event_id === input.eventId)).catch(() => false),
-      ]);
+      let staged: Awaited<ReturnType<LocalDatabase["stagedOutgoingEvents"]>>[number] | undefined;
+      let promoted = false;
+      if (stageAttempted && signedEvent) {
+        try {
+          const [stagedRows, exactOutbox] = await Promise.all([
+            db.stagedOutgoingEvents(500),
+            db.hasExactOutbox(signedEvent, input.plaintext ?? "", input.payload),
+          ]);
+          staged = stagedRows.find(({ event }) => event.event_id === input.eventId);
+          promoted = exactOutbox;
+        } catch (verificationCause) {
+          // The write may have committed even when its response was lost. Do
+          // not guess and roll the ratchet back while durable state is unreadable.
+          throw new LocalProjectionPersistenceError(verificationCause);
+        }
+      }
       if (promoted) {
         mlsProjectionBarrier.settle(input.eventId);
         setLocalProjectionRecoveries((current) => { const next = { ...current }; delete next[input.eventId]; return next; });

@@ -66,17 +66,25 @@ INSERT INTO processed_events (event_id, room_id, seq, processed_at)
 VALUES ($1,$2,$3,$6) ON CONFLICT (event_id) DO NOTHING`;
 
 export const PROMOTE_STAGED_OUTGOING_EVENT_SQL = `WITH staged AS (
-  DELETE FROM outgoing_event_staging WHERE event_id = $1
-  RETURNING event_id,room_id,event_json,plaintext,payload,staged_at
+  SELECT event_id,room_id,event_json,plaintext,payload,staged_at
+  FROM outgoing_event_staging WHERE event_id = $1
+), admitted AS (
+  INSERT INTO outbox (event_id,message_id,room_id,event_json,plaintext,payload,status,attempts,next_attempt_at,last_error,created_at,updated_at)
+  SELECT event_id,COALESCE(NULLIF(payload->>'message_id',''),event_id),room_id,event_json,plaintext,payload,'pending',0,staged_at,NULL,staged_at,staged_at
+  FROM staged
+  ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
+  WHERE outbox.room_id = EXCLUDED.room_id AND outbox.event_json = EXCLUDED.event_json
+    AND outbox.plaintext = EXCLUDED.plaintext AND outbox.payload = EXCLUDED.payload
+  RETURNING event_id
 ), superseded AS (
-  DELETE FROM outbox o USING staged s
-  WHERE o.room_id = s.room_id AND o.status <> 'sending'
+  DELETE FROM outbox o USING staged s, admitted a
+  WHERE o.event_id <> a.event_id AND o.room_id = s.room_id AND o.status <> 'sending'
     AND s.payload->>'kind' IN ('receipt.read','receipt.delivered')
     AND o.payload->>'kind' = s.payload->>'kind'
+), removed AS (
+  DELETE FROM outgoing_event_staging s USING admitted a WHERE s.event_id = a.event_id
 )
-INSERT INTO outbox (event_id,message_id,room_id,event_json,plaintext,payload,status,attempts,next_attempt_at,last_error,created_at,updated_at)
-SELECT event_id,COALESCE(NULLIF(payload->>'message_id',''),event_id),room_id,event_json,plaintext,payload,'pending',0,staged_at,NULL,staged_at,staged_at
-FROM staged ON CONFLICT (event_id) DO NOTHING RETURNING event_id`;
+SELECT event_id FROM admitted`;
 
 export const ADVANCE_ROOM_SEQUENCE_SQL = `WITH RECURSIVE contiguous(seq) AS (
   SELECT processed_through_seq FROM room_sync_state WHERE room_id = $1
@@ -547,12 +555,20 @@ export class LocalDatabase {
     previousMlsState: Uint8Array<ArrayBuffer>,
     nextMlsState: Uint8Array<ArrayBuffer>,
   ): Promise<void> {
-    await this.query(
+    const rows = await this.query<{ event_id: string }>(
       `INSERT INTO outgoing_event_staging (event_id,room_id,event_json,plaintext,payload,previous_mls_state,next_mls_state,staged_at)
        VALUES ($1,$2,$3::jsonb,$4,$5::jsonb,$6,$7,$8)
-       ON CONFLICT (event_id) DO NOTHING`,
+       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
+       WHERE outgoing_event_staging.room_id = EXCLUDED.room_id
+         AND outgoing_event_staging.event_json = EXCLUDED.event_json
+         AND outgoing_event_staging.plaintext = EXCLUDED.plaintext
+         AND outgoing_event_staging.payload = EXCLUDED.payload
+         AND outgoing_event_staging.previous_mls_state = EXCLUDED.previous_mls_state
+         AND outgoing_event_staging.next_mls_state = EXCLUDED.next_mls_state
+       RETURNING event_id`,
       [event.event_id, event.room_id, JSON.stringify(event), plaintext, JSON.stringify(payload), previousMlsState, nextMlsState, Date.now()],
     );
+    if (!rows.length) throw new Error("Outgoing event ID conflicts with different staged ciphertext or MLS state");
   }
 
   async stagedOutgoingEvents(limit = 500): Promise<LocalStagedOutgoingEvent[]> {
@@ -572,10 +588,15 @@ export class LocalDatabase {
 
   async promoteStagedOutgoingEvent(eventId: string): Promise<void> {
     const rows = await this.query<{ event_id: string }>(PROMOTE_STAGED_OUTGOING_EVENT_SQL, [eventId]);
-    if (!rows.length) {
-      const existing = await this.query<{ event_id: string }>("SELECT event_id FROM outbox WHERE event_id = $1", [eventId]);
-      if (!existing.length) throw new Error("Outgoing staging record is missing");
-    }
+    if (!rows.length) throw new Error("Outgoing staging is missing or conflicts with a different outbox event");
+  }
+
+  async hasExactOutbox(event: ClientEvent, plaintext: string, payload: Record<string, unknown>): Promise<boolean> {
+    const rows = await this.query<{ event_id: string }>(
+      "SELECT event_id FROM outbox WHERE event_id = $1 AND room_id = $2 AND event_json = $3::jsonb AND plaintext = $4 AND payload = $5::jsonb",
+      [event.event_id, event.room_id, JSON.stringify(event), plaintext, JSON.stringify(payload)],
+    );
+    return rows.length === 1;
   }
 
   async cachedRooms<T extends object>(): Promise<T[]> {

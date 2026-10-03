@@ -329,6 +329,29 @@ describe("PGlite local full-text index", () => {
     expect((await db.query(PROMOTE_STAGED_OUTGOING_EVENT_SQL, ["new"])).rows).toEqual([{ event_id: "new" }]);
     expect((await db.query("SELECT event_id,event_json,payload FROM outbox")).rows).toEqual([{ event_id: "new", event_json: event, payload: { kind: "receipt.read", up_to_seq: 8 } }]);
     expect((await db.query("SELECT * FROM outgoing_event_staging")).rows).toHaveLength(0);
+    await db.query(`INSERT INTO outgoing_event_staging VALUES ('new',$1,$2::jsonb,'',$3::jsonb,$4,$5,2)`,
+      [room, JSON.stringify(event), JSON.stringify({ kind: "receipt.read", up_to_seq: 8 }), new Uint8Array([1]), new Uint8Array([2])]);
+    expect((await db.query(PROMOTE_STAGED_OUTGOING_EVENT_SQL, ["new"])).rows).toEqual([{ event_id: "new" }]);
+    expect((await db.query("SELECT event_id FROM outbox")).rows).toEqual([{ event_id: "new" }]);
+    expect((await db.query("SELECT * FROM outgoing_event_staging")).rows).toHaveLength(0);
+    await db.close();
+  });
+
+  it("preserves staging and older receipts when an event ID collides with different outbox bytes", async () => {
+    const db = new PGlite(); await db.exec(LOCAL_SCHEMA); await db.exec(LOCAL_SCHEMA_V8);
+    const room = "!0123456789abcdef:example.com";
+    const payload = JSON.stringify({ kind: "receipt.read", up_to_seq: 8 });
+    await db.query(`INSERT INTO outbox (event_id,message_id,room_id,event_json,plaintext,payload,status,attempts,created_at,updated_at)
+      VALUES ('old','old',$1,$2::jsonb,'',$3::jsonb,'pending',0,1,1),
+             ('collision','collision',$1,$4::jsonb,'',$3::jsonb,'pending',0,1,1)`,
+      [room, JSON.stringify({ event_id: "old", ciphertext: "old" }), JSON.stringify({ kind: "receipt.read", up_to_seq: 4 }), JSON.stringify({ event_id: "collision", ciphertext: "different" })]);
+    const staged = { event_id: "collision", room_id: room, sender: "@alice:example.com", device_id: "phone", type: "receipt.read", created_at: 2,
+      ciphertext: "expected", metadata: { mls_epoch: 3 }, signature: "signature" };
+    await db.query("INSERT INTO outgoing_event_staging VALUES ('collision',$1,$2::jsonb,'',$3::jsonb,$4,$5,2)",
+      [room, JSON.stringify(staged), payload, new Uint8Array([1]), new Uint8Array([2])]);
+    expect((await db.query(PROMOTE_STAGED_OUTGOING_EVENT_SQL, ["collision"])).rows).toEqual([]);
+    expect((await db.query("SELECT event_id FROM outgoing_event_staging")).rows).toEqual([{ event_id: "collision" }]);
+    expect((await db.query("SELECT event_id FROM outbox ORDER BY event_id")).rows).toEqual([{ event_id: "collision" }, { event_id: "old" }]);
     await db.close();
   });
 
