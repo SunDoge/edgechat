@@ -1494,6 +1494,16 @@ async function listRoomDevices(env: Env, auth: AuthContext, roomId: RoomId): Pro
   return json({ devices: rows.map((row) => ({ ...row, signing_key: JSON.parse(row.signing_key) as JsonWebKey, encryption_key: JSON.parse(row.encryption_key) as JsonWebKey })) });
 }
 
+async function listRoomSigningKeys(env: Env, auth: AuthContext, roomId: RoomId): Promise<Response> {
+  if (!(await memberRole(env, roomId, auth.userId))) throw new HttpError(404, "Room not found", "not_found");
+  const rows = await createDatabase(env.DB).selectFrom("room_devices as rd")
+    .innerJoin("devices as d", "d.device_id", "rd.device_id")
+    .select(["rd.device_id", "rd.user_id", "d.signing_key"])
+    .orderBy("rd.device_id").limit(1_001).execute();
+  if (rows.length > 1_000) throw new HttpError(409, "Room has too many historical device keys", "room_device_limit");
+  return json({ keys: rows.map((row) => ({ ...row, signing_key: JSON.parse(row.signing_key) as JsonWebKey })) });
+}
+
 async function registerDevice(request: Request, env: Env, auth: AuthContext): Promise<Response> {
   const body = await readJson(request);
   const deviceId = stringField(body, "device_id", 96);
@@ -4650,6 +4660,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   }
   const roomDevices = path.match(/^\/api\/v1\/rooms\/([^/]+)\/devices$/);
   if (roomDevices && request.method === "GET") { requireUser(auth); const id = decodeURIComponent(roomDevices[1]); if (!isNamespacedRoomId(id)) throw new HttpError(400, "Invalid room ID", "invalid_room"); return listRoomDevices(env, auth, id); }
+  const roomSigningKeys = path.match(/^\/api\/v1\/rooms\/([^/]+)\/signing-keys$/);
+  if (roomSigningKeys && request.method === "GET") { requireUser(auth); const id = decodeURIComponent(roomSigningKeys[1]); if (!isNamespacedRoomId(id)) throw new HttpError(400, "Invalid room ID", "invalid_room"); return listRoomSigningKeys(env, auth, id); }
   const roomPreference = path.match(/^\/api\/v1\/rooms\/([^/]+)\/preferences$/);
   if (roomPreference && request.method === "PUT") { const id = decodeURIComponent(roomPreference[1]); if (!isNamespacedRoomId(id)) throw new HttpError(400, "Invalid room ID", "invalid_room"); return setRoomNotificationPreference(request, env, auth, id); }
   const hiddenMember = path.match(/^\/api\/v1\/rooms\/([^/]+)\/hidden-members\/(.+)$/);

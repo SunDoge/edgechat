@@ -29,8 +29,9 @@ describe("PersonalBotClient", () => {
     const result = await bot.sendText("deployment finished");
     expect(result.seq).toBe(1);
     expect(saved?.mls_state).toBeTruthy();
-    const plaintext = recipient.processMessage(roomId, new Uint8Array(Buffer.from(wire, "base64url")));
-    expect(JSON.parse(new TextDecoder().decode(plaintext))).toMatchObject({ version: 2, parts: [{ kind: "text", text: "deployment finished" }] });
+    const processed = recipient.processMessage(roomId, new Uint8Array(Buffer.from(wire, "base64url")));
+    expect(processed.senderDeviceId).toBe(saved?.device_id);
+    expect(JSON.parse(new TextDecoder().decode(processed.plaintext))).toMatchObject({ version: 2, parts: [{ kind: "text", text: "deployment finished" }] });
     bot.close(); recipient.destroy();
   });
 
@@ -77,8 +78,8 @@ describe("PersonalBotClient", () => {
     expect(await restored.flushPending()).toEqual([{ event_id: pendingEventId, seq: 1 }]);
     expect(restored.pendingCount).toBe(0);
     expect(saved?.outbox).toEqual([]);
-    const plaintext = recipient.processMessage(roomId, new Uint8Array(Buffer.from((JSON.parse(failedWire) as { ciphertext: string }).ciphertext, "base64url")));
-    expect(new TextDecoder().decode(plaintext)).toContain("disk almost full");
+    const processed = recipient.processMessage(roomId, new Uint8Array(Buffer.from((JSON.parse(failedWire) as { ciphertext: string }).ciphertext, "base64url")));
+    expect(new TextDecoder().decode(processed.plaintext)).toContain("disk almost full");
     restored.close(); recipient.destroy();
   });
 });

@@ -9,7 +9,7 @@ describe("versioned local PGlite migrations", () => {
     await db.query("INSERT INTO users VALUES ('@alice:example.com','Alice',1)");
     await expect(migrateLocalSchema(db)).resolves.toBe(LOCAL_SCHEMA_VERSION);
     expect((await db.query("SELECT version,migration_name FROM local_schema_meta WHERE id = 1")).rows)
-      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "local_history_floor" }]);
+      .toEqual([{ version: LOCAL_SCHEMA_VERSION, migration_name: "authenticated_event_senders" }]);
     expect((await db.query("SELECT user_id FROM users")).rows).toEqual([{ user_id: "@alice:example.com" }]);
     await db.close();
   });
@@ -44,6 +44,15 @@ describe("versioned local PGlite migrations", () => {
     const db = new PGlite(); await migrateLocalSchema(db);
     await db.query("INSERT INTO room_local_history_floor VALUES ('!room:example.com',42,100)");
     expect((await db.query("SELECT cleared_through_seq,cleared_at FROM room_local_history_floor")).rows).toEqual([{ cleared_through_seq: 42, cleared_at: 100 }]);
+    await db.close();
+  });
+
+  it("adds a pinned room-device signing-key directory and authenticated staging sender", async () => {
+    const db = new PGlite(); await migrateLocalSchema(db);
+    await db.query("INSERT INTO room_device_signing_keys VALUES ('!room-000000000001:example.com','phone','@alice:example.com','{\"kty\":\"EC\"}',1,1)");
+    expect((await db.query("SELECT device_id,user_id FROM room_device_signing_keys")).rows).toEqual([{ device_id: "phone", user_id: "@alice:example.com" }]);
+    expect((await db.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'decrypted_event_staging' AND column_name = 'sender_device_id'")).rows)
+      .toEqual([{ column_name: "sender_device_id" }]);
     await db.close();
   });
 

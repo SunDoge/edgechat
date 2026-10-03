@@ -28,6 +28,8 @@ export type ArchiveKeyEnvelopeManifest = {
 };
 export type MlsCreateGroupResult = { welcome: string; ratchet_tree: string; epoch: number };
 export type MlsCommitResult = { commit: string; welcome: string | null; ratchet_tree: string; epoch: number };
+export type MlsProcessMessageResult = { plaintext: Uint8Array<ArrayBuffer>; senderDeviceId: string };
+type EncodedMlsProcessMessageResult = { plaintext: string; sender_device_id: string };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -266,8 +268,12 @@ export class OpenMlsMessagingCore {
   encryptMessage(roomId: string, plaintext: Uint8Array): Uint8Array {
     return this.client.encrypt_message(encoder.encode(roomId), plaintext);
   }
-  processMessage(roomId: string, message: Uint8Array): Uint8Array {
-    return this.client.process_message(encoder.encode(roomId), message);
+  processMessage(roomId: string, message: Uint8Array): MlsProcessMessageResult {
+    const result = JSON.parse(decoder.decode(this.client.process_message(encoder.encode(roomId), message))) as EncodedMlsProcessMessageResult;
+    if (!result || typeof result.plaintext !== "string" || typeof result.sender_device_id !== "string" || !result.sender_device_id.length || result.sender_device_id.length > 512) {
+      throw new Error("Invalid authenticated MLS processing result");
+    }
+    return { plaintext: decodeBase64Url(result.plaintext), senderDeviceId: result.sender_device_id };
   }
   addMembers(roomId: string, keyPackages: string[]): MlsCommitResult {
     return JSON.parse(decoder.decode(this.client.add_members(encoder.encode(roomId), encoder.encode(JSON.stringify(keyPackages))))) as MlsCommitResult;

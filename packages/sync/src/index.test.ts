@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
+import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -325,6 +325,23 @@ describe("SyncEngine event ingestion", () => {
     await expect(ingest(event)).rejects.toBeInstanceOf(LocalProjectionPersistenceError);
     expect(quarantineEvent).not.toHaveBeenCalled();
     expect(removeStagedDecryptedEvent).not.toHaveBeenCalled();
+  });
+
+  it("never quarantines or advances an event whose authentication fails before MLS processing", async () => {
+    const roomId = "!event-auth-failure:example.com" as const;
+    const event = { event_id: "$event-auth-failure:example.com", room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+      type: "message.text" as const, created_at: 1, ciphertext: "ciphertext", metadata: {}, signature: "signature" } as RoomEvent;
+    const quarantineEvent = vi.fn(async () => undefined); const markProcessed = vi.fn(async () => undefined);
+    const db = {
+      roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: 0 }),
+      hasMessage: async () => false, quarantineEvent, markProcessed,
+    } as unknown as LocalDatabase;
+    const engine = new SyncEngine(new ApiClient(""), db, async () => { throw new LocalStagingIntegrityError("event authentication failed"); });
+    const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
+
+    await expect(ingest(event)).rejects.toBeInstanceOf(LocalStagingIntegrityError);
+    expect(quarantineEvent).not.toHaveBeenCalled();
+    expect(markProcessed).not.toHaveBeenCalled();
   });
 
   it("does not replay events already represented by a newly joined device state", async () => {

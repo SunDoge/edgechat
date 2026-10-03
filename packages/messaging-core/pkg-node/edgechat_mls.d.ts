@@ -26,8 +26,9 @@ export class MlsClient {
     join_group(welcome_bytes: Uint8Array, tree_bytes: Uint8Array): Uint8Array;
     constructor(identity: Uint8Array);
     /**
-     * Returns application plaintext. Proposal/Commit/control processing
-     * returns an empty vector after atomically updating the local epoch.
+     * Returns authenticated application plaintext and the MLS credential
+     * identity of its sender. Proposal/Commit/control processing returns an
+     * empty plaintext after atomically updating the local epoch.
      */
     process_message(group_id: Uint8Array, wire_message: Uint8Array): Uint8Array;
     /**

@@ -10,6 +10,10 @@ const jsonBytes = (value) => bytes(JSON.stringify(value));
 const decodeJson = (value) => JSON.parse(decoder.decode(value));
 const fromBase64Url = (value) => Uint8Array.from(Buffer.from(value, "base64url"));
 const toBase64Url = (value) => Buffer.from(value).toString("base64url");
+const process = (client, room, message) => {
+  const result = decodeJson(client.process_message(room, message));
+  return { plaintext: fromBase64Url(result.plaintext), senderDeviceId: result.sender_device_id };
+};
 
 function flipLast(value) {
   const changed = value.slice();
@@ -40,25 +44,25 @@ function testApplicationTranscripts() {
   createTwoMemberGroup(alice, bob, firstRoom);
 
   const first = alice.encrypt_message(firstRoom, bytes("RFC 9420 from Wasm"));
-  assert.equal(decoder.decode(bob.process_message(firstRoom, first)), "RFC 9420 from Wasm");
+  assert.deepEqual(process(bob, firstRoom, first), { plaintext: bytes("RFC 9420 from Wasm"), senderDeviceId: "alice-device" });
   assert.throws(() => bob.process_message(firstRoom, first), undefined, "application replay must fail");
 
   const authenticated = alice.encrypt_message(firstRoom, bytes("authenticated transcript"));
   assert.throws(() => bob.process_message(firstRoom, flipLast(authenticated)), undefined, "tampered ciphertext must fail");
   assert.equal(bob.epoch(firstRoom), 1n, "tampered ciphertext must not advance the epoch");
-  assert.equal(decoder.decode(bob.process_message(firstRoom, authenticated)), "authenticated transcript");
+  assert.equal(decoder.decode(process(bob, firstRoom, authenticated).plaintext), "authenticated transcript");
 
   const carol = new MlsClient(bytes("carol-device"));
   const secondRoom = bytes("!application-second:example.com");
   createTwoMemberGroup(alice, carol, secondRoom);
   const boundToFirst = alice.encrypt_message(firstRoom, bytes("room-bound"));
   assert.throws(() => carol.process_message(secondRoom, boundToFirst), undefined, "a ciphertext from another group must fail");
-  assert.equal(decoder.decode(bob.process_message(firstRoom, boundToFirst)), "room-bound");
+  assert.equal(decoder.decode(process(bob, firstRoom, boundToFirst).plaintext), "room-bound");
 
   const outOfOrderFirst = alice.encrypt_message(firstRoom, bytes("generation one"));
   const outOfOrderSecond = alice.encrypt_message(firstRoom, bytes("generation two"));
-  assert.equal(decoder.decode(bob.process_message(firstRoom, outOfOrderSecond)), "generation two");
-  assert.equal(decoder.decode(bob.process_message(firstRoom, outOfOrderFirst)), "generation one");
+  assert.equal(decoder.decode(process(bob, firstRoom, outOfOrderSecond).plaintext), "generation two");
+  assert.equal(decoder.decode(process(bob, firstRoom, outOfOrderFirst).plaintext), "generation one");
 }
 
 function testMembershipTranscripts() {
@@ -72,22 +76,22 @@ function testMembershipTranscripts() {
   const addCommit = fromBase64Url(added.commit);
   assert.throws(() => bob.process_message(room, flipLast(addCommit)), undefined, "tampered Add Commit must fail");
   assert.equal(bob.epoch(room), 1n);
-  assert.equal(bob.process_message(room, addCommit).length, 0);
+  assert.equal(process(bob, room, addCommit).plaintext.length, 0);
   assert.equal(bob.epoch(room), 2n);
   assert.throws(() => bob.process_message(room, addCommit), undefined, "stale Add Commit must fail");
   assert.equal(bob.epoch(room), 2n);
 
   charlie.join_group(fromBase64Url(added.welcome), fromBase64Url(added.ratchet_tree));
   const postAdd = charlie.encrypt_message(room, bytes("post-add secret"));
-  assert.equal(decoder.decode(alice.process_message(room, postAdd)), "post-add secret");
-  assert.equal(decoder.decode(bob.process_message(room, postAdd)), "post-add secret");
+  assert.deepEqual(process(alice, room, postAdd), { plaintext: bytes("post-add secret"), senderDeviceId: "charlie-device" });
+  assert.equal(decoder.decode(process(bob, room, postAdd).plaintext), "post-add secret");
 
   const removed = decodeJson(alice.remove_members(room, jsonBytes([toBase64Url(bytes("bob-device"))])));
   const removeCommit = fromBase64Url(removed.commit);
-  assert.equal(bob.process_message(room, removeCommit).length, 0);
-  assert.equal(charlie.process_message(room, removeCommit).length, 0);
+  assert.equal(process(bob, room, removeCommit).plaintext.length, 0);
+  assert.equal(process(charlie, room, removeCommit).plaintext.length, 0);
   const futureSecret = alice.encrypt_message(room, bytes("future secret"));
-  assert.equal(decoder.decode(charlie.process_message(room, futureSecret)), "future secret");
+  assert.equal(decoder.decode(process(charlie, room, futureSecret).plaintext), "future secret");
   assert.throws(() => bob.process_message(room, futureSecret), undefined, "removed member must not decrypt future epochs");
   assert.throws(() => bob.encrypt_message(room, bytes("removed sender")), undefined, "removed member must not send");
   const restoredRemovedMember = MlsClient.import_state(bob.export_state());
@@ -115,7 +119,7 @@ function testStrictTlsFraming() {
 
   const message = alice.encrypt_message(room, bytes("strict framing"));
   assert.throws(() => bob.process_message(room, appendByte(message)), undefined, "message with trailing bytes must fail");
-  assert.equal(decoder.decode(bob.process_message(room, message)), "strict framing");
+  assert.equal(decoder.decode(process(bob, room, message).plaintext), "strict framing");
 }
 
 function testSnapshotValidationAndContinuation() {
@@ -134,7 +138,7 @@ function testSnapshotValidationAndContinuation() {
   alice.free();
   alice = restored;
   const continued = alice.encrypt_message(room, bytes("continued after restore"));
-  assert.equal(decoder.decode(bob.process_message(room, continued)), "continued after restore");
+  assert.equal(decoder.decode(process(bob, room, continued).plaintext), "continued after restore");
 
   const wrongVersion = structuredClone(snapshot);
   wrongVersion.version = 2;

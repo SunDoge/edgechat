@@ -163,8 +163,9 @@ class MlsClient {
         return this;
     }
     /**
-     * Returns application plaintext. Proposal/Commit/control processing
-     * returns an empty vector after atomically updating the local epoch.
+     * Returns authenticated application plaintext and the MLS credential
+     * identity of its sender. Proposal/Commit/control processing returns an
+     * empty plaintext after atomically updating the local epoch.
      * @param {Uint8Array} group_id
      * @param {Uint8Array} wire_message
      * @returns {Uint8Array}

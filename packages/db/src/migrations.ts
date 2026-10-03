@@ -36,8 +36,19 @@ export const LOCAL_SCHEMA_V6 = `CREATE TABLE room_local_history_floor (
   cleared_through_seq BIGINT NOT NULL CHECK (cleared_through_seq >= 0),
   cleared_at BIGINT NOT NULL
 )`;
+export const LOCAL_SCHEMA_V7 = `CREATE TABLE room_device_signing_keys (
+  room_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  signing_key JSONB NOT NULL,
+  first_seen_at BIGINT NOT NULL,
+  last_seen_at BIGINT NOT NULL,
+  PRIMARY KEY (room_id, device_id)
+);
+CREATE INDEX idx_room_device_signing_keys_device ON room_device_signing_keys(device_id);
+ALTER TABLE decrypted_event_staging ADD COLUMN sender_device_id TEXT NOT NULL`;
 
-export const LOCAL_SCHEMA_VERSION = 6;
+export const LOCAL_SCHEMA_VERSION = 7;
 export const LOCAL_SCHEMA_MIGRATIONS: readonly LocalSchemaMigration[] = Object.freeze([
   { version: 1, name: "initial_local_schema", checksum: "f1e403a6e8c19ccd6943e34523664090f1a2aec623a88ea9d1588ef1278b9a69", sql: LOCAL_SCHEMA },
   { version: 2, name: "room_membership_outbox", checksum: "c30cd87e8264841f9255936181a7ed428750d4d217f41f8633a2f93a07acdc59", sql: LOCAL_SCHEMA_V2 },
@@ -45,6 +56,7 @@ export const LOCAL_SCHEMA_MIGRATIONS: readonly LocalSchemaMigration[] = Object.f
   { version: 4, name: "encrypted_room_avatars", checksum: "c062245235620d3a3e91df9997f73322e7c90acaf65b1fbbe00a189bbd67c896", sql: LOCAL_SCHEMA_V4 },
   { version: 5, name: "manual_unread_reminders", checksum: "1429804b589dae5923898b3d694895ab93bf0f47b4dca702f4961bc1681fecc2", sql: LOCAL_SCHEMA_V5 },
   { version: 6, name: "local_history_floor", checksum: "80692340488a826cb1499ae10b2da27a240ec30b944b4e0e13f1fb235085a75c", sql: LOCAL_SCHEMA_V6 },
+  { version: 7, name: "authenticated_event_senders", checksum: "7e5abc0f324b0e27e4ab3efb0e03c3d4ed85d57698b138124a5e7c45c28c23dc", sql: LOCAL_SCHEMA_V7 },
 ]);
 
 const LOCAL_SCHEMA_META = `CREATE TABLE IF NOT EXISTS local_schema_meta (

@@ -972,6 +972,21 @@ describe("single-server durable delivery", () => {
     const archiveDevices = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/devices`, { headers });
     expect(archiveDevices.status, await archiveDevices.clone().text()).toBe(200);
     expect(await archiveDevices.json()).toMatchObject({ devices: [{ device_id: account.device_id, user_id: account.user_id, display_name: "repair-device", kind: "user", signing_key: { kty: "EC", crv: "P-256" }, encryption_key: { kty: "EC", crv: "P-256" }, revoked_at: null }] });
+    const historicalDevice = await device("repair-revoked-device"); const historicalAt = Date.now() - 1;
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO devices (device_id,user_id,display_name,signing_key,encryption_key,created_at,last_seen_at,revoked_at) VALUES (?,?,?,?,?,?,?,?)")
+        .bind(historicalDevice.id, account.user_id, historicalDevice.body.display_name, historicalDevice.body.signing_key, historicalDevice.body.encryption_key, historicalAt, historicalAt, historicalAt),
+      env.DB.prepare("INSERT INTO room_devices (room_id,device_id,user_id,joined_epoch,joined_seq,removed_epoch,created_at,removed_at) VALUES (?,?,?,1,0,2,?,?)")
+        .bind(roomId, historicalDevice.id, account.user_id, historicalAt, historicalAt),
+    ]);
+    const signingKeys = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/signing-keys`, { headers });
+    expect(signingKeys.status, await signingKeys.clone().text()).toBe(200);
+    const signingKeyBody = await signingKeys.json() as { keys: Array<{ device_id: string; user_id: string; signing_key: JsonWebKey }> };
+    expect(signingKeyBody.keys).toHaveLength(2);
+    expect(signingKeyBody.keys).toEqual(expect.arrayContaining([
+      expect.objectContaining({ device_id: account.device_id, user_id: account.user_id, signing_key: expect.objectContaining({ kty: "EC", crv: "P-256" }) }),
+      expect.objectContaining({ device_id: historicalDevice.id, user_id: account.user_id, signing_key: expect.objectContaining({ kty: "EC", crv: "P-256" }) }),
+    ]));
     const attachmentUploadBody = new Uint8Array([7, 8, 9]);
     const attachmentUpload = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
       method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-room-id": roomId, "content-length": "3", "x-content-sha256": await ciphertextDigest(attachmentUploadBody) }, body: attachmentUploadBody,

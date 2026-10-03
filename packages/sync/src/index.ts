@@ -1,5 +1,5 @@
 import type { LocalDatabase } from "@edgechat/db";
-import { assertCompatibleServerProtocol, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserProfile } from "@edgechat/protocol";
+import { assertCompatibleServerProtocol, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserId, type UserProfile } from "@edgechat/protocol";
 import { decodeSegmentChunk, decodeSegmentHeader, decodeSegmentIndex, rangesForSequences, SEGMENT_HEADER_BYTES } from "./archive";
 
 export class ApiError extends Error {
@@ -9,6 +9,7 @@ export class ApiError extends Error {
 export type SessionIdentity = { user_id: string; device_id: string; display_name: string; avatar_url?: string | null; server_name?: string; vapid_public_key?: string; device_credential?: string; archive_compaction_enabled: boolean; protocol?: ServerProtocolCapabilities };
 export type ServerDevice = { device_id: string; user_id: string; display_name: string; kind: "user" | "bot"; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
 export type RoomArchiveDevice = ServerDevice;
+export type RoomDeviceSigningKey = { device_id: string; user_id: UserId; signing_key: JsonWebKey };
 export type ServerRoom = RoomSummary & { home_server: string; joined_seq: number; encrypted_state: string | null; epoch: number | null; muted_until: number | null; blocked_by_me: boolean; leave_status?: "pending" | null };
 export type ClaimedMlsKeyPackage = { claim_id: string; device_id: string; user_id: string; key_package: string };
 export type CompactionLease = { room_id: RoomId; token: string; device_id: string; segment_id: string; start_seq: number; end_seq: number; expires_at: number };
@@ -180,6 +181,7 @@ export class ApiClient {
   rejectMessageRequest(roomId: RoomId) { return this.request<{ room_id: RoomId; status: "rejected" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/request`, { method: "DELETE" }); }
   reportMessageRequest(roomId: RoomId, category: "spam" | "abuse" | "other", eventId?: string) { return this.request<{ room_id: RoomId; status: "rejected" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/report`, { method: "POST", body: JSON.stringify({ category, event_id: eventId }) }); }
   roomDevices(roomId: RoomId) { return this.request<{ devices: RoomArchiveDevice[] }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/devices`); }
+  roomSigningKeys(roomId: RoomId) { return this.request<{ keys: RoomDeviceSigningKey[] }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/signing-keys`); }
   setRoomNotificationPreference(roomId: RoomId, mutedUntil: number | null) { return this.request<{ room_id: RoomId; muted_until: number | null }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/preferences`, { method: "PUT", body: JSON.stringify({ muted_until: mutedUntil }) }); }
   hideGroupMember(roomId: RoomId, userId: string) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/hidden-members/${encodeURIComponent(userId)}`, { method: "PUT" }); }
   showGroupMember(roomId: RoomId, userId: string) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/hidden-members/${encodeURIComponent(userId)}`, { method: "DELETE" }); }

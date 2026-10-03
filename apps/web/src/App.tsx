@@ -66,6 +66,7 @@ import { cachedSessionForDevice, canUseOfflineSession, offlineSessionSnapshot, v
 import { canApplyHistoryNavigation, countIncomingMessagesAfter, shouldMarkIncomingRead } from "./history-navigation";
 import { persistBeforeTabHandoff, PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_CANCEL_EVENT, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT } from "./tab-coordination";
 import { localRetentionCoverage } from "./retention-coverage";
+import { verifyRoomEventSignature } from "./event-authentication";
 import { AttachmentCiphertextCache } from "./attachment-cache";
 import { AttachmentCiphertextLoader } from "./attachment-loader";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
@@ -202,6 +203,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   let identityRef: DeviceIdentity | null = null;
   let mlsRef: OpenMlsMessagingCore | null = null;
   let semanticRef: LocalImageSemanticSearch | null = null;
+  const roomSigningKeyRefreshes = new Map<RoomId, Promise<void>>();
   let semanticSearchTimer: number | undefined;
   let readReceiptTimer: number | undefined;
   let typingStopTimer: number | undefined;
@@ -495,9 +497,30 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       ?? (room.purpose === "saved" ? room.current_seq ? "仅你和你的设备可读" : "保存消息、图片和文件" : room.blocked_by_me ? "已屏蔽" : room.kind === "group" ? `${room.members.length} 人群聊` : room.current_seq ? "端到端加密消息" : "还没有消息");
   }
 
+  async function authenticateRoomEvent(event: RoomEvent): Promise<void> {
+    try {
+      let key = await db.roomDeviceSigningKey(event.room_id, event.device_id);
+      if (!key) {
+        let refresh = roomSigningKeyRefreshes.get(event.room_id);
+        if (!refresh) {
+          refresh = api.roomSigningKeys(event.room_id).then(({ keys }) => db.saveRoomDeviceSigningKeys(event.room_id, keys));
+          roomSigningKeyRefreshes.set(event.room_id, refresh);
+          void refresh.finally(() => { if (roomSigningKeyRefreshes.get(event.room_id) === refresh) roomSigningKeyRefreshes.delete(event.room_id); }).catch(() => undefined);
+        }
+        await refresh;
+        key = await db.roomDeviceSigningKey(event.room_id, event.device_id);
+      }
+      if (!key || key.user_id !== event.sender) throw new Error("message sender does not match the pinned room device identity");
+      await verifyRoomEventSignature(event, key.signing_key);
+    } catch (cause) {
+      throw new LocalStagingIntegrityError(`Room event authentication failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
   async function processEvent(event: RoomEvent) {
     const currentMls = mlsRef;
     if (!currentMls?.hasGroup(event.room_id)) return null;
+    await authenticateRoomEvent(event);
     const isMembershipCommit = event.type === "control.group.commit" || event.type === "control.device.add" || event.type === "control.device.revoke";
     if (event.device_id === identityRef?.deviceId) {
       if (!isMembershipCommit) return null;
@@ -508,6 +531,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (staged && (staged.event.room_id !== event.room_id || staged.event.seq !== event.seq || staged.event.ciphertext !== event.ciphertext || staged.event.signature !== event.signature)) {
       throw new LocalStagingIntegrityError();
     }
+    if (staged && staged.sender_device_id !== event.device_id) throw new LocalStagingIntegrityError("Staged MLS sender identity does not match the signed event device");
     if (staged) {
       if (!identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for staged MLS recovery");
       const activeState = currentMls.exportState();
@@ -524,14 +548,24 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       try { await saveIdentity(profileId, identityRef); }
       catch (cause) { throw new LocalProjectionPersistenceError(cause); }
     }
+    if (!identityRef) throw new LocalStagingIntegrityError("Local identity is unavailable for authenticated MLS processing");
     const plaintextBytes = staged?.plaintext ?? await mutateMls(async () => {
       const previousState = currentMls.exportState(); const previousIdentity = identityRef;
-      const plaintext = currentMls.processMessage(event.room_id, decodeBase64Url(event.ciphertext));
+      const processed = currentMls.processMessage(event.room_id, decodeBase64Url(event.ciphertext));
+      if (processed.senderDeviceId !== event.device_id) {
+        if (previousIdentity) {
+          const restored = await OpenMlsMessagingCore.create(previousIdentity.deviceId, previousState);
+          currentMls.destroy(); mlsRef = restored; setMls(restored);
+          identityRef = { ...previousIdentity, mlsState: previousState };
+          await saveIdentity(profileId, identityRef).catch(() => undefined);
+        }
+        throw new LocalStagingIntegrityError("MLS authenticated sender does not match the signed event device");
+      }
       const nextState = currentMls.exportState();
       try {
-        await db.stageDecryptedEvent(event, new Uint8Array(plaintext), new Uint8Array(previousState), new Uint8Array(nextState));
+        await db.stageDecryptedEvent(event, new Uint8Array(processed.plaintext), processed.senderDeviceId, new Uint8Array(previousState), new Uint8Array(nextState));
         await persistMls(currentMls);
-        return plaintext;
+        return processed.plaintext;
       } catch (cause) {
         // Keep a possibly committed staging row. Even if the PGlite worker
         // response was lost, startup can safely advance this restored pre-state.

@@ -66,6 +66,12 @@ struct CommitOutput {
     epoch: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct ProcessMessageOutput {
+    plaintext: String,
+    sender_device_id: String,
+}
+
 /// One MLS client per browser device. Its provider storage contains private
 /// KeyPackage material, group secret trees and past-epoch secrets. Callers must
 /// persist `export_state()` after every mutating operation.
@@ -314,8 +320,9 @@ impl MlsClient {
         serialize_message(&message)
     }
 
-    /// Returns application plaintext. Proposal/Commit/control processing
-    /// returns an empty vector after atomically updating the local epoch.
+    /// Returns authenticated application plaintext and the MLS credential
+    /// identity of its sender. Proposal/Commit/control processing returns an
+    /// empty plaintext after atomically updating the local epoch.
     pub fn process_message(
         &mut self,
         group_id: &[u8],
@@ -334,27 +341,37 @@ impl MlsClient {
         let processed = group
             .process_message(&self.provider, protocol)
             .map_err(js)?;
-        match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(message) => Ok(message.into_bytes()),
+        let sender = BasicCredential::try_from(processed.credential().clone()).map_err(js)?;
+        let sender_device_id = String::from_utf8(sender.identity().to_vec()).map_err(js)?;
+        if sender_device_id.is_empty() || sender_device_id.len() > 512 {
+            return Err(js("invalid MLS sender identity"));
+        }
+        let plaintext = match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(message) => message.into_bytes(),
             ProcessedMessageContent::ProposalMessage(proposal)
             | ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
                 group
                     .store_pending_proposal(self.provider.storage(), *proposal)
                     .map_err(js)?;
-                Ok(vec![])
+                vec![]
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
                 group
                     .merge_staged_commit(&self.provider, *commit)
                     .map_err(js)?;
-                Ok(vec![])
+                vec![]
             }
             ProcessedMessageContent::OwnPendingCommit => {
                 group.merge_pending_commit(&self.provider).map_err(js)?;
-                Ok(vec![])
+                vec![]
             }
-            ProcessedMessageContent::OwnPrivateMessage => Ok(vec![]),
-        }
+            ProcessedMessageContent::OwnPrivateMessage => vec![],
+        };
+        serde_json::to_vec(&ProcessMessageOutput {
+            plaintext: URL_SAFE_NO_PAD.encode(plaintext),
+            sender_device_id,
+        })
+        .map_err(js)
     }
 
     pub fn add_members(
@@ -481,10 +498,13 @@ mod tests {
         let wire = alice
             .encrypt_message(b"!room:example", b"hello over RFC 9420")
             .unwrap();
+        let processed: ProcessMessageOutput =
+            serde_json::from_slice(&bob.process_message(b"!room:example", &wire).unwrap()).unwrap();
         assert_eq!(
-            bob.process_message(b"!room:example", &wire).unwrap(),
-            b"hello over RFC 9420"
+            processed.plaintext,
+            URL_SAFE_NO_PAD.encode(b"hello over RFC 9420")
         );
+        assert_eq!(processed.sender_device_id, "@alice:example|alice-device");
         let mut charlie = MlsClient::new(b"charlie-device").unwrap();
         let charlie_packages = key_packages(&charlie, 1);
         let added: CommitOutput = serde_json::from_slice(
@@ -510,17 +530,23 @@ mod tests {
         let from_charlie = charlie
             .encrypt_message(b"!room:example", b"hello after add")
             .unwrap();
-        assert_eq!(
-            alice
+        let alice_processed: ProcessMessageOutput = serde_json::from_slice(
+            &alice
                 .process_message(b"!room:example", &from_charlie)
                 .unwrap(),
-            b"hello after add"
-        );
-        assert_eq!(
-            bob.process_message(b"!room:example", &from_charlie)
+        )
+        .unwrap();
+        let bob_processed: ProcessMessageOutput = serde_json::from_slice(
+            &bob.process_message(b"!room:example", &from_charlie)
                 .unwrap(),
-            b"hello after add"
+        )
+        .unwrap();
+        assert_eq!(
+            alice_processed.plaintext,
+            URL_SAFE_NO_PAD.encode(b"hello after add")
         );
+        assert_eq!(bob_processed, alice_processed);
+        assert_eq!(bob_processed.sender_device_id, "charlie-device");
 
         let identities =
             serde_json::to_vec(&vec![URL_SAFE_NO_PAD.encode(b"@bob:example|bob-device")]).unwrap();
@@ -546,12 +572,17 @@ mod tests {
         let after_remove = alice
             .encrypt_message(b"!room:example", b"future-secret")
             .unwrap();
-        assert_eq!(
-            charlie
+        let processed: ProcessMessageOutput = serde_json::from_slice(
+            &charlie
                 .process_message(b"!room:example", &after_remove)
                 .unwrap(),
-            b"future-secret"
+        )
+        .unwrap();
+        assert_eq!(
+            processed.plaintext,
+            URL_SAFE_NO_PAD.encode(b"future-secret")
         );
+        assert_eq!(processed.sender_device_id, "@alice:example|alice-device");
         let restored = MlsClient::import_state(&charlie.export_state().unwrap()).unwrap();
         assert_eq!(restored.epoch(b"!room:example").unwrap(), 3);
     }

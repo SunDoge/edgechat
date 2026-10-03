@@ -1,4 +1,4 @@
-import { isMessageExpiryPolicyPayload, isNamespacedUserId, isRoomProfilePayload, type ClientEvent, type DeliveryReceiptPayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomProfileAvatar, type RoomProfilePayload } from "@edgechat/protocol";
+import { isMessageExpiryPolicyPayload, isNamespacedRoomId, isNamespacedUserId, isRoomProfilePayload, type ClientEvent, type DeliveryReceiptPayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomProfileAvatar, type RoomProfilePayload, type UserId } from "@edgechat/protocol";
 import { LOCAL_CLEAR_ACCOUNT_DATA } from "./schema";
 import { isLocalRetentionDays, type LocalRetentionDays } from "./retention";
 import { messageExpiryAt } from "./expiry";
@@ -32,9 +32,22 @@ type LocalDeferredEventRow = { event_id: string; room_id: RoomId; seq: number | 
 export type LocalStagedDecryptedEvent = {
   event: RoomEvent;
   plaintext: Uint8Array<ArrayBuffer>;
+  sender_device_id: string;
   previous_mls_state: Uint8Array<ArrayBuffer>;
   next_mls_state: Uint8Array<ArrayBuffer>;
 };
+export type LocalRoomDeviceSigningKey = { room_id: RoomId; device_id: string; user_id: UserId; signing_key: JsonWebKey };
+export const PIN_ROOM_DEVICE_SIGNING_KEY_SQL = `INSERT INTO room_device_signing_keys (room_id,device_id,user_id,signing_key,first_seen_at,last_seen_at)
+VALUES ($1,$2,$3,$4::jsonb,$5,$5)
+ON CONFLICT (room_id,device_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+WHERE room_device_signing_keys.user_id = EXCLUDED.user_id AND room_device_signing_keys.signing_key = EXCLUDED.signing_key
+RETURNING device_id`;
+
+function canonicalSigningKey(value: JsonWebKey): JsonWebKey {
+  if (value.kty !== "EC" || value.crv !== "P-256" || typeof value.x !== "string" || typeof value.y !== "string"
+    || !/^[A-Za-z0-9_-]{43}$/.test(value.x) || !/^[A-Za-z0-9_-]{43}$/.test(value.y)) throw new Error("Invalid device signing key");
+  return { kty: "EC", crv: "P-256", x: value.x, y: value.y, ext: true };
+}
 
 const MAX_SIGNED_EVENT_RANGE = 500;
 export const MARK_EVENT_PROCESSED_SQL = `WITH stored_envelope AS (
@@ -336,6 +349,30 @@ export class LocalDatabase {
     await this.query("DELETE FROM device_verifications WHERE user_id = $1 AND device_id = $2", [userId, deviceId]);
   }
 
+  async roomDeviceSigningKey(roomId: RoomId, deviceId: string): Promise<LocalRoomDeviceSigningKey | null> {
+    if (!isNamespacedRoomId(roomId) || !deviceId || deviceId.length > 96) throw new Error("Invalid room device signing-key lookup");
+    const [row] = await this.query<{ room_id: RoomId; device_id: string; user_id: UserId; signing_key: JsonWebKey | string }>(
+      "SELECT room_id,device_id,user_id,signing_key FROM room_device_signing_keys WHERE room_id = $1 AND device_id = $2", [roomId, deviceId],
+    );
+    if (!row) return null;
+    return { ...row, signing_key: canonicalSigningKey(jsonValue(row.signing_key)) };
+  }
+
+  async saveRoomDeviceSigningKeys(roomId: RoomId, keys: readonly Omit<LocalRoomDeviceSigningKey, "room_id">[], seenAt = Date.now()): Promise<void> {
+    if (!isNamespacedRoomId(roomId) || keys.length > 1_000 || !Number.isSafeInteger(seenAt) || seenAt < 0) throw new Error("Invalid room device signing-key directory");
+    const unique = new Set<string>();
+    for (const item of keys) {
+      if (!item.device_id || item.device_id.length > 96 || !isNamespacedUserId(item.user_id) || unique.has(item.device_id)) throw new Error("Invalid room device signing-key directory");
+      unique.add(item.device_id);
+      const signingKey = canonicalSigningKey(item.signing_key);
+      const rows = await this.query<{ device_id: string }>(
+        PIN_ROOM_DEVICE_SIGNING_KEY_SQL,
+        [roomId, item.device_id, item.user_id, JSON.stringify(signingKey), seenAt],
+      );
+      if (!rows.length) throw new Error("Room device signing key changed after first use");
+    }
+  }
+
   async backupSnapshot(): Promise<Blob> {
     const response = await this.request({ kind: "dump" });
     if (!response.blob?.size) throw new Error("Local database snapshot is empty");
@@ -442,25 +479,28 @@ export class LocalDatabase {
   async stageDecryptedEvent(
     event: RoomEvent,
     plaintext: Uint8Array<ArrayBuffer>,
+    senderDeviceId: string,
     previousMlsState: Uint8Array<ArrayBuffer>,
     nextMlsState: Uint8Array<ArrayBuffer>,
   ): Promise<void> {
+    if (!senderDeviceId || senderDeviceId.length > 512) throw new Error("Invalid authenticated MLS sender identity");
     await this.query(
-      `INSERT INTO decrypted_event_staging (event_id, room_id, seq, event_json, plaintext, previous_mls_state, next_mls_state, staged_at)
-       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)`,
-      [event.event_id, event.room_id, event.seq, JSON.stringify(event), plaintext, previousMlsState, nextMlsState, Date.now()],
+      `INSERT INTO decrypted_event_staging (event_id, room_id, seq, event_json, plaintext, sender_device_id, previous_mls_state, next_mls_state, staged_at)
+       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9)`,
+      [event.event_id, event.room_id, event.seq, JSON.stringify(event), plaintext, senderDeviceId, previousMlsState, nextMlsState, Date.now()],
     );
   }
 
   async stagedDecryptedEvent(eventId: string): Promise<LocalStagedDecryptedEvent | null> {
-    const [row] = await this.query<{ event_id: string; room_id: RoomId; seq: number | string; event_json: RoomEvent | string; plaintext: Uint8Array<ArrayBuffer>; previous_mls_state: Uint8Array<ArrayBuffer>; next_mls_state: Uint8Array<ArrayBuffer> }>(
-      "SELECT event_id, room_id, seq, event_json, plaintext, previous_mls_state, next_mls_state FROM decrypted_event_staging WHERE event_id = $1",
+    const [row] = await this.query<{ event_id: string; room_id: RoomId; seq: number | string; event_json: RoomEvent | string; plaintext: Uint8Array<ArrayBuffer>; sender_device_id: string; previous_mls_state: Uint8Array<ArrayBuffer>; next_mls_state: Uint8Array<ArrayBuffer> }>(
+      "SELECT event_id, room_id, seq, event_json, plaintext, sender_device_id, previous_mls_state, next_mls_state FROM decrypted_event_staging WHERE event_id = $1",
       [eventId],
     );
     if (!row) return null;
     const seq = Number(row.seq); const event = jsonValue(row.event_json);
     if (!isStoredRoomEvent(event, row.room_id, seq, row.event_id)) throw new Error("Stored decrypted event staging record is invalid");
-    return { event, plaintext: row.plaintext, previous_mls_state: row.previous_mls_state, next_mls_state: row.next_mls_state };
+    if (!row.sender_device_id || row.sender_device_id.length > 512) throw new Error("Stored decrypted event sender identity is invalid");
+    return { event, plaintext: row.plaintext, sender_device_id: row.sender_device_id, previous_mls_state: row.previous_mls_state, next_mls_state: row.next_mls_state };
   }
 
   async stagedDecryptedEvents(limit = 500): Promise<RoomEvent[]> {

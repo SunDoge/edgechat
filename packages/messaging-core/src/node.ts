@@ -1,5 +1,5 @@
 import nodeWasm from "../pkg-node/edgechat_mls.js";
-import { decodeBase64Url, encodeBase64Url, type MlsCommitResult, type MlsCreateGroupResult } from "./index.js";
+import { decodeBase64Url, encodeBase64Url, type MlsCommitResult, type MlsCreateGroupResult, type MlsProcessMessageResult } from "./index.js";
 
 type NodeMlsClient = {
   free(): void;
@@ -18,9 +18,10 @@ type NodeWasmModule = { MlsClient: { new(identity: Uint8Array): NodeMlsClient; i
 const wasm = nodeWasm as unknown as NodeWasmModule;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+type EncodedMlsProcessMessageResult = { plaintext: string; sender_device_id: string };
 
-function fromBase64Url(value: string): Uint8Array {
-  return decodeBase64Url(value);
+function fromBase64Url(value: string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(decodeBase64Url(value));
 }
 
 function toBase64Url(value: Uint8Array): string {
@@ -42,7 +43,11 @@ export class NodeOpenMlsMessagingCore {
   }
   joinGroup(welcome: string, ratchetTree: string): string { return decoder.decode(this.client.join_group(fromBase64Url(welcome), fromBase64Url(ratchetTree))); }
   encryptMessage(roomId: string, plaintext: Uint8Array): Uint8Array { return this.client.encrypt_message(encoder.encode(roomId), plaintext); }
-  processMessage(roomId: string, message: Uint8Array): Uint8Array { return this.client.process_message(encoder.encode(roomId), message); }
+  processMessage(roomId: string, message: Uint8Array): MlsProcessMessageResult {
+    const result = JSON.parse(decoder.decode(this.client.process_message(encoder.encode(roomId), message))) as EncodedMlsProcessMessageResult;
+    if (!result || typeof result.plaintext !== "string" || typeof result.sender_device_id !== "string" || !result.sender_device_id.length || result.sender_device_id.length > 512) throw new Error("Invalid authenticated MLS processing result");
+    return { plaintext: fromBase64Url(result.plaintext), senderDeviceId: result.sender_device_id };
+  }
   addMembers(roomId: string, keyPackages: string[]): MlsCommitResult { return JSON.parse(decoder.decode(this.client.add_members(encoder.encode(roomId), encoder.encode(JSON.stringify(keyPackages))))) as MlsCommitResult; }
   removeMembers(roomId: string, deviceIds: string[]): MlsCommitResult {
     return JSON.parse(decoder.decode(this.client.remove_members(encoder.encode(roomId), encoder.encode(JSON.stringify(deviceIds.map((id) => toBase64Url(encoder.encode(id)))))))) as MlsCommitResult;
