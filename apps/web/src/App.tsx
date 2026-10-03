@@ -2333,9 +2333,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const copy = plaintext.slice(0);
     const schedule = window.requestIdleCallback ?? ((callback: IdleRequestCallback) => window.setTimeout(() => callback({ didTimeout: false, timeRemaining: () => 0 }), 1_000));
     schedule(() => {
+      if (!semanticSearchEnabled()) return;
       setSemanticStatus("loading");
       semanticRef ??= new LocalImageSemanticSearch(db);
-      void semanticRef.index(attachment.id, copy, attachment.type).then(() => setSemanticStatus("ready")).catch(() => setSemanticStatus("error"));
+      void semanticRef.index(attachment.id, copy, attachment.type)
+        .then(() => { if (semanticSearchEnabled()) setSemanticStatus("ready"); })
+        .catch(() => { if (semanticSearchEnabled()) setSemanticStatus("error"); });
     }, { timeout: 5_000 });
   }
   function enableSemanticSearch(): void {
@@ -2347,6 +2350,23 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     } catch {
       setSemanticStatus("error");
       setNotice("无法保存图片语义搜索设置，请检查浏览器存储权限");
+    }
+  }
+  async function disableSemanticSearch(): Promise<void> {
+    try {
+      persistSemanticSearchEnabled(profileId, false);
+      setSemanticSearchEnabled(false);
+      searchRequestVersion += 1;
+      window.clearTimeout(semanticSearchTimer);
+      semanticRef?.close();
+      semanticRef = null;
+      setSemanticStatus("idle");
+      setSearchResults((current) => current.filter((result) => result.kind === "text"));
+      await db.clearImageEmbeddings();
+      if (searchQuery().trim()) await runSearch(searchQuery());
+      setNotice("已关闭图片语义搜索并清除本机图片向量；浏览器缓存的模型文件可在站点数据中删除");
+    } catch {
+      setNotice("图片语义搜索已关闭，但本机索引未能完全清除；清除浏览器站点数据可删除所有本机副本");
     }
   }
   function openSearchResult(roomId: RoomId, messageId: string) {
@@ -3458,7 +3478,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={contactShareOpen() && selected()}>{(room) => <ContactShareDialog contacts={shareableContacts(room())} onSend={sendContactCard} onClose={() => setContactShareOpen(false)}/>}</Show>
       <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
       <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>
-      <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticEnabled={semanticSearchEnabled()} semanticStatus={semanticStatus()} onEnableSemantic={enableSemanticSearch} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
+      <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticEnabled={semanticSearchEnabled()} semanticStatus={semanticStatus()} onEnableSemantic={enableSemanticSearch} onDisableSemantic={disableSemanticSearch} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
       <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} ownershipTransferSupported={serverSupports(currentSession().protocol, "rooms.owner-transfer.v1")} ownershipBusyUserId={roomOwnershipBusy()} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onTransferOwnership={(userId) => transferRoomOwnership(room(), userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} clearHistoryBusy={historyClearBusy()} onClearHistory={() => clearLocalRoomHistory(room())} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onOpenMedia={() => { setRoomSettingsOpen(false); setConversationMediaOpen(true); }} exportBusy={conversationExportBusy()} onExportConversation={() => exportConversation(room())} onCancelExport={() => conversationExportAbort?.abort()} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
       <Show when={conversationMediaOpen() && selected()}>{(room) => <ConversationMediaDialog roomTitle={roomTitle(room(), currentSession().user_id)} coverageComplete={coverageComplete()} loadPage={(cursor: LocalRoomAttachmentCursor | null) => db.roomAttachments(room().room_id, cursor)} loadCachedImage={decryptCachedAttachment} displayName={(userId) => memberName(room(), userId)} onOpenMessage={(messageId) => { setConversationMediaOpen(false); openSearchResult(room().room_id, messageId); }} onClose={() => setConversationMediaOpen(false)}/>}</Show>
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>

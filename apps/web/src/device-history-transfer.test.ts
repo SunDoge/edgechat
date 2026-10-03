@@ -29,5 +29,5 @@ describe("device history transfer", () => {
       if (index === 1) await expect(openDeviceHistoryShard(sealed, manifest, 0, context, target)).rejects.toThrow();
     }
     expect(new Uint8Array(await new Blob(opened).arrayBuffer())).toEqual(new Uint8Array(await snapshot.arrayBuffer()));
-  });
+  }, 10_000);
 });

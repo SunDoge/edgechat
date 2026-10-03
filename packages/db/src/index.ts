@@ -1596,6 +1596,17 @@ export class LocalDatabase {
     return Boolean(row?.present);
   }
 
+  async clearImageEmbeddings(model?: { id: string; version: string; preprocessing_version: string }): Promise<void> {
+    if (!model) {
+      await this.query("DELETE FROM image_embeddings");
+      return;
+    }
+    await this.query(
+      "DELETE FROM image_embeddings WHERE model_id = $1 AND model_version = $2 AND preprocessing_version = $3",
+      [model.id, model.version, model.preprocessing_version],
+    );
+  }
+
   async semanticImageSearch(query: Float32Array, model: { id: string; version: string; preprocessing_version: string }, roomId?: RoomId, limit = 30): Promise<ImageSearchResult[]> {
     const roomClause = roomId ? "AND m.room_id = $4" : "";
     const rows = await this.query<ImageEmbeddingRow>(
