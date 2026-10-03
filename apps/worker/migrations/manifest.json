@@ -204,6 +204,10 @@
     {
       "file": "0051_device_history_shard_digests.sql",
       "sha256": "4374ef9ddf75b2f21f93671b8906448584e02aab3c3ecdbe9d55158cacf32a50"
+    },
+    {
+      "file": "0052_room_peer_recovery_digests.sql",
+      "sha256": "e74c4b79a80b36d3f6e913142426fb89d6b5e8e78adc447344cf2bb3a43d922c"
     }
   ]
 }

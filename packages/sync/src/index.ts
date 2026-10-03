@@ -315,10 +315,25 @@ export class ApiClient {
     await this.raw(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}`, { method: "DELETE" });
   }
   claimPeerRecovery(recoveryId: string) { return this.request<PeerRecoveryLease>(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/claim`, { method: "POST" }); }
-  uploadPeerRecovery(recoveryId: string, token: string, bundle: Blob) {
-    return this.request<{ recovery_id: string; ready: true; ciphertext_bytes: number }>(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, {
-      method: "PUT", headers: { "x-peer-recovery-token": token, "content-type": "application/vnd.edgechat.room-recovery" }, body: bundle,
-    }, API_TRANSFER_TIMEOUT_MS);
+  async uploadPeerRecovery(recoveryId: string, token: string, bundle: Blob) {
+    const bytes = await bundle.arrayBuffer();
+    const digest = base64Url(await crypto.subtle.digest("SHA-256", bytes));
+    const upload = async () => {
+      const result = await this.request<{ recovery_id: string; ready: true; ciphertext_bytes: number }>(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, {
+        method: "PUT", headers: { "x-peer-recovery-token": token, "x-content-sha256": digest,
+          "content-type": "application/vnd.edgechat.room-recovery" }, body: bytes,
+      }, API_TRANSFER_TIMEOUT_MS);
+      if (result.recovery_id !== recoveryId || result.ciphertext_bytes !== bytes.byteLength) {
+        throw new ApiError("服务器返回了不匹配的设备恢复包", 502, "invalid_peer_recovery_response");
+      }
+      return result;
+    };
+    try { return await upload(); }
+    catch (error) {
+      if (!(error instanceof ApiTimeoutError) && !(error instanceof TypeError)
+        && !(error instanceof ApiError && error.status >= 500 && error.code !== "server_upgrade_required")) throw error;
+      return upload();
+    }
   }
   async downloadPeerRecovery(recoveryId: string): Promise<Blob> {
     return this.withResponse(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, {}, API_TRANSFER_TIMEOUT_MS, (response) => response.blob());

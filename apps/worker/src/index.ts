@@ -4112,42 +4112,138 @@ async function claimRoomPeerRecovery(env: Env, auth: AuthContext, recoveryId: st
 async function uploadRoomPeerRecovery(request: Request, env: Env, auth: AuthContext, recoveryId: string, ctx: ExecutionContext): Promise<Response> {
   requireUser(auth);
   const declaredSize = Number(request.headers.get("content-length")); const token = peerRecoveryToken(request); const tokenHash = await sha256(token);
+  const suppliedDigest = requestContentSha256(request, "invalid_peer_recovery_digest");
   if (!request.body || !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > ROOM_PEER_RECOVERY_MAX_BYTES) {
     throw new HttpError(413, "Peer recovery bundle is too large", "peer_recovery_too_large");
   }
+  if (!suppliedDigest) throw new HttpError(400, "Ciphertext SHA-256 required for peer recovery bundles", "peer_recovery_digest_required");
   const db = createDatabase(env.DB); const now = Date.now();
-  const recovery = await db.selectFrom("room_peer_recoveries").selectAll().where("recovery_id", "=", recoveryId)
-    .where("user_id", "=", auth.userId).where("source_device_id", "=", auth.deviceId).where("status", "=", "transferring")
-    .where("lease_token_hash", "=", tokenHash).where("lease_expires_at", ">", now).executeTakeFirst();
-  if (!recovery) throw new HttpError(409, "Peer recovery lease is missing or stale", "invalid_recovery_lease");
   const objectKey = `room-recovery/${recoveryId}/${tokenHash.slice(0, 24)}.bin`;
-  const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
-  await stageR2Write(env, pending);
+  const recovery = await db.selectFrom("room_peer_recoveries").selectAll().where("recovery_id", "=", recoveryId)
+    .where("user_id", "=", auth.userId).where("source_device_id", "=", auth.deviceId).executeTakeFirst();
+  const matchesCommitted = (row: { status: string; object_key: string | null; ciphertext_bytes: number | null; ciphertext_sha256: string | null }): boolean => (
+    row.status === "ready" && row.object_key === objectKey && row.ciphertext_bytes === declaredSize && row.ciphertext_sha256 === suppliedDigest.text
+  );
+  if (recovery && matchesCommitted(recovery)) {
+    await request.body.cancel("peer recovery bundle already committed").catch(() => undefined);
+    await db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey)
+      .where("content_sha256", "=", suppliedDigest.text).where("cancelled_at", "is", null).execute();
+    return json({ recovery_id: recoveryId, ready: true, ciphertext_bytes: declaredSize });
+  }
+  if (!recovery || recovery.status !== "transferring" || recovery.lease_token_hash !== tokenHash || !recovery.lease_expires_at || recovery.lease_expires_at <= now) {
+    await request.body.cancel("peer recovery lease is missing or stale").catch(() => undefined);
+    throw new HttpError(409, "Peer recovery lease is missing or stale", "invalid_recovery_lease");
+  }
+  const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize,
+    room_id: recovery.room_id, content_sha256: suppliedDigest.text };
+  let reservationCreated: boolean;
+  try { reservationCreated = await stageIdempotentR2Write(env, pending); }
+  catch (error) {
+    await request.body.cancel(error).catch(() => undefined);
+    if (error instanceof HttpError && error.code === "segment_conflict") {
+      throw new HttpError(409, "Peer recovery bundle is already in use", "peer_recovery_conflict");
+    }
+    if (error instanceof HttpError && error.code === "archive_upload_cancelled") {
+      throw new HttpError(409, "Peer recovery upload was cancelled", "peer_recovery_upload_cancelled");
+    }
+    throw error;
+  }
+  let releaseReservation = false;
+  const metadata = { recovery_id: recoveryId, room_id: recovery.room_id, source_device_id: auth.deviceId,
+    target_device_id: recovery.target_device_id, after_seq: String(recovery.after_seq), through_seq: String(recovery.through_seq), sha256: suppliedDigest.text };
+  const matchesStored = (object: ObjectStoreObject): boolean => object.size === declaredSize
+    && object.metadata.recovery_id === metadata.recovery_id && object.metadata.room_id === metadata.room_id
+    && object.metadata.source_device_id === metadata.source_device_id && object.metadata.target_device_id === metadata.target_device_id
+    && object.metadata.after_seq === metadata.after_seq && object.metadata.through_seq === metadata.through_seq
+    && object.metadata.sha256 === suppliedDigest.text;
   try {
-    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.room-recovery",
-      metadata: { recovery_id: recoveryId, room_id: recovery.room_id, source_device_id: auth.deviceId, target_device_id: recovery.target_device_id,
-        after_seq: String(recovery.after_seq), through_seq: String(recovery.through_seq) } });
-    if (!object || object.size !== declaredSize) throw new Error("Peer recovery bundle length mismatch");
-    const updated = await db.updateTable("room_peer_recoveries").set({ status: "ready", object_key: objectKey, ciphertext_bytes: object.size,
-      lease_token_hash: null, lease_expires_at: null, updated_at: Date.now() }).where("recovery_id", "=", recoveryId)
-      .where("source_device_id", "=", auth.deviceId).where("lease_token_hash", "=", tokenHash).returning("recovery_id").executeTakeFirst();
-    if (!updated) throw new Error("Peer recovery lease changed during upload");
-    await db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey).execute();
+    let object: ObjectStoreObject | null = null;
+    if (!reservationCreated) {
+      try { object = await objectStore(env).head(objectKey); }
+      catch (error) { await request.body.cancel(error).catch(() => undefined); throw error; }
+      if (object && !matchesStored(object)) {
+        await request.body.cancel("peer recovery bundle conflict").catch(() => undefined);
+        throw new HttpError(409, "Peer recovery bundle is already in use", "peer_recovery_conflict");
+      }
+      if (object) await request.body.cancel("peer recovery bundle already uploaded").catch(() => undefined);
+    }
+    if (!object) {
+      const limited = exactLengthUploadStream(request.body, declaredSize);
+      try {
+        object = (await Promise.all([
+          objectStore(env).put(objectKey, limited.body, { ifAbsent: true, expectedSize: declaredSize,
+            checksumSha256: suppliedDigest.bytes, contentType: "application/vnd.edgechat.room-recovery", metadata }),
+          limited.completed,
+        ]))[0];
+      } catch (error) {
+        if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Peer recovery bundle digest mismatch", "invalid_peer_recovery_digest"); }
+        if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Peer recovery bundle length mismatch", "invalid_peer_recovery_length"); }
+        throw error;
+      }
+      if (!object || !matchesStored(object)) {
+        if (object) { releaseReservation = true; throw new HttpError(400, "Peer recovery bundle length or digest mismatch", "invalid_peer_recovery_digest"); }
+        const recovered = await objectStore(env).head(objectKey);
+        if (!recovered || !matchesStored(recovered)) {
+          releaseReservation = true;
+          throw new HttpError(409, "Peer recovery bundle is already in use", "peer_recovery_conflict");
+        }
+        object = recovered;
+      }
+    }
+    const liveClaim = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+      .where("object_key", "=", objectKey).executeTakeFirst();
+    if (!liveClaim) {
+      const landed = await db.selectFrom("room_peer_recoveries").select(["status", "object_key", "ciphertext_bytes", "ciphertext_sha256"])
+        .where("recovery_id", "=", recoveryId).executeTakeFirst();
+      if (landed && matchesCommitted(landed)) return json({ recovery_id: recoveryId, ready: true, ciphertext_bytes: declaredSize });
+      await objectStore(env).delete(objectKey);
+      throw new HttpError(409, "Peer recovery upload was cancelled", "peer_recovery_upload_cancelled");
+    }
+    if (liveClaim.cancelled_at !== null) {
+      await objectStore(env).delete(objectKey);
+      await finalizePendingR2Cleanup(env, [liveClaim as PendingR2Write]);
+      throw new HttpError(409, "Peer recovery upload was cancelled", "peer_recovery_upload_cancelled");
+    }
+    const committedAt = Date.now();
+    await batch(env.DB, [
+      db.updateTable("room_peer_recoveries").set({ status: "ready", object_key: objectKey, ciphertext_bytes: object.size,
+        ciphertext_sha256: suppliedDigest.text, lease_token_hash: null, lease_expires_at: null, updated_at: committedAt })
+        .where("recovery_id", "=", recoveryId).where("status", "=", "transferring").where("source_device_id", "=", auth.deviceId)
+        .where("lease_token_hash", "=", tokenHash).where("lease_expires_at", ">", committedAt),
+      db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey)
+        .where("content_sha256", "=", suppliedDigest.text).where("cancelled_at", "is", null)
+        .where(sql<boolean>`EXISTS (SELECT 1 FROM room_peer_recoveries WHERE recovery_id = ${recoveryId} AND status = 'ready'
+          AND object_key = ${objectKey} AND ciphertext_bytes = ${declaredSize} AND ciphertext_sha256 = ${suppliedDigest.text})`),
+    ]);
+    const committed = await db.selectFrom("room_peer_recoveries").select(["status", "object_key", "ciphertext_bytes", "ciphertext_sha256"])
+      .where("recovery_id", "=", recoveryId).executeTakeFirst();
+    if (!committed || !matchesCommitted(committed)) {
+      await objectStore(env).delete(objectKey);
+      await finalizePendingR2Cleanup(env, [liveClaim as PendingR2Write]);
+      throw new HttpError(409, "Peer recovery lease changed during upload", "invalid_recovery_lease");
+    }
     await db.insertInto("sync_log").values({ recipient_user_id: auth.userId, kind: "device.event", room_id: recovery.room_id, seq: null,
       event_id: `peer-recovery-ready:${recoveryId}`, payload: JSON.stringify({ type: "room.peer_recovery.ready", recovery_id: recoveryId,
-        room_id: recovery.room_id, target_device_id: recovery.target_device_id }), created_at: Date.now() }).execute();
+        room_id: recovery.room_id, target_device_id: recovery.target_device_id }), created_at: Date.now() })
+      .onConflict((conflict) => conflict.columns(["recipient_user_id", "kind", "event_id"]).doNothing()).execute();
     ctx.waitUntil(notifyAccountDevices(env, auth.userId, auth.deviceId, recovery.target_device_id));
     return json({ recovery_id: recoveryId, ready: true, ciphertext_bytes: object.size }, 201);
-  } catch (error) { await abandonPendingR2Write(env, pending); throw error; }
+  } catch (error) {
+    if (reservationCreated && releaseReservation) await finalizePendingR2Cleanup(env, [pending]);
+    throw error;
+  }
 }
 
 async function downloadRoomPeerRecovery(env: Env, auth: AuthContext, recoveryId: string): Promise<Response> {
   requireUser(auth);
   const row = await createDatabase(env.DB).selectFrom("room_peer_recoveries").selectAll().where("recovery_id", "=", recoveryId)
     .where("user_id", "=", auth.userId).where("target_device_id", "=", auth.deviceId).where("status", "=", "ready").executeTakeFirst();
-  if (!row?.object_key || !row.ciphertext_bytes) throw new HttpError(404, "Peer recovery bundle not found", "not_found");
+  if (!row?.object_key || !row.ciphertext_bytes || !row.ciphertext_sha256) throw new HttpError(404, "Peer recovery bundle not found", "not_found");
   const object = await objectStore(env).get(row.object_key);
-  if (!object || object.size !== row.ciphertext_bytes) throw new HttpError(503, "Peer recovery bundle is temporarily unavailable", "peer_recovery_unavailable");
+  if (!object || object.size !== row.ciphertext_bytes || object.metadata.sha256 !== row.ciphertext_sha256) {
+    await object?.body.cancel().catch(() => undefined);
+    throw new HttpError(503, "Peer recovery bundle is temporarily unavailable", "peer_recovery_unavailable");
+  }
   return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(object.size), "cache-control": "no-store" } });
 }
 

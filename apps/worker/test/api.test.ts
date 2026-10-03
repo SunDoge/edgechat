@@ -1579,12 +1579,37 @@ describe("single-server durable delivery", () => {
     expect(claimed.status, await claimed.clone().text()).toBe(200);
     const lease = await claimed.json() as { token: string };
     const opaque = new Uint8Array([0x45, 0x43, 0x52, 0x45, 1, 9, 8, 7]);
+    const opaqueDigest = await ciphertextDigest(opaque);
+    const wrongDigest = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, {
+      method: "PUT", headers: { authorization: `Bearer ${source.access_token}`, "x-peer-recovery-token": lease.token,
+        "x-content-sha256": b64url(new Uint8Array(32).buffer), "content-type": "application/vnd.edgechat.room-recovery",
+        "content-length": String(opaque.length) }, body: opaque,
+    });
+    expect(wrongDigest.status).toBe(400);
+    expect(await wrongDigest.json()).toMatchObject({ code: "invalid_peer_recovery_digest" });
+    expect((await env.ARCHIVE.list({ prefix: "room-recovery/" })).objects).toHaveLength(0);
     const uploaded = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, {
       method: "PUT", headers: { authorization: `Bearer ${source.access_token}`, "x-peer-recovery-token": lease.token,
-        "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(opaque.length) }, body: opaque,
+        "x-content-sha256": opaqueDigest, "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(opaque.length) }, body: opaque,
     });
     expect(uploaded.status, await uploaded.clone().text()).toBe(201);
     expect((await env.ARCHIVE.list({ prefix: "room-recovery/" })).objects).toHaveLength(1);
+    let retryBodyCancelled = false;
+    const retryBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) { controller.enqueue(new Uint8Array(opaque.length).fill(255)); },
+      cancel() { retryBodyCancelled = true; },
+    });
+    const retryContext = createExecutionContext();
+    const retryRequest = new Request(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, {
+      method: "PUT", headers: { authorization: `Bearer ${source.access_token}`, "x-peer-recovery-token": lease.token,
+        "x-content-sha256": opaqueDigest, "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(opaque.length) }, body: retryBody,
+    }) as Parameters<typeof worker.fetch>[0];
+    const committedRetry = await worker.fetch(retryRequest, env as unknown as Env, retryContext);
+    await waitOnExecutionContext(retryContext);
+    expect(committedRetry.status).toBe(200);
+    expect(retryBodyCancelled).toBe(true);
+    expect(Array.from(new Uint8Array(await (await env.ARCHIVE.get((await env.ARCHIVE.list({ prefix: "room-recovery/" })).objects[0]!.key))!.arrayBuffer())))
+      .toEqual(Array.from(opaque));
     const readyStatus = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}`, { headers: targetHeaders });
     expect(await readyStatus.json()).toMatchObject({ recovery: { status: "ready", source_device_id: source.device_id,
       source_encryption_key: { kty: "EC", crv: "P-256" } } });
@@ -1593,6 +1618,12 @@ describe("single-server durable delivery", () => {
 
     const sourceDownload = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, { headers: { authorization: `Bearer ${source.access_token}` } });
     expect(sourceDownload.status).toBe(404);
+    const recoveryObjectKey = (await env.ARCHIVE.list({ prefix: `room-recovery/${recoveryId}/` })).objects[0]!.key;
+    await env.ARCHIVE.put(recoveryObjectKey, opaque, { customMetadata: { sha256: b64url(new Uint8Array(32).buffer) } });
+    const corrupted = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, { headers: { authorization: `Bearer ${target.access_token}` } });
+    expect(corrupted.status).toBe(503);
+    expect(await corrupted.json()).toMatchObject({ code: "peer_recovery_unavailable" });
+    await env.ARCHIVE.put(recoveryObjectKey, opaque, { customMetadata: { sha256: opaqueDigest } });
     const downloaded = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, { headers: { authorization: `Bearer ${target.access_token}` } });
     expect(downloaded.status).toBe(200);
     expect(Array.from(new Uint8Array(await downloaded.arrayBuffer()))).toEqual(Array.from(opaque));
@@ -1609,11 +1640,35 @@ describe("single-server durable delivery", () => {
     });
     const retriedId = (await retried.json() as { recovery: { recovery_id: string } }).recovery.recovery_id;
     const retriedLease = await (await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${retriedId}/claim`, { method: "POST", headers: sourceHeaders })).json() as { token: string };
-    const retriedUpload = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${retriedId}/bundle`, {
-      method: "PUT", headers: { authorization: `Bearer ${source.access_token}`, "x-peer-recovery-token": retriedLease.token,
-        "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(opaque.length) }, body: opaque,
+    const retriedTokenHash = await ciphertextDigest(new TextEncoder().encode(retriedLease.token));
+    const retriedObjectKey = `room-recovery/${retriedId}/${retriedTokenHash.slice(0, 24)}.bin`;
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO pending_r2_writes
+        (object_key,owner_user_id,kind,expected_bytes,room_id,content_sha256,created_at,attempts,last_error)
+        VALUES (?,?,'archive',?,?,?,?,0,NULL)`).bind(retriedObjectKey, target.user_id, opaque.length, roomId, opaqueDigest, Date.now()),
+      env.DB.prepare("UPDATE user_storage_usage SET archive_bytes = archive_bytes + ?, archive_objects = archive_objects + 1, updated_at = ? WHERE user_id = ?")
+        .bind(opaque.length, Date.now(), target.user_id),
+    ]);
+    await env.ARCHIVE.put(retriedObjectKey, opaque, { customMetadata: { recovery_id: retriedId, room_id: roomId,
+      source_device_id: source.device_id, target_device_id: target.device_id, after_seq: "0", through_seq: "3", sha256: opaqueDigest } });
+    let stagedRetryCancelled = false;
+    const stagedRetryBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) { controller.enqueue(new Uint8Array(opaque.length).fill(254)); },
+      cancel() { stagedRetryCancelled = true; },
     });
+    const stagedRetryContext = createExecutionContext();
+    const stagedRetryRequest = new Request(`https://edgechat.test/api/v1/peer-recoveries/${retriedId}/bundle`, {
+      method: "PUT", headers: { authorization: `Bearer ${source.access_token}`, "x-peer-recovery-token": retriedLease.token,
+        "x-content-sha256": opaqueDigest, "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(opaque.length) }, body: stagedRetryBody,
+    }) as Parameters<typeof worker.fetch>[0];
+    const retriedUpload = await worker.fetch(stagedRetryRequest, env as unknown as Env, stagedRetryContext);
+    await waitOnExecutionContext(stagedRetryContext);
     expect(retriedUpload.status).toBe(201);
+    expect(stagedRetryCancelled).toBe(true);
+    expect(new Uint8Array(await (await env.ARCHIVE.get(retriedObjectKey))!.arrayBuffer())).toEqual(opaque);
+    expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(retriedObjectKey).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT ciphertext_sha256 FROM room_peer_recoveries WHERE recovery_id = ?").bind(retriedId).first())
+      .toEqual({ ciphertext_sha256: opaqueDigest });
     const cancelled = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${retriedId}`, { method: "DELETE", headers: targetHeaders });
     expect(cancelled.status).toBe(204);
     expect((await env.ARCHIVE.list({ prefix: "room-recovery/" })).objects).toHaveLength(0);

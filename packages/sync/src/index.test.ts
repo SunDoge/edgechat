@@ -1022,6 +1022,23 @@ describe("ApiClient request deadlines", () => {
 });
 
 describe("ApiClient ciphertext uploads", () => {
+  it("retries a peer-recovery bundle with the same checksum and fixed bytes after an ambiguous response", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("connection reset after upload"))
+      .mockResolvedValueOnce(Response.json({ recovery_id: "recovery-1", ready: true, ciphertext_bytes: 4 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await new ApiClient("https://edgechat.test", "token").uploadPeerRecovery("recovery-1", "lease-token", new Blob([new Uint8Array([11, 22, 33, 44])]));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const first = fetchMock.mock.calls[0]![1]!; const second = fetchMock.mock.calls[1]![1]!;
+      expect(new Headers(first.headers).get("x-content-sha256")).toBe("vb3OMS9XYlcfqhfz9HgCNe0sVPlmwPYNrOHN3SY09PM");
+      expect(new Headers(second.headers).get("x-content-sha256")).toBe(new Headers(first.headers).get("x-content-sha256"));
+      expect(new Headers(second.headers).get("x-peer-recovery-token")).toBe("lease-token");
+      expect(second.body).toBe(first.body);
+      expect(first.body).toBeInstanceOf(ArrayBuffer);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("retries a device-history shard with the same checksum and fixed bytes after an ambiguous response", async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError("connection reset after upload"))

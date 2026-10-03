@@ -527,6 +527,7 @@ export interface RoomMembers {
 export interface RoomPeerRecoveries {
   after_seq: number;
   ciphertext_bytes: number | null;
+  ciphertext_sha256: Generated<string | null>;
   completed_at: number | null;
   created_at: number;
   expires_at: number;
