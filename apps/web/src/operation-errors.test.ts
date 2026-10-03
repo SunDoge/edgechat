@@ -25,6 +25,8 @@ describe("operation error presentation", () => {
     expect(operationErrorMessage(new ApiError("checkpoint table trace", 409, "backup_stale"), "无法恢复备份")).toContain("避免加密密钥回滚");
     expect(operationErrorMessage(new ApiError("room mutation trace", 409, "room_membership_busy"), "无法批准设备")).toContain("群成员更新正在进行");
     expect(operationErrorMessage(new ApiError("missing shard", 409, "device_history_not_ready"), "无法链接设备")).toContain("旧设备仍在准备");
+    expect(operationErrorMessage(new ApiError("provider trace", 503, "history_transfer_reupload_required"), "无法链接设备"))
+      .toContain("分片尚未上传完整");
   });
 
   it("uses the operation-specific fallback for unknown internal failures", () => {

@@ -854,6 +854,7 @@ export const zhHansMessages = {
   "deviceLinkApproval.error.approve": "设备链接没有完成，可再次尝试",
   "deviceLinkApproval.error.cancel": "无法撤销设备链接，请保持此页面并重试",
   "deviceLinkApproval.error.membershipBusy": "另一项设备或群成员更新正在进行，请稍后重试",
+  "deviceLinkApproval.error.historySourceMissing": "本机的历史传输暂存已丢失，请撤销后重新发起设备链接",
   "deviceLinkApproval.title": "链接新设备",
   "deviceLinkApproval.description.verify": "核对后才会允许访问你的对话",
   "deviceLinkApproval.description.scan": "扫描新设备上的二维码，或粘贴链接",

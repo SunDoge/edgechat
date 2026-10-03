@@ -1914,17 +1914,21 @@ async function deviceLinkHistoryTransfer(env: Env, linkId: string) {
   const db = createDatabase(env.DB);
   const transfer = await db.selectFrom("device_link_history_transfers").selectAll().where("link_id", "=", linkId).executeTakeFirst();
   if (!transfer) return null;
-  const shards = await db.selectFrom("device_link_history_shards").select(["shard_index", "ciphertext_bytes", "status"])
-    .where("link_id", "=", linkId).orderBy("shard_index").execute();
+  const [shards, repairs] = await Promise.all([
+    db.selectFrom("device_link_history_shards").select(["shard_index", "ciphertext_bytes", "status"])
+      .where("link_id", "=", linkId).orderBy("shard_index").execute(),
+    db.selectFrom("device_link_history_shard_repairs").select("shard_index").where("link_id", "=", linkId).execute(),
+  ]);
+  const unavailable = new Set(repairs.map((repair) => repair.shard_index));
   return {
     transfer_id: transfer.transfer_id,
     source_device_id: transfer.source_device_id,
     plaintext_bytes: transfer.plaintext_bytes,
     shard_plaintext_bytes: transfer.shard_plaintext_bytes,
     shard_count: transfer.shard_count,
-    ready_shards: shards.filter((shard) => shard.status === "ready").map((shard) => shard.shard_index),
+    ready_shards: shards.filter((shard) => shard.status === "ready" && !unavailable.has(shard.shard_index)).map((shard) => shard.shard_index),
     acked_shards: shards.filter((shard) => shard.status === "acked").map((shard) => shard.shard_index),
-    ciphertext_bytes: shards.reduce((total, shard) => total + (shard.status === "ready" ? shard.ciphertext_bytes : 0), 0),
+    ciphertext_bytes: shards.reduce((total, shard) => total + (shard.status === "ready" && !unavailable.has(shard.shard_index) ? shard.ciphertext_bytes : 0), 0),
   };
 }
 
@@ -2200,6 +2204,56 @@ async function createDeviceLinkHistoryTransfer(request: Request, env: Env, auth:
   return json({ transfer: await deviceLinkHistoryTransfer(env, linkId) }, 201);
 }
 
+type DeviceLinkHistoryShardRepair = {
+  link_id: string;
+  shard_index: number;
+  repair_id: string;
+  reason: "missing" | "invalid";
+  detected_at: number;
+};
+
+async function recordDeviceLinkHistoryShardRepair(env: Env, linkId: string, shardIndex: number, userId: string,
+  reason: DeviceLinkHistoryShardRepair["reason"]): Promise<DeviceLinkHistoryShardRepair | undefined> {
+  const repairId = randomId(18); const detectedAt = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO device_link_history_shard_repairs
+      (link_id, shard_index, repair_id, reason, detected_at)
+      SELECT ?, ?, ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM device_link_history_shards WHERE link_id = ? AND shard_index = ? AND status = 'ready'
+      )`)
+      .bind(linkId, shardIndex, repairId, reason, detectedAt, linkId, shardIndex),
+    env.DB.prepare(`INSERT OR IGNORE INTO sync_log
+      (recipient_user_id, kind, room_id, seq, event_id, payload, created_at)
+      SELECT ?, 'device.event', NULL, NULL, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM device_link_history_shard_repairs WHERE repair_id = ?)`)
+      .bind(userId, `device-link-history-repair:${repairId}`,
+        JSON.stringify({ type: "device.link.history.repair", link_id: linkId, shard_index: shardIndex }), detectedAt, repairId),
+  ]);
+  return createDatabase(env.DB).selectFrom("device_link_history_shard_repairs").selectAll()
+    .where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst() as Promise<DeviceLinkHistoryShardRepair | undefined>;
+}
+
+async function releaseDeviceLinkHistoryShardForRepair(env: Env, userId: string, shard: {
+  link_id: string; shard_index: number; object_key: string; ciphertext_bytes: number;
+}, repair: DeviceLinkHistoryShardRepair, deleteObject: boolean): Promise<boolean> {
+  if (deleteObject) {
+    try { await objectStore(env).delete(shard.object_key); }
+    catch { return false; }
+  }
+  const db = createDatabase(env.DB); const now = Date.now();
+  await batch(env.DB, [
+    db.updateTable("user_storage_usage").set({ archive_bytes: sql<number>`max(0, archive_bytes - ${shard.ciphertext_bytes})`,
+      archive_objects: sql<number>`max(0, archive_objects - 1)`, updated_at: now }).where("user_id", "=", userId)
+      .where(sql<boolean>`EXISTS (SELECT 1 FROM device_link_history_shard_repairs repair
+        WHERE repair.link_id = ${shard.link_id} AND repair.shard_index = ${shard.shard_index} AND repair.repair_id = ${repair.repair_id})`),
+    db.deleteFrom("device_link_history_shards").where("link_id", "=", shard.link_id).where("shard_index", "=", shard.shard_index)
+      .where("object_key", "=", shard.object_key)
+      .where(sql<boolean>`EXISTS (SELECT 1 FROM device_link_history_shard_repairs repair
+        WHERE repair.link_id = ${shard.link_id} AND repair.shard_index = ${shard.shard_index} AND repair.repair_id = ${repair.repair_id})`),
+  ]);
+  return true;
+}
+
 async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: AuthContext, linkId: string, shardIndex: number): Promise<Response> {
   requireUser(auth);
   const declaredSize = Number(request.headers.get("content-length"));
@@ -2221,7 +2275,18 @@ async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: Au
     await expireDeviceLink(env, linkId);
     throw new HttpError(410, "Device link expired", "device_link_expired");
   }
-  const existing = await db.selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+  let existing = await db.selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+  if (existing) {
+    const repair = await db.selectFrom("device_link_history_shard_repairs").selectAll()
+      .where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst() as DeviceLinkHistoryShardRepair | undefined;
+    if (repair) {
+      if (!(await releaseDeviceLinkHistoryShardForRepair(env, auth.userId, existing, repair, repair.reason === "invalid"))) {
+        await request.body.cancel("device history shard repair cleanup failed").catch(() => undefined);
+        throw new HttpError(503, "Device history shard cleanup failed", "history_cleanup_failed", { "retry-after": "30" });
+      }
+      existing = undefined;
+    }
+  }
   const matchesCommitted = (row: { ciphertext_bytes: number; ciphertext_sha256: string | null }): boolean => (
     row.ciphertext_bytes === declaredSize && row.ciphertext_sha256 === suppliedDigest.text
   );
@@ -2308,15 +2373,22 @@ async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: Au
   }
 }
 
-async function downloadDeviceLinkHistoryShard(request: Request, env: Env, linkId: string, shardIndex: number): Promise<Response> {
+async function downloadDeviceLinkHistoryShard(request: Request, env: Env, linkId: string, shardIndex: number, ctx: ExecutionContext): Promise<Response> {
   const link = await deviceLinkBySecret(request, env, linkId);
   if (link.status !== "complete" && link.status !== "claimed") throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
-  const shard = await createDatabase(env.DB).selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).where("status", "=", "ready").executeTakeFirst();
-  if (!shard) throw new HttpError(404, "Device history shard not found", "not_found");
+  const db = createDatabase(env.DB);
+  const shard = await db.selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+  if (!shard || shard.status !== "ready") throw new HttpError(404, "Device history shard not found", "not_found");
+  const pendingRepair = await db.selectFrom("device_link_history_shard_repairs").select("repair_id")
+    .where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+  if (pendingRepair) throw new HttpError(503, "Device history shard is waiting for source reupload", "history_transfer_reupload_required", { "retry-after": "30" });
   const object = await objectStore(env).get(shard.object_key);
   if (!object || object.size !== shard.ciphertext_bytes || !shard.ciphertext_sha256 || object.metadata.sha256 !== shard.ciphertext_sha256) {
     await object?.body.cancel().catch(() => undefined);
-    throw new HttpError(503, "Device history shard is temporarily unavailable", "history_transfer_unavailable");
+    const repair = await recordDeviceLinkHistoryShardRepair(env, linkId, shardIndex, link.user_id!, object ? "invalid" : "missing");
+    if (!object && repair) await releaseDeviceLinkHistoryShardForRepair(env, link.user_id!, shard, repair, false);
+    if (repair) ctx.waitUntil(notifyAccountDevices(env, link.user_id!, link.device_id));
+    throw new HttpError(503, "Device history shard must be reuploaded by the source device", "history_transfer_reupload_required", { "retry-after": "30" });
   }
   return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.device-history-shard", "content-length": String(object.size), "cache-control": "no-store" } });
 }
@@ -2327,13 +2399,31 @@ async function acknowledgeDeviceLinkHistoryShard(request: Request, env: Env, lin
   const db = createDatabase(env.DB);
   const shard = await db.selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
   if (!shard || shard.status === "acked") return new Response(null, { status: 204 });
+  const pendingRepair = await db.selectFrom("device_link_history_shard_repairs").select("repair_id")
+    .where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+  if (pendingRepair) throw new HttpError(503, "Device history shard is waiting for source reupload", "history_transfer_reupload_required", { "retry-after": "30" });
   try { await objectStore(env).delete(shard.object_key); } catch { throw new HttpError(503, "Device history shard cleanup failed", "history_cleanup_failed"); }
   const now = Date.now();
-  await batch(env.DB, [
-    db.updateTable("user_storage_usage").set({ archive_bytes: sql<number>`max(0, archive_bytes - ${shard.ciphertext_bytes})`, archive_objects: sql<number>`max(0, archive_objects - 1)`, updated_at: now })
-      .where("user_id", "=", link.user_id!).where(sql<boolean>`EXISTS (SELECT 1 FROM device_link_history_shards WHERE link_id = ${linkId} AND shard_index = ${shardIndex} AND status = 'ready')`),
-    db.updateTable("device_link_history_shards").set({ status: "acked", acked_at: now }).where("link_id", "=", linkId).where("shard_index", "=", shardIndex).where("status", "=", "ready"),
+  const results = await env.DB.batch([
+    env.DB.prepare(`UPDATE user_storage_usage
+      SET archive_bytes = max(0, archive_bytes - ?), archive_objects = max(0, archive_objects - 1), updated_at = ?
+      WHERE user_id = ? AND EXISTS (
+        SELECT 1 FROM device_link_history_shards shard
+        WHERE shard.link_id = ? AND shard.shard_index = ? AND shard.status = 'ready'
+        AND NOT EXISTS (SELECT 1 FROM device_link_history_shard_repairs repair
+          WHERE repair.link_id = shard.link_id AND repair.shard_index = shard.shard_index)
+      )`).bind(shard.ciphertext_bytes, now, link.user_id!, linkId, shardIndex),
+    env.DB.prepare(`UPDATE device_link_history_shards SET status = 'acked', acked_at = ?
+      WHERE link_id = ? AND shard_index = ? AND status = 'ready'
+      AND NOT EXISTS (SELECT 1 FROM device_link_history_shard_repairs
+        WHERE link_id = ? AND shard_index = ?)`)
+      .bind(now, linkId, shardIndex, linkId, shardIndex),
   ]);
+  if (Number(results[1]?.meta.changes ?? 0) !== 1) {
+    const repair = await db.selectFrom("device_link_history_shard_repairs").select("repair_id")
+      .where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+    if (repair) throw new HttpError(503, "Device history shard is waiting for source reupload", "history_transfer_reupload_required", { "retry-after": "30" });
+  }
   return new Response(null, { status: 204 });
 }
 
@@ -2473,7 +2563,7 @@ async function commitDeviceLinkRoom(request: Request, env: Env, auth: AuthContex
   return json({ link_id: linkId, room_id: roomId, status: "complete", event: accepted });
 }
 
-async function claimDeviceLink(request: Request, env: Env, linkId: string): Promise<Response> {
+async function claimDeviceLink(request: Request, env: Env, linkId: string, ctx: ExecutionContext): Promise<Response> {
   const link = await deviceLinkBySecret(request, env, linkId);
   if (link.status === "cancelled") throw new HttpError(410, "Device link was cancelled", "device_link_cancelled");
   if (!link.user_id || (link.status !== "complete" && link.status !== "claimed")) throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
@@ -2515,11 +2605,18 @@ async function claimDeviceLink(request: Request, env: Env, linkId: string): Prom
         .bind(deviceCredentialHash, now, link.device_id, link.user_id, linkId, claimBindingHash),
       env.DB.prepare("INSERT OR IGNORE INTO sessions (token_hash,user_id,device_id,created_at,expires_at) SELECT ?1,?2,?3,?4,?5 WHERE EXISTS (SELECT 1 FROM device_links WHERE link_id = ?6 AND claim_token_hash = ?7)")
         .bind(tokenHash, link.user_id, link.device_id, now, now + DEVICE_LINK_SESSION_MS, linkId, claimBindingHash),
+      env.DB.prepare(`INSERT OR IGNORE INTO sync_log
+        (recipient_user_id, kind, room_id, seq, event_id, payload, created_at)
+        SELECT ?1, 'device.event', NULL, NULL, ?2, ?3, ?4
+        WHERE EXISTS (SELECT 1 FROM device_links WHERE link_id = ?5 AND claim_token_hash = ?6)`)
+        .bind(link.user_id, `device-link-claimed:${linkId}`,
+          JSON.stringify({ type: "device.link.claimed", device_id: link.device_id, link_id: linkId }), now, linkId, claimBindingHash),
     ]);
     if (results.some((result) => Number(result.meta.changes ?? 0) !== 1)) {
       throw new HttpError(409, "Device link was claimed concurrently", "device_link_claimed");
     }
   }
+  ctx.waitUntil(notifyAccountDevices(env, link.user_id, link.device_id));
   return json({ user_id: link.user_id, device_id: link.device_id, display_name: user.display_name, avatar_url: avatarUrl(user.avatar_id), server_name: env.SERVER_NAME, ...sessionCapabilities(env) });
 }
 
@@ -5420,7 +5517,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     await limitUnauthenticatedRequest(request, env, "device-link", linkId);
     if (publicDeviceLink[2] === "status" && request.method === "GET") return deviceLinkStatus(request, env, linkId);
     if (publicDeviceLink[2] === "key-packages" && request.method === "POST") return uploadDeviceLinkPackages(request, env, linkId);
-    if (publicDeviceLink[2] === "claim" && request.method === "POST") return claimDeviceLink(request, env, linkId);
+    if (publicDeviceLink[2] === "claim" && request.method === "POST") return claimDeviceLink(request, env, linkId, ctx);
   }
   const publicDeviceLinkCancel = path.match(/^\/api\/v1\/device-links\/([^/]+)\/cancel$/);
   if (publicDeviceLinkCancel && request.method === "DELETE") {
@@ -5433,7 +5530,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     const linkId = decodeURIComponent(publicDeviceLinkHistoryShard[1]);
     await limitUnauthenticatedRequest(request, env, "device-link", linkId);
     const shardIndex = Number(publicDeviceLinkHistoryShard[2]);
-    return request.method === "GET" ? downloadDeviceLinkHistoryShard(request, env, linkId, shardIndex) : acknowledgeDeviceLinkHistoryShard(request, env, linkId, shardIndex);
+    return request.method === "GET" ? downloadDeviceLinkHistoryShard(request, env, linkId, shardIndex, ctx) : acknowledgeDeviceLinkHistoryShard(request, env, linkId, shardIndex);
   }
   if (path === "/api/v1/health" && request.method === "GET") return json({ ok: true, server_name: env.SERVER_NAME, federation: false, protocol: protocolCapabilities(env) });
   if (path.startsWith("/api/v1/operator/")) {

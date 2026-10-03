@@ -2471,6 +2471,10 @@ describe("single-server durable delivery", () => {
     });
     expect((await claim()).status).toBe(200);
     expect((await claim()).status).toBe(200);
+    expect(await env.DB.prepare("SELECT payload FROM sync_log WHERE recipient_user_id = ? AND event_id = ?")
+      .bind(account.user_id, `device-link-claimed:${link.link_id}`).first()).toEqual({
+      payload: JSON.stringify({ type: "device.link.claimed", device_id: linkedDevice.id, link_id: link.link_id }),
+    });
     const linkedRooms = await SELF.fetch("https://edgechat.test/api/v1/rooms", { headers: { authorization: `Bearer ${accessToken}` } });
     expect(await linkedRooms.json()).toMatchObject({ rooms: [{ room_id: roomId, current_seq: 1, joined_seq: 1 }] });
     const me = await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { authorization: `Bearer ${accessToken}` } });
@@ -2538,6 +2542,26 @@ describe("single-server durable delivery", () => {
     const firstUpload = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { method: "PUT",
       headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard", "x-content-sha256": firstDigest }, body: shards[0] });
     expect(firstUpload.status, await firstUpload.clone().text()).toBe(201);
+    const firstObjectKey = `device-links/${link.link_id}/${manifest.transfer_id}/0000.bin`;
+    await env.ARCHIVE.delete(firstObjectKey);
+    const missingShard = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, {
+      headers: { "x-device-link-secret": link.secret },
+    });
+    expect(missingShard.status).toBe(503);
+    expect(await missingShard.json()).toMatchObject({ code: "history_transfer_reupload_required" });
+    expect(await env.DB.prepare("SELECT repair_id FROM device_link_history_shard_repairs WHERE link_id = ? AND shard_index = 0")
+      .bind(link.link_id).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT shard_index FROM device_link_history_shards WHERE link_id = ? AND shard_index = 0")
+      .bind(link.link_id).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT payload FROM sync_log WHERE recipient_user_id = ? AND event_id LIKE 'device-link-history-repair:%'")
+      .bind(account.user_id).first()).toEqual({
+      payload: JSON.stringify({ type: "device.link.history.repair", link_id: link.link_id, shard_index: 0 }),
+    });
+    expect(await (await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${account.access_token}` } })).json())
+      .toMatchObject({ archive_bytes: 0, archive_objects: 0 });
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+        "x-content-sha256": firstDigest }, body: shards[0] })).status).toBe(201);
 
     const secondDigest = await ciphertextDigest(shards[1]);
     const secondObjectKey = `device-links/${link.link_id}/${manifest.transfer_id}/0001.bin`;
@@ -2569,6 +2593,38 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT ciphertext_sha256 FROM device_link_history_shards WHERE link_id = ? AND shard_index = 1")
       .bind(link.link_id).first()).toEqual({ ciphertext_sha256: secondDigest });
     expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(secondObjectKey).first()).toBeNull();
+
+    await env.ARCHIVE.put(secondObjectKey, shards[1], { customMetadata: {
+      link_id: link.link_id, transfer_id: manifest.transfer_id, target_device_id: target.id, shard_index: "1", sha256: "corrupt",
+    } });
+    const corruptShard = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, {
+      headers: { "x-device-link-secret": link.secret },
+    });
+    expect(corruptShard.status).toBe(503);
+    expect(await corruptShard.json()).toMatchObject({ code: "history_transfer_reupload_required" });
+    expect(await env.DB.prepare("SELECT reason FROM device_link_history_shard_repairs WHERE link_id = ? AND shard_index = 1")
+      .bind(link.link_id).first()).toEqual({ reason: "invalid" });
+    const rejectedAck = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, {
+      method: "DELETE", headers: { "x-device-link-secret": link.secret },
+    });
+    expect(rejectedAck.status).toBe(503);
+    expect(await rejectedAck.json()).toMatchObject({ code: "history_transfer_reupload_required" });
+    expect(await (await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${account.access_token}` } })).json())
+      .toMatchObject({ archive_bytes: 8, archive_objects: 2 });
+    await env.ARCHIVE.delete(secondObjectKey);
+    const circuitOpen = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, {
+      headers: { "x-device-link-secret": link.secret },
+    });
+    expect(circuitOpen.status).toBe(503);
+    expect(await circuitOpen.json()).toMatchObject({ code: "history_transfer_reupload_required" });
+    expect(await env.DB.prepare("SELECT reason FROM device_link_history_shard_repairs WHERE link_id = ? AND shard_index = 1")
+      .bind(link.link_id).first()).toEqual({ reason: "invalid" });
+    const repairedUpload = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, { method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+        "x-content-sha256": secondDigest }, body: shards[1] });
+    expect(repairedUpload.status, await repairedUpload.clone().text()).toBe(201);
+    expect(await env.DB.prepare("SELECT repair_id FROM device_link_history_shard_repairs WHERE link_id = ? AND shard_index = 1")
+      .bind(link.link_id).first()).toBeNull();
 
     const conflictingRetry = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, { method: "PUT",
       headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",

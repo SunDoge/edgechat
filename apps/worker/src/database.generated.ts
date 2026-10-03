@@ -195,6 +195,14 @@ export interface DeviceKeyPackages {
   package_id: string;
 }
 
+export interface DeviceLinkHistoryShardRepairs {
+  detected_at: number;
+  link_id: string;
+  reason: string;
+  repair_id: string;
+  shard_index: number;
+}
+
 export interface DeviceLinkHistoryShards {
   acked_at: number | null;
   ciphertext_bytes: number;
@@ -679,6 +687,7 @@ export interface DB {
   device_backup_checkpoints: DeviceBackupCheckpoints;
   device_draft_envelopes: DeviceDraftEnvelopes;
   device_key_packages: DeviceKeyPackages;
+  device_link_history_shard_repairs: DeviceLinkHistoryShardRepairs;
   device_link_history_shards: DeviceLinkHistoryShards;
   device_link_history_transfers: DeviceLinkHistoryTransfers;
   device_link_key_packages: DeviceLinkKeyPackages;

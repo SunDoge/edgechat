@@ -21,6 +21,7 @@ export function operationErrorMessage(cause: unknown, fallback: string, t: Trans
     if (cause.code === "device_link_expired") return t("deviceLink.error.expired");
     if (cause.code === "device_link_cancelled") return t("deviceLink.error.cancelled");
     if (cause.code === "device_link_not_ready" || cause.code === "device_history_not_ready") return t("deviceLink.error.notReady");
+    if (cause.code === "history_transfer_reupload_required") return t("deviceLink.error.remoteShardMissing");
     if (cause.code === "device_link_not_pending" || cause.code === "device_link_claimed") return t("deviceLinkApproval.error.ended");
     if (cause.code === "room_membership_busy") return t("deviceLinkApproval.error.membershipBusy");
     if (cause.status === 429 || cause.code.endsWith("_rate_limited")) return t("operation.error.rateLimited");

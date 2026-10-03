@@ -197,7 +197,15 @@ which deletes that exact object and returns quota immediately. If a manifest
 exists, the Worker refuses session claim until every distinct shard is ready or
 acknowledged, and refuses new manifests or uploads after claim. Normal request
 cost is therefore one PUT, one GET and one DELETE per shard, with no LIST and no
-unbounded single history object.
+unbounded single history object. The source retains the manifest-bound local
+snapshot until the target's durable claim event. A first GET that finds a
+missing object or invalid metadata records a D1 repair circuit and emits a
+content-free device event; later target retries do not issue another object GET.
+The source re-encrypts the same shard index from the retained snapshot. Missing
+objects release their D1 row and quota immediately. Invalid objects retain their
+exact D1 identity until the source deletes that exact key before the replacement
+PUT. Repair uses no LIST and never substitutes a newly generated snapshot under
+an existing manifest.
 
 For a multi-part message the PWA writes one bounded PGlite cleanup journal with
 all opaque attachment IDs before the first PUT. Crossing the crash-safe outgoing

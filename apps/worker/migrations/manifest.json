@@ -208,6 +208,10 @@
     {
       "file": "0052_room_peer_recovery_digests.sql",
       "sha256": "e74c4b79a80b36d3f6e913142426fb89d6b5e8e78adc447344cf2bb3a43d922c"
+    },
+    {
+      "file": "0053_device_history_shard_repairs.sql",
+      "sha256": "87c517b74039f52ffafbf1f24d8dbb69b9b8eb55f75322680ac63fb85112b7f5"
     }
   ]
 }

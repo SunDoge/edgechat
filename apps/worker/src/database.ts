@@ -13,6 +13,7 @@ type SemanticTables = {
   account_deletion_rooms: { action: "delete" | "leave"; status: "pending" | "complete" };
   account_deletions: { status: "pending" | "processing" | "complete" };
   bot_integrations: { scope: Generated<"message:create"> };
+  device_link_history_shard_repairs: { reason: "missing" | "invalid" };
   device_link_history_shards: { status: "ready" | "acked" };
   device_link_rooms: { status: "pending" | "complete" };
   device_links: { status: "pending" | "awaiting_packages" | "approved" | "complete" | "claimed" | "cancelled" };

@@ -62,6 +62,7 @@ import { ShareTargetDialog } from "./components/ShareTargetDialog";
 import { createDeviceHistoryManifest, DeviceHistoryTransferError, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
 import { deviceHistoryStagingFor } from "./device-history-staging";
 import { clearPendingDeviceLink } from "./device-linking";
+import { matchesDeviceHistoryTransfer, mayRetireDeviceLinkSourceState } from "./device-link-source-policy";
 import { stagedMlsPosition } from "./mls-staging";
 import { enqueueForwardBatch, ForwardBatchError, MAX_FORWARD_SELECTION, selectedTimelineMessages, toggleSelectedMessage } from "./message-selection";
 import { deleteStagedShare, loadStagedShare, shareTargetErrorMessage, shareTargetId, type StagedShare } from "./share-target";
@@ -1296,6 +1297,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           const target = String(detail.device_id ?? "");
           if (target && deviceRevocations()[target]?.status === "failed") setNotice(t("devices.linkExpired.failed"));
         }).catch(() => setNotice(t("devices.linkExpired.failed")));
+      }
+      if (detail?.type === "device.link.history.repair" || detail?.type === "device.link.claimed") {
+        const activeMls = mlsRef;
+        if (activeMls) void resumeDeviceLinks(activeMls).catch(() => undefined);
       }
     };
     const realtime = (received: Event) => { const connected = Boolean((received as CustomEvent<{ connected: boolean }>).detail.connected); setConnectionState(connected ? "online" : navigator.onLine ? "syncing" : "offline"); };
@@ -2997,16 +3002,20 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await api.uploadDeviceLinkAccountCredential(linkId, envelope);
         view = { ...view, account_credential_ready: true };
       }
-      if (!view.history_transfer && view.status !== "claimed") {
+      if (view.status !== "claimed") {
         try {
           let snapshot = await deviceHistoryStaging.sourceSnapshot(linkId);
           let manifest = await deviceHistoryStaging.sourceManifest<DeviceHistoryManifest>(linkId);
           if (!snapshot || !manifest || snapshot.size !== manifest.plaintext_bytes) {
+            if (view.history_transfer) throw UserFacingError.localized("deviceLinkApproval.error.historySourceMissing");
             const databaseSnapshot = await db.backupSnapshot();
             snapshot = await createDeviceHistoryBundle(databaseSnapshot, await attachmentCache.entries(), await archiveSegmentCache.entries());
             manifest = createDeviceHistoryManifest(snapshot.size);
             await deviceHistoryStaging.saveSourceSnapshot(linkId, snapshot);
             await deviceHistoryStaging.saveSourceManifest(linkId, manifest);
+          }
+          if (view.history_transfer && !matchesDeviceHistoryTransfer(manifest, view.history_transfer)) {
+            throw UserFacingError.localized("deviceLinkApproval.error.historySourceMissing");
           }
           const created = await api.createDeviceLinkHistoryTransfer(linkId, manifest);
           const uploadedIndexes = new Set([...created.transfer.ready_shards, ...created.transfer.acked_shards]);
@@ -3045,8 +3054,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             () => api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state),
             () => db.removeDeviceLinkOutbox(linkId, room.room_id));
         }
-        await db.removeDeviceLinkJob(linkId); setDevices((await api.devices()).devices); scheduleDraftSync(0);
-        await deviceHistoryStaging.clearLink(linkId);
+        if (mayRetireDeviceLinkSourceState(view.status)) {
+          await db.removeDeviceLinkJob(linkId); await deviceHistoryStaging.clearLink(linkId);
+        }
+        setDevices((await api.devices()).devices); scheduleDraftSync(0);
         setNotice(t(historyTransferSkipped ? "workspace.feedback.deviceLinkedWithoutHistory" : "workspace.feedback.deviceLinked")); setDeviceLinkOpen(false); return;
       }
       if (view.status !== "approved") throw new Error("新设备尚未准备完成");
@@ -3126,7 +3137,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       view = await api.deviceLinkPreview(linkId);
       if (view.status !== "complete" && view.status !== "claimed") throw new Error("部分对话尚未完成，请重试");
-      await db.removeDeviceLinkJob(linkId); setDevices((await api.devices()).devices); scheduleDraftSync(0);
+      if (mayRetireDeviceLinkSourceState(view.status)) {
+        await db.removeDeviceLinkJob(linkId); await deviceHistoryStaging.clearLink(linkId);
+      }
+      setDevices((await api.devices()).devices); scheduleDraftSync(0);
       setNotice(t(historyTransferSkipped ? "workspace.feedback.deviceLinkedWithoutHistory" : "workspace.feedback.deviceLinked")); setDeviceLinkOpen(false);
     } catch (cause) {
       if (cause instanceof ApiError && (cause.code === "device_link_cancelled" || cause.code === "device_link_expired"
