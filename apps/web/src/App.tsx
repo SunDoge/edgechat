@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
 import {
   IconChevronLeft,
   IconChevronDown,
@@ -23,14 +23,13 @@ import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, 
 import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, createAttachmentId, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type RoomDeviceSigningKey, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
-import { AuthScreen } from "./components/AuthScreen";
 import { MessageBubble } from "./components/MessageBubble";
 import { MessageDateSeparator } from "./components/MessageDateSeparator";
 import { UnreadMessageSeparator } from "./components/UnreadMessageSeparator";
 import { NewRoomDialog } from "./components/NewRoomDialog";
 import { PendingMessageBubble } from "./components/PendingMessageBubble";
 import { RoomListItem } from "./components/RoomListItem";
-import { Avatar, Brand, IconButton } from "./components/primitives";
+import { Avatar, Brand, Dialog, IconButton } from "./components/primitives";
 import { EncryptedRoomAvatar } from "./components/EncryptedRoomAvatar";
 import { AccountDeletionDialog, BackupDialog, DevicesDialog, SearchDialog, type DeviceRevocationProgress, type DeviceRow, type LocalSearchResult } from "./components/UtilityDialogs";
 import { ForwardDialog } from "./components/ForwardDialog";
@@ -43,7 +42,6 @@ import { replenishMlsKeyPackages } from "./key-package-replenishment";
 import { applyRoomMute, applyRoomPreferenceAction, defaultRoomPreference, organizedRooms, type RoomPreferenceAction } from "./room-preferences";
 import { createPortableBackupBlob, readPortableBackup, writePortableBackup } from "./portable-backup";
 import { canCreateMemoryPortableBackup, clearPortableBackupRestoreStaging, clearPortableBackupStaging, isPortableBackupStorageError, stagePortableBackup, stagePortableBackupRestore } from "./portable-backup-staging";
-import { DeviceLinkApprovalDialog } from "./components/DeviceLinkApprovalDialog";
 import { supportsVoiceRecording, VoiceRecorder } from "./components/VoiceRecorder";
 import { DRAFT_SAVE_DELAY_MS, canApplyLoadedDraft, composerDraftPreview } from "./composer-drafts";
 import { RoomSettingsDialog, type RoomProfileAvatarChange } from "./components/RoomSettingsDialog";
@@ -53,7 +51,6 @@ import { IdentityVerificationDialog } from "./components/IdentityVerificationDia
 import { ProfileDialog, type ProfileAvatarChange } from "./components/ProfileDialog";
 import { LocalProfilesDialog } from "./components/LocalProfilesDialog";
 import { PasswordChangeDialog } from "./components/PasswordChangeDialog";
-import { PasskeyDialog } from "./components/PasskeyDialog";
 import { activeIdentityDevices, deviceTrustState, verificationKey, type DeviceTrustState } from "./device-verification";
 import { ShareTargetDialog } from "./components/ShareTargetDialog";
 import { createDeviceHistoryManifest, DeviceHistoryTransferError, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
@@ -97,6 +94,10 @@ import { clearRoomSigningKeyPins, pinRoomSigningKeys, pinnedRoomSigningKey } fro
 import { useI18n } from "./i18n";
 import { operationErrorMessage, UserFacingError } from "./operation-errors";
 
+const AuthScreen = lazy(() => import("./components/AuthScreen").then((module) => ({ default: module.AuthScreen })));
+const DeviceLinkApprovalDialog = lazy(() => import("./components/DeviceLinkApprovalDialog").then((module) => ({ default: module.DeviceLinkApprovalDialog })));
+const PasskeyDialog = lazy(() => import("./components/PasskeyDialog").then((module) => ({ default: module.PasskeyDialog })));
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const core = new WebCryptoMessagingCore();
@@ -110,6 +111,16 @@ type RoomIdentityTrust = { status: DeviceTrustState; verified: number; total: nu
 type LocalProjectionState = { roomId: RoomId; eventId: string; pending: boolean };
 type ExportWritable = { write(data: string | ArrayBuffer | Blob): Promise<void>; close(): Promise<void>; abort(reason?: unknown): Promise<void> };
 type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<{ createWritable(): Promise<ExportWritable> }> };
+
+function DeferredScreen() {
+  const { t } = useI18n();
+  return <div class="grid min-h-dvh place-content-center justify-items-center gap-3 bg-white" role="status"><IconMessageCircle class="size-7 stroke-brand"/><p class="text-sm text-muted">{t("common.loading")}</p></div>;
+}
+
+function DeferredDialog(props: { id: string; onClose: () => void }) {
+  const { t } = useI18n();
+  return <Dialog id={props.id} title={t("common.loading")} onClose={props.onClose}><div class="grid min-h-28 place-items-center p-5"><p class="text-sm text-muted" role="status">{t("common.loading")}</p></div></Dialog>;
+}
 
 export function App(props: { localProfile: LocalProfile; localProfiles: LocalProfile[]; accessToken: string | null }) {
   const { locale, t } = useI18n();
@@ -3591,14 +3602,14 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>
       <Show when={devicesOpen()}><DevicesDialog devices={devices()} revocations={deviceRevocations()} profile={profile()} storage={storage()} localStorageHealth={localStorageHealth()} backup={lastBackup()} invitationPolicy={invitationPolicy()} installState={pwaInstallState()} currentDeviceId={currentSession().device_id} pushAvailable={Boolean(currentSession().vapid_public_key)} pushStatus={pushStatus()} voiceRecordingAvailable={supportsVoiceRecording()} passwordChangeSupported={serverSupports(currentSession().protocol, "account.password-change.v1") && !identity()?.accountCredential} passkeysSupported={serverSupports(currentSession().protocol, "passkeys.v1")} linkPreviews={linkPreviews()} presenceSharing={presenceSharing()} exportBusy={accountExportBusy()} onEditProfile={() => { setDevicesOpen(false); setProfileOpen(true); }} onInvitationPolicy={updateInvitationPolicy} onLinkPreviews={updateLinkPreviews} onPresenceSharing={updatePresenceSharing} onRequestPersistence={protectLocalStorage} onInstall={() => void installPwa()} onLinkDevice={() => { setDevicesOpen(false); setDeviceLinkOpen(true); }} onEnablePush={() => void enablePush()} onDisablePush={() => void turnOffPush()} onBackup={() => { setDevicesOpen(false); setBackupOpen(true); }} onChangePassword={() => { setDevicesOpen(false); setPasswordChangeOpen(true); }} onManagePasskeys={() => { setDevicesOpen(false); setPasskeysOpen(true); }} onExport={() => void exportAccountData()} onDeleteAccount={() => { setDevicesOpen(false); setAccountDeletionOpen(true); }} onRevoke={(deviceId) => void revokeDevice(deviceId)} onLogout={() => void logout()} onClose={() => setDevicesOpen(false)}/></Show>
       <Show when={profileOpen() && profile()}>{(currentProfile) => <ProfileDialog profile={currentProfile()} onSave={updateProfile} onClose={() => setProfileOpen(false)}/>}</Show>
-      <Show when={deviceLinkOpen()}><DeviceLinkApprovalDialog api={api} onApprove={(linkId) => executeDeviceLink(linkId)} onCancelLink={cancelApprovedDeviceLink} onClose={() => setDeviceLinkOpen(false)}/></Show>
+      <Show when={deviceLinkOpen()}><Suspense fallback={<DeferredDialog id="device-link-loading" onClose={() => setDeviceLinkOpen(false)}/>}><DeviceLinkApprovalDialog api={api} onApprove={(linkId) => executeDeviceLink(linkId)} onCancelLink={cancelApprovedDeviceLink} onClose={() => setDeviceLinkOpen(false)}/></Suspense></Show>
       <Show when={backupOpen()}><BackupDialog onCreate={exportPortableBackup} onClose={() => setBackupOpen(false)}/></Show>
       <Show when={passwordChangeOpen()}><PasswordChangeDialog onChange={changeAccountPassword} onClose={() => setPasswordChangeOpen(false)}/></Show>
-      <Show when={passkeysOpen()}><PasskeyDialog api={api} accountCredential={identity()?.accountCredential} onClose={() => setPasskeysOpen(false)}/></Show>
+      <Show when={passkeysOpen()}><Suspense fallback={<DeferredDialog id="passkeys-loading" onClose={() => setPasskeysOpen(false)}/>}><PasskeyDialog api={api} accountCredential={identity()?.accountCredential} onClose={() => setPasskeysOpen(false)}/></Suspense></Show>
       <Show when={accountDeletionOpen()}><AccountDeletionDialog accountCredential={identity()?.accountCredential} onDelete={deleteAccount} onClose={() => setAccountDeletionOpen(false)}/></Show>
       <Show when={notice()}><div role="status" class={`fixed left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg bg-neutral-900 px-3 py-2 text-sm text-white shadow-lg ${pwaUpdateState() === "idle" ? "bottom-5" : "top-5"}`}><span class="min-w-0">{notice()}</span><button type="button" aria-label={t("workspace.notice.dismiss")} class="grid size-8 shrink-0 place-items-center rounded-md hover:bg-white/10" onClick={() => setNotice("")}><IconX class="size-4 stroke-white"/></button></div></Show>
     </main>;
   };
 
-  return <><Show when={!loading()} fallback={<div class="grid min-h-dvh place-content-center justify-items-center gap-3 bg-white"><IconMessageCircle class="size-7 stroke-brand"/><p class="text-sm text-muted">{t("workspace.startup.opening")}</p></div>}><Show when={!startupFailure()} fallback={<StartupRecoveryScreen failure={startupFailure()!} profileName={props.localProfile.display_name} inactive={localProfilesOpen()} onRetry={() => location.reload()} onManageProfiles={() => setLocalProfilesOpen(true)} onRestoreBackup={restorePortableBackup}/>}><Show when={session() && identity() && mls()} fallback={<AuthScreen profileId={profileId} accountHint={props.localProfile.user_id} api={api} core={core} db={db} onReady={ready} onRestoreBackup={restorePortableBackup} onManageProfiles={() => setLocalProfilesOpen(true)}/>}><Workspace/></Show></Show></Show><Show when={localProfilesOpen()}><LocalProfilesDialog profiles={localProfiles()} activeProfileId={profileId} onSelect={switchLocalProfile} onAdd={addLocalProfile} onClose={() => setLocalProfilesOpen(false)}/></Show><Show when={!localProfilesOpen() && pwaUpdateState() !== "idle"}><aside aria-live="polite" class="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-30 rounded-xl border border-black/8 bg-white p-3 shadow-xl md:inset-x-auto md:bottom-5 md:right-5 md:w-80"><strong class="block text-sm font-semibold text-ink">{t("workspace.update.title")}</strong><p class="mt-1 text-xs/5 text-muted">{t("workspace.update.description")}</p><div class="mt-3 flex justify-end gap-2"><Show when={pwaUpdateState() === "ready"} fallback={<span class="px-3 py-2 text-xs font-medium text-muted">{t("workspace.update.updating")}</span>}><button type="button" class="min-h-10 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={dismissPwaUpdate}>{t("workspace.update.later")}</button><button type="button" class="min-h-10 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:brightness-95" onClick={() => void installPwaUpdate()}>{t("workspace.update.action")}</button></Show></div></aside></Show></>;
+  return <><Show when={!loading()} fallback={<div class="grid min-h-dvh place-content-center justify-items-center gap-3 bg-white"><IconMessageCircle class="size-7 stroke-brand"/><p class="text-sm text-muted">{t("workspace.startup.opening")}</p></div>}><Show when={!startupFailure()} fallback={<StartupRecoveryScreen failure={startupFailure()!} profileName={props.localProfile.display_name} inactive={localProfilesOpen()} onRetry={() => location.reload()} onManageProfiles={() => setLocalProfilesOpen(true)} onRestoreBackup={restorePortableBackup}/>}><Show when={session() && identity() && mls()} fallback={<Suspense fallback={<DeferredScreen/>}><AuthScreen profileId={profileId} accountHint={props.localProfile.user_id} api={api} core={core} db={db} onReady={ready} onRestoreBackup={restorePortableBackup} onManageProfiles={() => setLocalProfilesOpen(true)}/></Suspense>}><Workspace/></Show></Show></Show><Show when={localProfilesOpen()}><LocalProfilesDialog profiles={localProfiles()} activeProfileId={profileId} onSelect={switchLocalProfile} onAdd={addLocalProfile} onClose={() => setLocalProfilesOpen(false)}/></Show><Show when={!localProfilesOpen() && pwaUpdateState() !== "idle"}><aside aria-live="polite" class="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-30 rounded-xl border border-black/8 bg-white p-3 shadow-xl md:inset-x-auto md:bottom-5 md:right-5 md:w-80"><strong class="block text-sm font-semibold text-ink">{t("workspace.update.title")}</strong><p class="mt-1 text-xs/5 text-muted">{t("workspace.update.description")}</p><div class="mt-3 flex justify-end gap-2"><Show when={pwaUpdateState() === "ready"} fallback={<span class="px-3 py-2 text-xs font-medium text-muted">{t("workspace.update.updating")}</span>}><button type="button" class="min-h-10 rounded-lg px-3 text-sm font-semibold text-muted hover:bg-neutral-100" onClick={dismissPwaUpdate}>{t("workspace.update.later")}</button><button type="button" class="min-h-10 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:brightness-95" onClick={() => void installPwaUpdate()}>{t("workspace.update.action")}</button></Show></div></aside></Show></>;
 }

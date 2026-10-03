@@ -31,4 +31,10 @@ describe("service worker application shell", () => {
     expect(source).toContain("throw error");
     expect(source).not.toContain('hit || caches.match("/")');
   });
+
+  it("pre-caches sequentially so first-run database assets do not compete with an install burst", () => {
+    expect(source).toContain("for (const path of");
+    expect(source).toContain("await cache.add(path)");
+    expect(source).not.toContain(".addAll(");
+  });
 });

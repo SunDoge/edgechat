@@ -1,4 +1,4 @@
-import { Show, createSignal, onMount } from "solid-js";
+import { Show, Suspense, createSignal, lazy, onMount } from "solid-js";
 import { IconQrcode, IconShieldLock, IconSwitchHorizontal, IconUpload } from "@tabler/icons-solidjs";
 import { encodeBase64Url, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import { deviceSessionProofBytes } from "@edgechat/protocol";
@@ -8,11 +8,12 @@ import type { LocalDatabase } from "@edgechat/db";
 import { loadIdentity, saveIdentity } from "../vault";
 import { authErrorMessage } from "../auth-errors";
 import { Brand, Input } from "./primitives";
-import { DeviceLinkSetup } from "./DeviceLinkSetup";
-import { BackupRestoreForm } from "./BackupRestoreForm";
 import { profileSessionKey } from "../local-profiles";
 import { useI18n } from "../i18n";
 import { UserFacingError } from "../operation-errors";
+
+const DeviceLinkSetup = lazy(() => import("./DeviceLinkSetup").then((module) => ({ default: module.DeviceLinkSetup })));
+const BackupRestoreForm = lazy(() => import("./BackupRestoreForm").then((module) => ({ default: module.BackupRestoreForm })));
 
 export function AuthScreen(props: { profileId: string; accountHint?: string | null; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string) => Promise<void>; onManageProfiles: () => void }) {
   const { t } = useI18n();
@@ -184,7 +185,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   return <main class="isolate grid min-h-dvh place-items-center bg-white px-6 py-10 antialiased"><section class="w-full max-w-xs">
     <header class="mb-10 flex justify-center"><Brand/></header>
     <Show when={!appealOpen()} fallback={<AppealForm/>}>
-    <Show when={!restoreOpen()} fallback={<BackupRestoreForm onRestore={props.onRestoreBackup} onCancel={() => setRestoreOpen(false)}/>}>
+    <Show when={!restoreOpen()} fallback={<Suspense fallback={<p class="py-10 text-center text-sm text-muted" role="status">{t("common.loading")}</p>}><BackupRestoreForm onRestore={props.onRestoreBackup} onCancel={() => setRestoreOpen(false)}/></Suspense>}>
     <Show when={mode() === "link"} fallback={<>
     <Show when={!finishingRestore}><div class="mb-8 grid grid-cols-2 rounded-lg bg-neutral-100 p-1" role="tablist" aria-label={t("auth.tabs.label")}>
       <button type="button" role="tab" aria-selected={mode() === "register"} class="h-9 rounded-md text-sm font-medium text-muted aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-sm" onClick={() => setMode("register")}>{t("auth.register.tab")}</button>
@@ -220,7 +221,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     </form>
     <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.alternative")}<span class="h-px flex-1 bg-black/10"/></div>
     <div class="grid gap-2"><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-semibold text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => setMode("link")}><IconQrcode class="size-4 stroke-brand"/>{t("auth.link.action")}</button><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-50" onClick={() => setRestoreOpen(true)}><IconUpload class="size-4 stroke-muted"/>{t("auth.restore.action")}</button></div></Show>
-    </>}><DeviceLinkSetup profileId={props.profileId} api={props.api} core={props.core} db={props.db} onReady={props.onReady} onCancel={() => setMode("login")}/></Show>
+    </>}><Suspense fallback={<p class="py-10 text-center text-sm text-muted" role="status">{t("common.loading")}</p>}><DeviceLinkSetup profileId={props.profileId} api={props.api} core={props.core} db={props.db} onReady={props.onReady} onCancel={() => setMode("login")}/></Suspense></Show>
     </Show>
     </Show>
     <button type="button" class="mt-7 flex min-h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-100" onClick={props.onManageProfiles}><IconSwitchHorizontal class="size-4 stroke-muted"/>{t("auth.profile.switch")}</button>

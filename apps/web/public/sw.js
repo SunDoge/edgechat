@@ -119,9 +119,19 @@ async function stageShareTarget(request) {
   }
 }
 
+async function precacheApplicationShell() {
+  const cache = await caches.open(CACHE);
+  // Keep first-run PGlite/OpenMLS fetches from competing with dozens of
+  // simultaneous install requests on constrained links. The install still
+  // fails closed if any required offline asset cannot be cached.
+  for (const path of ["/", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png", "/apple-touch-icon.png", "/manifest.webmanifest", ...PRECACHE]) {
+    await cache.add(path);
+  }
+}
+
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
-    await (await caches.open(CACHE)).addAll(["/", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png", "/apple-touch-icon.png", "/manifest.webmanifest", ...PRECACHE]);
+    await precacheApplicationShell();
     if (!self.registration.active) await self.skipWaiting();
   })());
 });

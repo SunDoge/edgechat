@@ -5,6 +5,7 @@ export const zhHansMessages = {
   "common.accept": "接受",
   "common.reject": "拒绝",
   "common.close": "关闭",
+  "common.loading": "正在加载…",
   "common.login": "登录",
   "common.today": "今天",
   "common.yesterday": "昨天",
