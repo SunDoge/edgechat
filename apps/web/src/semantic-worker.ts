@@ -7,14 +7,13 @@ import {
   env,
   RawImage,
 } from "@huggingface/transformers";
-import { LOCAL_IMAGE_MODEL } from "./semantic-model";
+import { LOCAL_IMAGE_MODEL, ONNX_RUNTIME_BASE } from "./semantic-model";
 
 type Request =
   | { id: number; kind: "text"; text: string }
   | { id: number; kind: "image"; bytes: ArrayBuffer; mimeType: string };
 type Response = { id: number; embedding?: ArrayBuffer; error?: string };
 
-const ONNX_RUNTIME_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/";
 const onnxWasm = env.backends.onnx.wasm;
 if (!onnxWasm) throw new Error("ONNX Wasm backend is unavailable");
 onnxWasm.wasmPaths = {
@@ -27,15 +26,15 @@ let imageComponents: Promise<[Awaited<ReturnType<typeof AutoProcessor.from_pretr
 
 function loadTextComponents() {
   return textComponents ??= Promise.all([
-    AutoTokenizer.from_pretrained(LOCAL_IMAGE_MODEL.id),
-    CLIPTextModelWithProjection.from_pretrained(LOCAL_IMAGE_MODEL.id, { dtype: "q8" }),
+    AutoTokenizer.from_pretrained(LOCAL_IMAGE_MODEL.id, { revision: LOCAL_IMAGE_MODEL.revision }),
+    CLIPTextModelWithProjection.from_pretrained(LOCAL_IMAGE_MODEL.id, { dtype: LOCAL_IMAGE_MODEL.dtype, revision: LOCAL_IMAGE_MODEL.revision }),
   ]);
 }
 
 function loadImageComponents() {
   return imageComponents ??= Promise.all([
-    AutoProcessor.from_pretrained(LOCAL_IMAGE_MODEL.id),
-    CLIPVisionModelWithProjection.from_pretrained(LOCAL_IMAGE_MODEL.id, { dtype: "q8" }),
+    AutoProcessor.from_pretrained(LOCAL_IMAGE_MODEL.id, { revision: LOCAL_IMAGE_MODEL.revision }),
+    CLIPVisionModelWithProjection.from_pretrained(LOCAL_IMAGE_MODEL.id, { dtype: LOCAL_IMAGE_MODEL.dtype, revision: LOCAL_IMAGE_MODEL.revision }),
   ]);
 }
 

@@ -27,7 +27,7 @@
     "@edgechat/protocol": "workspace:*",
     "@edgechat/sync": "workspace:*",
     "@edgechat/ui": "workspace:*",
-    "@huggingface/transformers": "^4.3.0",
+    "@huggingface/transformers": "4.3.0",
     "@paddor/zrip": "^0.5.9",
     "@tabler/icons-solidjs": "^3.48.0",
     "clsx": "^2.1.1",
