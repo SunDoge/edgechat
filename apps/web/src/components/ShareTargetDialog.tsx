@@ -7,12 +7,13 @@ import { avatarColor, initials, roomTitle } from "../presenters";
 import { SHARE_TARGET_MAX_FILES, SHARE_TARGET_MAX_TEXT, sharedComposerText, type ShareTargetError, type StagedShare } from "../share-target";
 import { Avatar, Dialog } from "./primitives";
 import { operationErrorMessage } from "../operation-errors";
+import { hasOptimizableOutgoingImages, type OutgoingImageMode } from "../outgoing-media";
 
 export function ShareTargetDialog(props: {
   share: StagedShare;
   rooms: ServerRoom[];
   currentUserId: string;
-  onSend: (roomId: RoomId, text: string, files: File[]) => Promise<void>;
+  onSend: (roomId: RoomId, text: string, files: File[], imageMode: OutgoingImageMode) => Promise<void>;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -21,6 +22,9 @@ export function ShareTargetDialog(props: {
   const [selectedRoomId, setSelectedRoomId] = createSignal<RoomId | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  const [imageMode, setImageMode] = createSignal<OutgoingImageMode>("optimized");
+  const sharedFiles = createMemo(() => props.share.files.map((file, index) => new File([file.blob], file.name || `shared-file-${index + 1}`, { type: file.type || "application/octet-stream", lastModified: file.last_modified })));
+  const hasOptimizableImages = createMemo(() => hasOptimizableOutgoingImages(sharedFiles()));
   const available = createMemo(() => {
     const needle = query().trim().toLocaleLowerCase();
     return props.rooms.filter((room) => !room.blocked_by_me && (!needle || roomTitle(room, props.currentUserId, t).toLocaleLowerCase().includes(needle)));
@@ -30,10 +34,10 @@ export function ShareTargetDialog(props: {
   async function send() {
     const roomId = selectedRoomId();
     if (!roomId || busy() || props.share.error) return;
-    const files = props.share.files.map((file, index) => new File([file.blob], file.name || `shared-file-${index + 1}`, { type: file.type || "application/octet-stream", lastModified: file.last_modified }));
+    const files = sharedFiles();
     if (!text().trim() && !files.length) return setError(t("shareTarget.error.empty"));
     setBusy(true); setError("");
-    try { await props.onSend(roomId, text().trim(), files); }
+    try { await props.onSend(roomId, text().trim(), files, imageMode()); }
     catch (cause) { setError(operationErrorMessage(cause, t("shareTarget.error.send"), t)); setBusy(false); }
   }
 
@@ -41,6 +45,7 @@ export function ShareTargetDialog(props: {
     <div class="grid gap-4 p-5">
       <Show when={props.share.error} fallback={<>
         <Show when={props.share.files.length}><div class="overflow-hidden rounded-xl border border-black/8 bg-neutral-50"><div class="flex items-center justify-between border-b border-black/5 px-3 py-2"><strong class="text-xs font-semibold text-ink">{t("shareTarget.files", { count: props.share.files.length })}</strong><span class="text-xs tabular-nums text-muted">{formatBytes(props.share.files.reduce((total, file) => total + file.size, 0))} · {t("shareTarget.localOnly")}</span></div><div class="max-h-40 divide-y divide-black/5 overflow-y-auto"><For each={props.share.files}>{(file) => <div class="flex min-h-12 items-center gap-3 px-3 py-2"><span class="grid size-8 shrink-0 place-items-center rounded-lg bg-white shadow-sm"><IconFile class="size-4 stroke-muted"/></span><span class="min-w-0 flex-1 truncate text-sm font-medium text-ink">{file.name || t("shareTarget.unnamedFile")}</span><small class="shrink-0 text-xs tabular-nums text-muted">{formatBytes(file.size)}</small></div>}</For></div></div></Show>
+        <Show when={hasOptimizableImages()}><fieldset class="grid gap-2 rounded-xl bg-neutral-50 p-3 ring-1 ring-black/5"><legend class="px-1 text-xs font-semibold text-ink">{t("shareTarget.imageQuality.title")}</legend><div class="grid grid-cols-2 gap-2"><button type="button" aria-pressed={imageMode() === "optimized"} class={`min-h-10 rounded-lg px-3 text-sm font-semibold ring-1 ring-inset ${imageMode() === "optimized" ? "bg-brand-soft text-brand ring-brand/25" : "bg-white text-muted ring-neutral-200"}`} onClick={() => setImageMode("optimized")}>{t("shareTarget.imageQuality.optimized")}</button><button type="button" aria-pressed={imageMode() === "original"} class={`min-h-10 rounded-lg px-3 text-sm font-semibold ring-1 ring-inset ${imageMode() === "original" ? "bg-brand-soft text-brand ring-brand/25" : "bg-white text-muted ring-neutral-200"}`} onClick={() => setImageMode("original")}>{t("shareTarget.imageQuality.original")}</button></div><p class="text-xs/5 text-muted">{imageMode() === "optimized" ? t("shareTarget.imageQuality.optimizedHelp") : t("shareTarget.imageQuality.originalHelp")}</p></fieldset></Show>
         <label class="grid gap-2 text-sm font-medium text-ink" for="shared-text">{t("shareTarget.text")}<textarea id="shared-text" rows={3} maxlength={SHARE_TARGET_MAX_TEXT} class="min-h-24 resize-y rounded-xl bg-white px-3 py-2.5 text-base font-normal ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand" value={text()} onInput={(event) => setText(event.currentTarget.value)} placeholder={props.share.files.length ? t("shareTarget.textWithFiles") : t("shareTarget.textOnly")}/><span class="text-right text-xs font-normal tabular-nums text-neutral-400">{text().length}/{SHARE_TARGET_MAX_TEXT}</span></label>
         <div class="grid gap-2">
           <strong class="text-sm font-medium text-ink">{t("shareTarget.selectRoom")}</strong>

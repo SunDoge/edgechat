@@ -22,7 +22,7 @@ const savedRoom: ServerRoom = {
 
 describe("share destination safety", () => {
   it("keeps staged files local until the user selects and confirms a room", async () => {
-    const send = vi.fn(async (_roomId: RoomId, _text: string, _files: File[]) => undefined);
+    const send = vi.fn(async (_roomId: RoomId, _text: string, _files: File[], _imageMode: "optimized" | "original") => undefined);
     const blob = new Blob(["photo"], { type: "image/jpeg" });
     dispose = render(() => <ShareTargetDialog share={{
       version: 2, id: crypto.randomUUID(), created_at: 1, title: "", text: "", url: "",
@@ -31,12 +31,28 @@ describe("share destination safety", () => {
 
     expect(document.body.textContent).toContain("文件在此之前不会上传");
     expect(document.body.textContent).toContain("仅暂存在本机");
+    expect(document.body.textContent).toContain("默认在本机缩放 JPEG/PNG");
+    expect([...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "节省空间")?.getAttribute("aria-pressed")).toBe("true");
     expect(send).not.toHaveBeenCalled();
     [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("已保存消息"))?.click();
     [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("发送到 已保存消息"))?.click();
     await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
     expect(send.mock.calls[0]?.[0]).toBe(savedRoom.room_id);
     expect(send.mock.calls[0]?.[2][0]).toBeInstanceOf(File);
+    expect(send.mock.calls[0]?.[3]).toBe("optimized");
+  });
+
+  it("allows shared images to remain byte-exact originals before confirmation", () => {
+    const blob = new Blob(["photo"], { type: "image/jpeg" });
+    dispose = render(() => <ShareTargetDialog share={{
+      version: 2, id: crypto.randomUUID(), created_at: 1, title: "", text: "", url: "",
+      files: [{ blob, name: "photo.jpg", type: blob.type, size: blob.size, last_modified: 1 }],
+    }} rooms={[savedRoom]} currentUserId="@alice:example.com" onSend={vi.fn(async () => undefined)} onClose={vi.fn()}/>, root());
+
+    const original = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "原图")!;
+    original.click();
+    expect(original.getAttribute("aria-pressed")).toBe("true");
+    expect(document.body.textContent).toContain("按原始大小加密上传");
   });
 
   it("warns that a shared contact exposes the full account address", () => {

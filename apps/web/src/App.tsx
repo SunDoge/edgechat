@@ -11,6 +11,7 @@ import {
   IconLock,
   IconMessageCircle,
   IconPaperclip,
+  IconPhoto,
   IconPlus,
   IconSearch,
   IconShieldCheck,
@@ -65,6 +66,7 @@ import { stagedMlsPosition } from "./mls-staging";
 import { enqueueForwardBatch, ForwardBatchError, MAX_FORWARD_SELECTION, selectedTimelineMessages, toggleSelectedMessage } from "./message-selection";
 import { deleteStagedShare, loadStagedShare, shareTargetErrorMessage, shareTargetId, type StagedShare } from "./share-target";
 import { syncUnreadAppBadge } from "./app-badge";
+import { hasOptimizableOutgoingImages, prepareOutgoingFile, type OutgoingImageMode } from "./outgoing-media";
 import { applyPwaUpdate, dismissPwaUpdate, subscribePwaUpdates, type PwaUpdateState } from "./pwa-lifecycle";
 import { beginSafePwaUpdate } from "./pwa-update-safety";
 import { requestPwaInstall, subscribePwaInstall, type PwaInstallState } from "./pwa-install";
@@ -173,6 +175,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [compose, setCompose] = createSignal("");
   const [composerDrafts, setComposerDrafts] = createSignal<Record<string, LocalComposerDraft>>({});
   const [files, setFiles] = createSignal<File[]>([]);
+  const [sendOriginalImages, setSendOriginalImages] = createSignal(false);
   const [voiceDurationMs, setVoiceDurationMs] = createSignal<number | null>(null);
   const [voiceRecording, setVoiceRecording] = createSignal(false);
   const [replyingTo, setReplyingTo] = createSignal<LocalMessage | null>(null);
@@ -326,6 +329,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   });
   const selectedMessages = createMemo(() => selectedTimelineMessages(messages(), selectedMessageIds()));
   const attachmentLimits = createMemo(() => normalizeServerProtocol(session()?.protocol).limits);
+  const pendingOptimizableImages = createMemo(() => hasOptimizableOutgoingImages(files()));
+  createEffect(() => { if (!files().length) setSendOriginalImages(false); });
   const selectedNeedsHistoryRecovery = createMemo(() => {
     const roomId = selectedId();
     return Boolean(roomId && historyRecoveryRooms().has(roomId));
@@ -1621,7 +1626,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     } finally { setLoading(false); }
   }
 
-  async function enqueueNewMessage(room: ServerRoom, text: string, selectedFiles: readonly File[], relation?: MessagePayload["relation"], durationMs?: number | null): Promise<void> {
+  async function enqueueNewMessage(room: ServerRoom, text: string, selectedFiles: readonly File[], relation?: MessagePayload["relation"], durationMs?: number | null, imageMode: OutgoingImageMode = "optimized"): Promise<{ optimizedImages: number; unsupportedImages: number; savedBytes: number }> {
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!currentIdentity || !currentSession || !currentMls || !outboxRef) throw new UserFacingError(t("send.queueNotReady"));
     mlsProjectionBarrier.assertWritable();
@@ -1641,18 +1646,23 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const attachmentIds = selectedFiles.map(() => createAttachmentId());
     let cleanupJob = selectedFiles.length ? await db.stageAttachmentSendCleanup(eventId, room.room_id, attachmentIds) : null;
     let previewBudget = MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES;
+    let optimizedImages = 0; let unsupportedImages = 0; let savedBytes = 0;
     let queued = false;
     try {
       for (const [index, selectedFile] of selectedFiles.entries()) {
-        const preparedImage = await prepareImageMetadata(selectedFile, previewBudget);
+        const preparedOutgoing = await prepareOutgoingFile(selectedFile, imageMode);
+        const uploadFile = preparedOutgoing.file;
+        if (preparedOutgoing.outcome === "optimized") { optimizedImages += 1; savedBytes += preparedOutgoing.savedBytes; }
+        else if (preparedOutgoing.outcome === "unsupported") unsupportedImages += 1;
+        const preparedImage = await prepareImageMetadata(uploadFile, previewBudget);
         if (preparedImage.preview) previewBudget -= embeddedImagePreviewByteLength(preparedImage.preview);
-        const encryptedFile = await core.encryptAttachment(await selectedFile.arrayBuffer());
+        const encryptedFile = await core.encryptAttachment(await uploadFile.arrayBuffer());
         const attachmentId = attachmentIds[index]!;
         const upload = await api.uploadAttachment(room.room_id, encryptedFile.ciphertext, attachmentId);
         if (await attachmentCache.put(upload.attachment_id, encryptedFile.ciphertext)) {
           await attachmentLoader.acknowledgeCached(upload.attachment_id, encryptedFile.ciphertext);
         }
-        attachments.push({ id: upload.attachment_id, name: selectedFile.name, type: selectedFile.type || "application/octet-stream", size: selectedFile.size, key: encryptedFile.key, nonce: encryptedFile.nonce, ...(preparedImage.dimensions ?? {}), ...(preparedImage.preview ? { preview: preparedImage.preview } : {}), ...(durationMs && selectedFiles.length === 1 ? { duration_ms: durationMs } : {}) });
+        attachments.push({ id: upload.attachment_id, name: uploadFile.name, type: uploadFile.type || "application/octet-stream", size: uploadFile.size, key: encryptedFile.key, nonce: encryptedFile.nonce, ...(preparedImage.dimensions ?? {}), ...(preparedImage.preview ? { preview: preparedImage.preview } : {}), ...(durationMs && selectedFiles.length === 1 ? { duration_ms: durationMs } : {}) });
       }
       const payload = createMessagePayload(eventId as MessageId, text, attachments, relation);
       await mutateMls(async () => {
@@ -1678,6 +1688,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (historyFocus()?.roomId === room.room_id) await returnToLatestMessages();
       else window.requestAnimationFrame(() => timelineRef?.scrollToEnd());
     }
+    return { optimizedImages, unsupportedImages, savedBytes };
   }
 
   async function sendMessage() {
@@ -1691,8 +1702,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       : reply ? { type: "reply", target: { kind: "message", message_id: reply.message_id as MessageId, room_id: room.room_id } } : undefined;
     setSendBusy(true);
     try {
-      await enqueueNewMessage(room, text, selectedFiles, relation, voiceDurationMs());
+      const media = await enqueueNewMessage(room, text, selectedFiles, relation, voiceDurationMs(), sendOriginalImages() ? "original" : "optimized");
       stopTyping(room.room_id); composerRevision += 1; setCompose(""); setFiles([]); setVoiceDurationMs(null); setReplyingTo(null); setQuoting(null); clearComposerDraft(room.room_id);
+      if (media.unsupportedImages) setNotice(t("send.imageOptimizationFallback", { count: media.unsupportedImages }));
+      else if (media.optimizedImages) setNotice(t("send.imageOptimized", { count: media.optimizedImages }));
     } catch (cause) { setNotice(operationErrorMessage(cause, t("send.error"), t)); }
     finally { setSendBusy(false); }
   }
@@ -1744,17 +1757,19 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setNewRoomContact(contact); setNewRoom(true);
   }
 
-  async function sendIncomingShare(roomId: RoomId, text: string, sharedFiles: File[]): Promise<void> {
+  async function sendIncomingShare(roomId: RoomId, text: string, sharedFiles: File[], imageMode: OutgoingImageMode): Promise<void> {
     const share = incomingShare();
     const room = rooms().find((candidate) => candidate.room_id === roomId);
     if (!share || !room) throw new UserFacingError(t("shareTarget.error.targetMissing"));
     if (sendBusy()) throw new UserFacingError(t("shareTarget.error.busy"));
     setSendBusy(true);
     try {
-      await enqueueNewMessage(room, text, sharedFiles);
+      const media = await enqueueNewMessage(room, text, sharedFiles, undefined, undefined, imageMode);
       setIncomingShare(null); setSelectedId(roomId);
       void deleteStagedShare(share.id).catch(() => undefined);
-      setNotice(t("shareTarget.sentTo", { title: roomTitle(room, session()!.user_id) }));
+      setNotice(media.unsupportedImages
+        ? t("shareTarget.sentWithImageFallback", { title: roomTitle(room, session()!.user_id), count: media.unsupportedImages })
+        : t("shareTarget.sentTo", { title: roomTitle(room, session()!.user_id) }));
     } finally { setSendBusy(false); }
   }
 
@@ -3641,6 +3656,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             <button type="button" aria-label={t("common.cancel")} class="grid size-8 shrink-0 place-items-center rounded-lg hover:bg-neutral-100" onClick={cancelComposerMode}><IconX class="size-4 stroke-muted"/></button>
           </div>}</Show>
           <Show when={files().length}><div class="mx-auto flex max-w-[760px] gap-2 overflow-x-auto border-t border-black/5 bg-white px-3 py-2" aria-label={t("workspace.composer.pendingAttachments")}>
+            <Show when={pendingOptimizableImages()}><button type="button" aria-pressed={sendOriginalImages()} title={sendOriginalImages() ? t("workspace.composer.imageQuality.originalHelp") : t("workspace.composer.imageQuality.optimizedHelp")} disabled={sendBusy()} class={`flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold ring-1 ring-inset disabled:opacity-50 ${sendOriginalImages() ? "bg-white text-muted ring-neutral-300" : "bg-brand-soft text-brand ring-brand/20"}`} onClick={() => setSendOriginalImages((value) => !value)}><IconPhoto class={`size-4 ${sendOriginalImages() ? "stroke-muted" : "stroke-brand"}`}/>{sendOriginalImages() ? t("workspace.composer.imageQuality.original") : t("workspace.composer.imageQuality.optimized")}</button></Show>
             <For each={files()}>{(selectedFile, index) => <div class="flex min-w-0 max-w-56 shrink-0 items-center gap-2 rounded-lg bg-neutral-100 py-1.5 pl-2.5 pr-1">
               <IconPaperclip class="size-4 shrink-0 stroke-muted"/><span class="min-w-0 truncate text-xs font-medium text-ink">{voiceDurationMs() && files().length === 1 ? t("workspace.composer.voiceFile", { seconds: Math.max(1, Math.round(voiceDurationMs()! / 1000)) }) : selectedFile.name}</span>
               <button type="button" aria-label={t("workspace.composer.removeAttachment", { name: selectedFile.name })} class="grid size-8 shrink-0 place-items-center rounded-md hover:bg-black/5 disabled:opacity-40" disabled={sendBusy()} onClick={() => { setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index())); setVoiceDurationMs(null); }}><IconX class="size-4 stroke-muted"/></button>
