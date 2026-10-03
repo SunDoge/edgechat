@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalDatabase } from "@edgechat/db";
-import type { RoomEvent, RoomId } from "@edgechat/protocol";
+import type { ClientEvent, RoomEvent, RoomId } from "@edgechat/protocol";
+import { OutboxEngine } from "@edgechat/sync/outbox";
 
 const profiles = new Set<string>();
 
@@ -73,6 +74,73 @@ describe("real browser local database", () => {
       expect(reopened.storage).toBe("opfs");
     } finally {
       await reopened.close();
+    }
+  });
+
+  it("recovers an encrypted offline outbox after restart and drains only after an online event", async () => {
+    const profileId = crypto.randomUUID();
+    profiles.add(profileId);
+    const roomId = "!browser-outbox-test:example.com" as RoomId;
+    const messageId = "$browser-outbox-message:example.com";
+    const event = {
+      event_id: "browser-outbox-event",
+      room_id: roomId,
+      sender: "@alice:example.com",
+      device_id: "browser-device",
+      type: "message.text",
+      created_at: Date.now(),
+      ciphertext: "stable-offline-ciphertext",
+      metadata: {},
+      signature: "stable-offline-signature",
+    } satisfies ClientEvent;
+    const payload = {
+      version: 2,
+      kind: "message",
+      message_id: messageId,
+      parts: [{ part_id: `${messageId}:text`, kind: "text", text: "offline persimmon delivery" }],
+    };
+
+    const beforeRestart = new LocalDatabase(profileId);
+    try {
+      await beforeRestart.bindAccount("@alice:example.com", "Alice");
+      await beforeRestart.saveRoom({ room_id: roomId, name: null, kind: "direct", current_seq: 0, joined_seq: 0 });
+      await beforeRestart.enqueueOutbox(event, "offline persimmon delivery", payload);
+    } finally {
+      await beforeRestart.close();
+    }
+
+    const afterRestart = new LocalDatabase(profileId);
+    let online = false;
+    let sentCiphertext: string | null = null;
+    const accepted = { ...event, seq: 1 } satisfies RoomEvent;
+    const engine = new OutboxEngine({
+      async sendEvent(sentRoomId, sentEvent) {
+        expect(sentRoomId).toBe(roomId);
+        sentCiphertext = sentEvent.ciphertext;
+        return { event: accepted };
+      },
+    }, afterRestart, () => online);
+    try {
+      await engine.start();
+      expect((await afterRestart.outbox(roomId)).map((item) => item.event_id)).toEqual([event.event_id]);
+      expect(sentCiphertext).toBeNull();
+
+      const sent = new Promise<RoomEvent>((resolve) => {
+        engine.addEventListener("sent", (received) => resolve((received as CustomEvent<RoomEvent>).detail), { once: true });
+      });
+      online = true;
+      window.dispatchEvent(new Event("online"));
+      await expect(sent).resolves.toEqual(accepted);
+
+      expect(sentCiphertext).toBe(event.ciphertext);
+      expect(await afterRestart.outbox(roomId)).toEqual([]);
+      expect((await afterRestart.message(roomId, messageId))?.plaintext).toBe("offline persimmon delivery");
+      expect(await afterRestart.search("persimmon", roomId)).toEqual([
+        expect.objectContaining({ message_id: messageId, plaintext: "offline persimmon delivery" }),
+      ]);
+    } finally {
+      engine.stop();
+      await afterRestart.close();
     }
   });
 });
