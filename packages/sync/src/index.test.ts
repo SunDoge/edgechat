@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
+import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -919,6 +919,48 @@ describe("ApiClient protocol negotiation", () => {
       const session = await new ApiClient("https://legacy.test").me();
       expect(session.protocol).toMatchObject({ version: 1, features: [], limits: { max_attachments_per_message: 1 } });
     } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+describe("ApiClient request deadlines", () => {
+  const stalledFetch = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+  }));
+
+  it("fails a stalled control request with a typed timeout", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", stalledFetch);
+    try {
+      const assertion = expect(new ApiClient("https://edgechat.test").me()).rejects.toEqual(expect.objectContaining({
+        name: "ApiTimeoutError", code: "request_timeout", timeoutMs: API_CONTROL_TIMEOUT_MS,
+      }));
+      await vi.advanceTimersByTimeAsync(API_CONTROL_TIMEOUT_MS);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      stalledFetch.mockClear();
+    }
+  });
+
+  it("gives ciphertext transfers a longer deadline than control requests", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", stalledFetch);
+    try {
+      const pending = new ApiClient("https://edgechat.test").downloadAttachment("attachment-1");
+      const signal = stalledFetch.mock.calls[0]?.[1]?.signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      const assertion = expect(pending).rejects.toBeInstanceOf(ApiTimeoutError);
+      await vi.advanceTimersByTimeAsync(API_CONTROL_TIMEOUT_MS);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(API_TRANSFER_TIMEOUT_MS - API_CONTROL_TIMEOUT_MS);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      stalledFetch.mockClear();
+    }
   });
 });
 

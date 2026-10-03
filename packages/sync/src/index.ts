@@ -6,6 +6,17 @@ export class ApiError extends Error {
   constructor(message: string, public status: number, public code: string) { super(message); }
 }
 
+export const API_CONTROL_TIMEOUT_MS = 30_000;
+export const API_TRANSFER_TIMEOUT_MS = 10 * 60_000;
+
+export class ApiTimeoutError extends Error {
+  readonly code = "request_timeout";
+  constructor(public readonly timeoutMs: number) {
+    super("网络请求超时，请检查连接后重试");
+    this.name = "ApiTimeoutError";
+  }
+}
+
 export type SessionIdentity = { user_id: string; device_id: string; display_name: string; avatar_url?: string | null; server_name?: string; vapid_public_key?: string; device_credential?: string; archive_compaction_enabled: boolean; protocol?: ServerProtocolCapabilities };
 export type ServerDevice = { device_id: string; user_id: string; display_name: string; kind: "user" | "bot"; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
 export type RoomArchiveDevice = ServerDevice;
@@ -133,23 +144,21 @@ export class ApiClient {
   createDeviceLink(payload: Record<string, unknown>) { return this.request<{ link_id: string; secret: string; expires_at: number; server_name: string }>("/api/v1/device-links", { method: "POST", body: JSON.stringify(payload) }); }
   deviceLinkStatus(linkId: string, secret: string) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/status`, { headers: { "x-device-link-secret": secret } }); }
   uploadDeviceLinkPackages(linkId: string, secret: string, packages: string[]) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/key-packages`, { method: "POST", headers: { "x-device-link-secret": secret }, body: JSON.stringify({ mls_key_packages: packages }) }); }
-  uploadDeviceLinkHistory(linkId: string, history: Blob) { return this.request<{ ready: true; bytes: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history" }, body: history }); }
+  uploadDeviceLinkHistory(linkId: string, history: Blob) { return this.request<{ ready: true; bytes: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history" }, body: history }, API_TRANSFER_TIMEOUT_MS); }
   createDeviceLinkHistoryTransfer(linkId: string, manifest: { transfer_id: string; plaintext_bytes: number; shard_plaintext_bytes: number; shard_count: number }) {
     return this.request<{ transfer: DeviceHistoryTransfer }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/manifest`, { method: "PUT", body: JSON.stringify(manifest) });
   }
   uploadDeviceLinkHistoryShard(linkId: string, index: number, shard: Blob) {
-    return this.request<{ ready: true; index: number; bytes: number; status: "ready" | "acked" }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history-shard" }, body: shard });
+    return this.request<{ ready: true; index: number; bytes: number; status: "ready" | "acked" }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history-shard" }, body: shard }, API_TRANSFER_TIMEOUT_MS);
   }
   async downloadDeviceLinkHistoryShard(linkId: string, secret: string, index: number): Promise<Blob> {
-    const response = await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { headers: { "x-device-link-secret": secret } });
-    return response.blob();
+    return this.withResponse(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { headers: { "x-device-link-secret": secret } }, API_TRANSFER_TIMEOUT_MS, (response) => response.blob());
   }
   async acknowledgeDeviceLinkHistoryShard(linkId: string, secret: string, index: number): Promise<void> {
     await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "DELETE", headers: { "x-device-link-secret": secret } });
   }
   async downloadDeviceLinkHistory(linkId: string, secret: string): Promise<Blob> {
-    const response = await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { headers: { "x-device-link-secret": secret } });
-    return response.blob();
+    return this.withResponse(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { headers: { "x-device-link-secret": secret } }, API_TRANSFER_TIMEOUT_MS, (response) => response.blob());
   }
   async acknowledgeDeviceLinkHistory(linkId: string, secret: string): Promise<void> {
     await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history`, { method: "DELETE", headers: { "x-device-link-secret": secret } });
@@ -162,7 +171,7 @@ export class ApiClient {
   me() { return this.sessionRequest<SessionIdentity>("/api/v1/me"); }
   profile(userId?: string) { return this.request<{ profile: UserProfile }>(userId ? `/api/v1/users/${encodeURIComponent(userId)}/profile` : "/api/v1/profile"); }
   updateProfile(displayName: string, bio: string) { return this.request<{ profile: UserProfile }>("/api/v1/profile", { method: "PUT", body: JSON.stringify({ display_name: displayName, bio }) }); }
-  updateProfileAvatar(blob: Blob) { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "PUT", body: blob, headers: { "content-type": "image/webp" } }); }
+  updateProfileAvatar(blob: Blob) { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "PUT", body: blob, headers: { "content-type": "image/webp" } }, API_TRANSFER_TIMEOUT_MS); }
   deleteProfileAvatar() { return this.request<{ profile: UserProfile }>("/api/v1/profile/avatar", { method: "DELETE" }); }
   changePassword(currentPassword: string, newPassword: string, logoutOtherDevices: boolean) {
     return this.request<{ changed: true; other_sessions_revoked: boolean }>("/api/v1/account/password", {
@@ -239,10 +248,10 @@ export class ApiClient {
   uploadPeerRecovery(recoveryId: string, token: string, bundle: Blob) {
     return this.request<{ recovery_id: string; ready: true; ciphertext_bytes: number }>(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, {
       method: "PUT", headers: { "x-peer-recovery-token": token, "content-type": "application/vnd.edgechat.room-recovery" }, body: bundle,
-    });
+    }, API_TRANSFER_TIMEOUT_MS);
   }
   async downloadPeerRecovery(recoveryId: string): Promise<Blob> {
-    return (await this.raw(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`)).blob();
+    return this.withResponse(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, {}, API_TRANSFER_TIMEOUT_MS, (response) => response.blob());
   }
   async acknowledgePeerRecovery(recoveryId: string): Promise<void> {
     await this.raw(`/api/v1/peer-recoveries/${encodeURIComponent(recoveryId)}/bundle`, { method: "DELETE" });
@@ -273,8 +282,8 @@ export class ApiClient {
   wsTicket() { return this.request<{ ticket: string }>("/api/v1/ws-ticket", { method: "POST" }); }
 
   async acquireCompactionLease(roomId: RoomId): Promise<CompactionLease | null> {
-    const response = await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "POST" });
-    return response.status === 204 ? null : response.json() as Promise<CompactionLease>;
+    return this.withResponse(`/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "POST" }, API_CONTROL_TIMEOUT_MS,
+      (response) => response.status === 204 ? null : response.json() as Promise<CompactionLease>);
   }
   async releaseCompactionLease(roomId: RoomId, token: string): Promise<void> {
     await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/compaction/lease`, { method: "DELETE", headers: { "x-compaction-token": token } });
@@ -282,14 +291,13 @@ export class ApiClient {
 
   async uploadAttachment(roomId: RoomId, ciphertext: ArrayBuffer): Promise<{ attachment_id: string }> {
     const digest = base64Url(await crypto.subtle.digest("SHA-256", ciphertext));
-    return this.request("/api/v1/attachments", { method: "POST", headers: { "x-room-id": roomId, "x-content-sha256": digest }, body: ciphertext });
+    return this.request("/api/v1/attachments", { method: "POST", headers: { "x-room-id": roomId, "x-content-sha256": digest }, body: ciphertext }, API_TRANSFER_TIMEOUT_MS);
   }
   async abandonAttachments(attachmentIds: string[]): Promise<{ abandoned: number }> {
     return this.request("/api/v1/attachments/abandon", { method: "POST", body: JSON.stringify({ attachment_ids: attachmentIds }) });
   }
   async downloadAttachment(id: string): Promise<ArrayBuffer> {
-    const response = await this.raw(`/api/v1/attachments/${encodeURIComponent(id)}`);
-    return response.arrayBuffer();
+    return this.withResponse(`/api/v1/attachments/${encodeURIComponent(id)}`, {}, API_TRANSFER_TIMEOUT_MS, (response) => response.arrayBuffer());
   }
   async acknowledgeAttachmentRetention(id: string): Promise<{ attachment_id: string }> {
     return this.request(`/api/v1/attachments/${encodeURIComponent(id)}/retention-ack`, { method: "POST" });
@@ -308,11 +316,11 @@ export class ApiClient {
   uploadAttachmentRepair(id: string, token: string, ciphertext: ArrayBuffer) {
     return this.request<{ attachment_id: string; restored: true }>(`/api/v1/attachments/${encodeURIComponent(id)}/repair`, {
       method: "PUT", headers: { "x-repair-token": token }, body: ciphertext,
-    });
+    }, API_TRANSFER_TIMEOUT_MS);
   }
   async uploadSegment(roomId: RoomId, segmentId: string, leaseToken: string, startSeq: number, endSeq: number, bytes: ArrayBuffer): Promise<{ segment_id: string }> {
     const digest = base64Url(await crypto.subtle.digest("SHA-256", bytes));
-    return this.request(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, { method: "POST", headers: { "x-segment-id": segmentId, "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq), "x-content-sha256": digest }, body: bytes });
+    return this.request(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, { method: "POST", headers: { "x-segment-id": segmentId, "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq), "x-content-sha256": digest }, body: bytes }, API_TRANSFER_TIMEOUT_MS);
   }
   async segmentRange(roomId: RoomId, segmentId: string, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>> {
     const maximumRangeBytes = 16 * 1024 * 1024;
@@ -320,34 +328,35 @@ export class ApiClient {
       throw new Error("Invalid archive byte range");
     }
     const end = offset + length - 1;
-    const response = await this.raw(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${encodeURIComponent(segmentId)}`, { headers: { range: `bytes=${offset}-${offset + length - 1}` } });
-    const contentRange = response.headers.get("content-range")?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
-    if (response.status !== 206 || !contentRange || Number(contentRange[1]) !== offset || Number(contentRange[2]) !== end || !Number.isSafeInteger(Number(contentRange[3])) || Number(contentRange[3]) <= end) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error("Archive server returned an invalid byte range");
-    }
-    const declaredLength = response.headers.get("content-length");
-    if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) !== length)) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error("Archive range length mismatch");
-    }
-    if (!response.body) throw new Error("Archive range response has no body");
-    const reader = response.body.getReader();
-    const output = new Uint8Array(length);
-    let written = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (written + value.length > length) throw new Error("Archive range body exceeds requested length");
-        output.set(value, written); written += value.length;
+    return this.withResponse(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${encodeURIComponent(segmentId)}`, { headers: { range: `bytes=${offset}-${offset + length - 1}` } }, API_TRANSFER_TIMEOUT_MS, async (response) => {
+      const contentRange = response.headers.get("content-range")?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+      if (response.status !== 206 || !contentRange || Number(contentRange[1]) !== offset || Number(contentRange[2]) !== end || !Number.isSafeInteger(Number(contentRange[3])) || Number(contentRange[3]) <= end) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("Archive server returned an invalid byte range");
       }
-    } catch (error) {
-      await reader.cancel().catch(() => undefined);
-      throw error;
-    }
-    if (written !== length) throw new Error("Archive range body is truncated");
-    return output;
+      const declaredLength = response.headers.get("content-length");
+      if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) !== length)) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("Archive range length mismatch");
+      }
+      if (!response.body) throw new Error("Archive range response has no body");
+      const reader = response.body.getReader();
+      const output = new Uint8Array(length);
+      let written = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (written + value.length > length) throw new Error("Archive range body exceeds requested length");
+          output.set(value, written); written += value.length;
+        }
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        throw error;
+      }
+      if (written !== length) throw new Error("Archive range body is truncated");
+      return output;
+    });
   }
   acknowledgeArchiveSegmentRetention(segmentId: string) {
     return this.request<{ segment_id: string; room_id: RoomId }>(`/api/v1/archive-segments/${encodeURIComponent(segmentId)}/retention-ack`, { method: "POST" });
@@ -366,7 +375,7 @@ export class ApiClient {
   uploadArchiveRepair(segmentId: string, token: string, ciphertext: ArrayBuffer) {
     return this.request<{ segment_id: string; restored: true }>(`/api/v1/archive-segments/${encodeURIComponent(segmentId)}/repair`, {
       method: "PUT", headers: { "x-repair-token": token }, body: ciphertext,
-    });
+    }, API_TRANSFER_TIMEOUT_MS);
   }
   async subscribePush(subscription: PushSubscription): Promise<{ renewal_token: string }> {
     const json = subscription.toJSON();
@@ -375,27 +384,49 @@ export class ApiClient {
   pushSubscription() { return this.request<{ subscribed: boolean; endpoint: string | null }>("/api/v1/push/subscription"); }
   async unsubscribePush(): Promise<void> { await this.raw("/api/v1/push/subscribe", { method: "DELETE" }); }
 
-  private async raw(path: string, init: RequestInit = {}): Promise<Response> {
+  private async withResponse<T>(path: string, init: RequestInit, timeoutMs: number, consume: (response: Response) => Promise<T> | T): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("x-edgechat-client-protocol", String(PROTOCOL_VERSION));
     headers.set("x-edgechat-min-server-protocol", String(MIN_SUPPORTED_PROTOCOL_VERSION));
     if (this.token) headers.set("authorization", `Bearer ${this.token}`);
     if (typeof init.body === "string") headers.set("content-type", "application/json");
-    const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({ error: "Request failed", code: "request_failed" })) as { error: string; code: string };
-      throw new ApiError(body.error, response.status, body.code);
-    }
-    const serverVersion = response.headers.get("x-edgechat-server-protocol");
-    const minimumClientVersion = response.headers.get("x-edgechat-min-client-protocol");
-    if (serverVersion !== null || minimumClientVersion !== null) {
-      if (!serverVersion || !minimumClientVersion || !/^\d{1,6}$/.test(serverVersion) || !/^\d{1,6}$/.test(minimumClientVersion)) {
-        throw new ApiError("服务器返回了无效的协议版本", 502, "invalid_server_protocol");
+    const controller = new AbortController();
+    let timedOut = false;
+    const callerSignal = init.signal;
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) abortFromCaller();
+    else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("Request timed out", "TimeoutError"));
+    }, timeoutMs);
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ error: "Request failed", code: "request_failed" })) as { error: string; code: string };
+        throw new ApiError(body.error, response.status, body.code);
       }
-      if (Number(minimumClientVersion) > PROTOCOL_VERSION) throw new ApiError("此服务器需要更新版本的客户端", 426, "client_upgrade_required");
-      if (Number(serverVersion) < MIN_SUPPORTED_PROTOCOL_VERSION) throw new ApiError("此服务器版本过旧，请先升级服务器", 426, "server_upgrade_required");
+      const serverVersion = response.headers.get("x-edgechat-server-protocol");
+      const minimumClientVersion = response.headers.get("x-edgechat-min-client-protocol");
+      if (serverVersion !== null || minimumClientVersion !== null) {
+        if (!serverVersion || !minimumClientVersion || !/^\d{1,6}$/.test(serverVersion) || !/^\d{1,6}$/.test(minimumClientVersion)) {
+          throw new ApiError("服务器返回了无效的协议版本", 502, "invalid_server_protocol");
+        }
+        if (Number(minimumClientVersion) > PROTOCOL_VERSION) throw new ApiError("此服务器需要更新版本的客户端", 426, "client_upgrade_required");
+        if (Number(serverVersion) < MIN_SUPPORTED_PROTOCOL_VERSION) throw new ApiError("此服务器版本过旧，请先升级服务器", 426, "server_upgrade_required");
+      }
+      return await consume(response);
+    } catch (error) {
+      if (timedOut) throw new ApiTimeoutError(timeoutMs);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", abortFromCaller);
     }
-    return response;
+  }
+
+  private raw(path: string, init: RequestInit = {}): Promise<Response> {
+    return this.withResponse(path, init, API_CONTROL_TIMEOUT_MS, (response) => response);
   }
 
   private async sessionRequest<T extends SessionIdentity>(path: string, init: RequestInit = {}): Promise<T> {
@@ -404,10 +435,8 @@ export class ApiClient {
     catch (error) { throw new ApiError(error instanceof Error ? error.message : "服务器协议不兼容", 426, "server_protocol_incompatible"); }
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.raw(path, init);
-    if (response.status === 204) return undefined as T;
-    return response.json() as Promise<T>;
+  private request<T>(path: string, init: RequestInit = {}, timeoutMs = API_CONTROL_TIMEOUT_MS): Promise<T> {
+    return this.withResponse(path, init, timeoutMs, (response) => response.status === 204 ? undefined as T : response.json() as Promise<T>);
   }
 }
 
