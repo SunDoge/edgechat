@@ -39,6 +39,16 @@ export class OutboxEngine extends EventTarget {
     if (typeof globalThis.removeEventListener === "function") globalThis.removeEventListener("online", this.onlineHandler);
   }
 
+  /** True while an admitted outbox item may still update local durable state. */
+  isBusy(): boolean { return this.draining !== null; }
+
+  /** Stop admitting sends and wait for the current durable send attempt to settle. */
+  async quiesce(): Promise<void> {
+    const draining = this.draining;
+    this.stop();
+    await draining;
+  }
+
   async enqueue(...item: Parameters<LocalDatabase["enqueueOutbox"]>): Promise<void> {
     await this.db.enqueueOutbox(...item);
     this.changed();

@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
+import tailwindcss from "@tailwindcss/vite";
+import solid from "vite-plugin-solid";
 
 const configuredChrome = process.env.EDGECHAT_CHROME_PATH;
 const systemChrome = configuredChrome || [
@@ -11,6 +13,7 @@ const systemChrome = configuredChrome || [
 ].find(existsSync);
 
 export default defineConfig({
+  plugins: [tailwindcss(), solid()],
   optimizeDeps: {
     include: ["@electric-sql/pglite"],
   },

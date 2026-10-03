@@ -31,6 +31,27 @@ function database(initial: OutboxItem[]) {
 }
 
 describe("OutboxEngine", () => {
+  it("keeps tab handoff blocked until an admitted send is durably projected", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const db = database([item]);
+    const sendEvent = vi.fn(async () => { await blocked; return { event: { ...event, seq: 7 } as RoomEvent }; });
+    const engine = new OutboxEngine({ sendEvent }, db.value, () => true);
+
+    const starting = engine.start();
+    await vi.waitFor(() => expect(sendEvent).toHaveBeenCalledOnce());
+    expect(engine.isBusy()).toBe(true);
+    let quiet = false;
+    const quiescing = engine.quiesce().then(() => { quiet = true; });
+    await Promise.resolve();
+    expect(quiet).toBe(false);
+
+    release();
+    await Promise.all([starting, quiescing]);
+    expect(engine.isBusy()).toBe(false);
+    expect(db.calls).toEqual(["sending", "saved", "removed"]);
+  });
+
   it("retries the persisted envelope unchanged and removes it only after local commit", async () => {
     const db = database([item]);
     const accepted = { ...event, seq: 7 } as RoomEvent;

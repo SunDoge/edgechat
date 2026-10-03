@@ -58,6 +58,7 @@ function SecondaryTab() {
 
 function showStandby(status: StandbyStatus = "waiting"): void {
   setStandbyStatus(status);
+  root.dataset.edgechatTabState = "standby";
   replaceView(() => <SecondaryTab/>);
 }
 
@@ -66,6 +67,7 @@ async function activate(lease: TabLease): Promise<void> {
   const [token, profiles] = await Promise.all([localProfileToken(profile.profile_id), listLocalProfiles()]);
   await setActivePushProfile(profile.profile_id);
   activeLease = lease; handingOff = false;
+  root.dataset.edgechatTabState = "active";
   replaceView(() => <App localProfile={profile} localProfiles={profiles} accessToken={token}/>);
 }
 

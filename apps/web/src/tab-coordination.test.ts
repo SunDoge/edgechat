@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { acquireTabLease, awaitTabHandoff, DEVICE_STATE_LOCK, persistBeforeTabHandoff, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT, type LockProvider } from "./tab-coordination";
+import { acquireTabLease, awaitTabHandoff, DEVICE_STATE_LOCK, persistBeforeTabHandoff, TAB_HANDOFF_CANCEL_EVENT, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT, type LockProvider } from "./tab-coordination";
 
 describe("single active tab coordination", () => {
   it("holds the exclusive device-state lock until the lease is released", async () => {
@@ -33,6 +33,13 @@ describe("single active tab coordination", () => {
     const denied = awaitTabHandoff();
     window.dispatchEvent(new Event(TAB_HANDOFF_DENIED_EVENT));
     await expect(denied).resolves.toBe("denied");
+
+    const cancelled = vi.fn();
+    window.addEventListener(TAB_HANDOFF_CANCEL_EVENT, cancelled, { once: true });
+    const timedOut = awaitTabHandoff(10);
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(timedOut).resolves.toBe("timeout");
+    expect(cancelled).toHaveBeenCalledOnce();
     vi.useRealTimers();
   });
 

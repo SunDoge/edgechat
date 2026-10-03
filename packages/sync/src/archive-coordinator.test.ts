@@ -13,6 +13,18 @@ const events = Array.from({ length: 3 }, (_, index): RoomEvent => ({
 }));
 
 describe("ArchiveCoordinator", () => {
+  it("refuses new compaction work after the owning tab closes", async () => {
+    const api = { acquireCompactionLease: vi.fn() } as unknown as ApiClient;
+    const builder = { build: vi.fn(), close: vi.fn() } as unknown as ArchiveSegmentBuilder;
+    const coordinator = new ArchiveCoordinator(api, {} as LocalDatabase, builder, async () => new Uint8Array(64));
+
+    expect(coordinator.isBusy()).toBe(false);
+    coordinator.close();
+    await expect(coordinator.compact(roomId)).resolves.toBe(false);
+    expect(api.acquireCompactionLease).not.toHaveBeenCalled();
+    expect(builder.close).toHaveBeenCalledOnce();
+  });
+
   it("wraps the key to room devices before building and uploading a leased range", async () => {
     const calls: string[] = [];
     const api = {

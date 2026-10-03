@@ -630,6 +630,7 @@ export class LocalProjectionPersistenceError extends Error {
 
 export class SyncEngine extends EventTarget {
   private running = false;
+  private startTask: Promise<void> | null = null;
   private sockets = new Map<RoomId, WebSocket>();
   private reconnects = new Map<RoomId, number>();
   private reconnectTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
@@ -638,6 +639,7 @@ export class SyncEngine extends EventTarget {
   private disconnectedRooms = new Set<RoomId>();
   private historyBlockedRooms = new Set<RoomId>();
   private ingestQueue: Promise<void> = Promise.resolve();
+  private pendingIngests = 0;
   private catchUpTask: Promise<void> | null = null;
   private resumeTask: Promise<void> | null = null;
   private socketProbes = new Map<RoomId, { socket: WebSocket; timer: ReturnType<typeof setTimeout>; promise: Promise<boolean>; resolve: (alive: boolean) => void }>();
@@ -661,24 +663,52 @@ export class SyncEngine extends EventTarget {
       : null;
   }
 
-  async start(): Promise<void> {
-    if (this.running) return;
+  start(): Promise<void> {
+    if (this.startTask) return this.startTask;
+    if (this.running) return Promise.resolve();
     this.running = true;
+    const task = this.startOnce().finally(() => { if (this.startTask === task) this.startTask = null; });
+    this.startTask = task;
+    return task;
+  }
+
+  private async startOnce(): Promise<void> {
     this.networkEvents?.addEventListener("online", this.onlineHandler);
     try {
       for (;;) {
+        if (!this.running) break;
         const staged = await this.db.stagedDecryptedEvents?.(500) ?? [];
         if (!staged.length) break;
-        for (const event of staged) await this.ingest(event);
+        for (const event of staged) {
+          if (!this.running) break;
+          await this.ingest(event);
+        }
         if (staged.length < 500) break;
       }
+      if (!this.running) return;
       for (const roomId of await this.db.deferredRoomIds?.() ?? []) {
+        if (!this.running) break;
         const state = await this.db.roomSequenceState(roomId);
         this.blockRoom(new RoomHistoryTransferRequiredError(roomId, state?.processed_through_seq ?? 0));
       }
-      await this.catchUp();
+      if (this.running) await this.catchUp();
     }
     catch (error) { this.connectionError(error); }
+  }
+
+  /** True while this tab may still mutate durable sync or MLS projection state. */
+  isBusy(): boolean {
+    return this.startTask !== null || this.catchUpTask !== null || this.resumeTask !== null
+      || this.connecting.size > 0 || this.pendingIngests > 0;
+  }
+
+  /** Stop new work and wait until every already-admitted state write has settled. */
+  async quiesce(): Promise<void> {
+    const pending = [this.startTask, this.catchUpTask, this.resumeTask, ...this.connecting.values()]
+      .filter((task): task is Promise<void> => task !== null);
+    this.stop();
+    await Promise.allSettled(pending);
+    await this.ingestQueue;
   }
 
   stop(): void {
@@ -758,6 +788,7 @@ export class SyncEngine extends EventTarget {
       this.sockets.set(roomId, socket);
       socket.onopen = () => { this.reconnects.set(roomId, 0); this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: true } })); };
       socket.onmessage = (message) => {
+        if (!this.running || this.sockets.get(roomId) !== socket) return;
         try {
           const frame = JSON.parse(String(message.data)) as SocketFrame;
           if (frame.type === "room.event") void this.ingest(frame.event).catch((error) => this.connectionError(error));
@@ -970,6 +1001,7 @@ export class SyncEngine extends EventTarget {
   }
 
   private ingest(event: RoomEvent): Promise<void> {
+    this.pendingIngests += 1;
     const task = this.ingestQueue.then(async () => {
       if (this.historyBlockedRooms.has(event.room_id)) {
         await this.db.deferRoomEvent(event);
@@ -982,7 +1014,7 @@ export class SyncEngine extends EventTarget {
       }
     });
     this.ingestQueue = task.catch(() => undefined);
-    return task;
+    return task.finally(() => { this.pendingIngests -= 1; });
   }
 
   private async ingestOne(event: RoomEvent): Promise<void> {

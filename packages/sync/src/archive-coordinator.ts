@@ -14,6 +14,7 @@ export type ArchiveKeyEnvelopeBuilder = (input: { room_id: RoomId; segment_id: s
 
 export class ArchiveCoordinator extends EventTarget {
   private readonly active = new Set<RoomId>();
+  private closed = false;
 
   constructor(
     private readonly api: ApiClient,
@@ -24,7 +25,7 @@ export class ArchiveCoordinator extends EventTarget {
   ) { super(); }
 
   async compact(roomId: RoomId): Promise<boolean> {
-    if (this.active.has(roomId)) return false;
+    if (this.closed || this.active.has(roomId)) return false;
     this.active.add(roomId);
     let lease: CompactionLease | null = null;
     let cached = false; let uploaded = false;
@@ -86,7 +87,13 @@ export class ArchiveCoordinator extends EventTarget {
     return completed;
   }
 
-  close(): void { this.builder.close(); }
+  isBusy(): boolean { return this.active.size > 0; }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.builder.close();
+  }
 
   private async eventsForLease(lease: CompactionLease): Promise<RoomEvent[]> {
     const events = new Map<number, RoomEvent>();

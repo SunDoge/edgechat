@@ -23,12 +23,54 @@ async function documentLockProvider(label: string): Promise<{ frame: HTMLIFrameE
   return { frame, provider: locks as unknown as LockProvider };
 }
 
+async function appDocument(label: string): Promise<HTMLIFrameElement> {
+  const frame = document.createElement("iframe");
+  frame.hidden = true;
+  frame.src = `/?tab-handoff-test=${encodeURIComponent(label)}-${crypto.randomUUID()}`;
+  frames.add(frame);
+  const loaded = new Promise<void>((resolve, reject) => {
+    frame.addEventListener("load", () => resolve(), { once: true });
+    frame.addEventListener("error", () => reject(new Error(`Unable to start ${label} application document`)), { once: true });
+  });
+  document.body.append(frame);
+  await loaded;
+  return frame;
+}
+
+async function waitForApp(frame: HTMLIFrameElement, predicate: (document: Document) => boolean, detail: string): Promise<Document> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const current = frame.contentDocument;
+    if (current && predicate(current)) return current;
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for ${detail}`);
+}
+
 afterEach(() => {
   for (const frame of frames) frame.remove();
   frames.clear();
 });
 
 describe("real browser multi-document coordination", () => {
+  it("hands the complete application from its active document to a standby document", async () => {
+    const primary = await appDocument("primary-app");
+    await waitForApp(primary, (current) => current.querySelector("#root")?.getAttribute("data-edgechat-tab-state") === "active"
+      && current.body.textContent?.includes("创建账户") === true, "the primary application");
+
+    const secondary = await appDocument("secondary-app");
+    const standby = await waitForApp(secondary, (current) => current.querySelector("#root")?.getAttribute("data-edgechat-tab-state") === "standby", "the standby application");
+    const continueHere = [...standby.querySelectorAll("button")].find((button) => button.textContent?.includes("在此页面继续"));
+    expect(continueHere).toBeTruthy();
+    (continueHere as HTMLButtonElement).click();
+
+    await Promise.all([
+      waitForApp(primary, (current) => current.querySelector("#root")?.getAttribute("data-edgechat-tab-state") === "standby", "the old application to stand by"),
+      waitForApp(secondary, (current) => current.querySelector("#root")?.getAttribute("data-edgechat-tab-state") === "active"
+        && current.body.textContent?.includes("创建账户") === true, "the promoted application"),
+    ]);
+  });
+
   it("allows exactly one same-origin document to own device state and hands it off in order", async () => {
     const primary = await documentLockProvider("primary");
     const secondary = await documentLockProvider("secondary");

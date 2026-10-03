@@ -3,6 +3,7 @@ export const TAB_CHANNEL = "edgechat-tab-coordination-v1";
 export const PREPARE_TAB_HANDOFF_EVENT = "edgechat:prepare-tab-handoff";
 export const TAB_HANDOFF_READY_EVENT = "edgechat:tab-handoff-ready";
 export const TAB_HANDOFF_DENIED_EVENT = "edgechat:tab-handoff-denied";
+export const TAB_HANDOFF_CANCEL_EVENT = "edgechat:tab-handoff-cancel";
 
 export type TabMessage =
   | { type: "focus-primary"; from: string }
@@ -62,7 +63,10 @@ export function awaitTabHandoff(timeoutMs = 2_000): Promise<"ready" | "denied" |
     const denied = () => finish("denied");
     window.addEventListener(TAB_HANDOFF_READY_EVENT, ready, { once: true });
     window.addEventListener(TAB_HANDOFF_DENIED_EVENT, denied, { once: true });
-    timer = window.setTimeout(() => finish("timeout"), timeoutMs);
+    timer = window.setTimeout(() => {
+      window.dispatchEvent(new Event(TAB_HANDOFF_CANCEL_EVENT));
+      finish("timeout");
+    }, timeoutMs);
     window.dispatchEvent(new Event(PREPARE_TAB_HANDOFF_EVENT));
   });
 }

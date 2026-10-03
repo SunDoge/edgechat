@@ -64,7 +64,7 @@ import { beginSafePwaUpdate } from "./pwa-update-safety";
 import { requestPwaInstall, subscribePwaInstall, type PwaInstallState } from "./pwa-install";
 import { cachedSessionForDevice, canUseOfflineSession, offlineSessionSnapshot, validCachedRooms } from "./offline-session";
 import { canApplyHistoryNavigation, countIncomingMessagesAfter, shouldMarkIncomingRead } from "./history-navigation";
-import { persistBeforeTabHandoff, PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT } from "./tab-coordination";
+import { persistBeforeTabHandoff, PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_CANCEL_EVENT, TAB_HANDOFF_DENIED_EVENT, TAB_HANDOFF_READY_EVENT } from "./tab-coordination";
 import { localRetentionCoverage } from "./retention-coverage";
 import { AttachmentCiphertextCache } from "./attachment-cache";
 import { AttachmentCiphertextLoader } from "./attachment-loader";
@@ -209,6 +209,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   let draftRemoteSyncTimer: number | undefined;
   let composerRevision = 0;
   let draftWriteTail: Promise<void> = Promise.resolve();
+  let pendingMlsMutations = 0;
+  let tabHandoffPreparation: Promise<void> | null = null;
+  let tabHandoffCancelled = false;
   let typingRoomRef: RoomId | null = null;
   let lastTypingSentAt = 0;
   const typingExpiryTimers = new Map<string, number>();
@@ -341,26 +344,44 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     return { attachment_id: ids[0], ...(sourceIds.length ? { forward_source_attachment_id: sourceIds[0] } : {}) };
   }
 
+  function tabHandoffBlocked(): boolean {
+    return loading() || files().length > 0 || voiceRecording() || sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy()
+      || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen() || pendingMlsMutations > 0
+      || Boolean(roomMembershipRun || accountRemovalRun || savedRoomCreation || keyPackageRefill || retentionRun || messageExpiryRun
+        || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun || peerRecoveryRun || draftSyncRun)
+      || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
+      || Boolean(syncRef?.isBusy() || outboxRef?.isBusy() || archiveRef?.isBusy());
+  }
+
   onMount(() => {
     const unsubscribeUpdates = subscribePwaUpdates(setPwaUpdateState);
     const unsubscribeInstall = subscribePwaInstall(setPwaInstallState);
+    const cancelHandoff = () => { tabHandoffCancelled = true; };
     const prepareHandoff = () => {
-      const sensitiveOperation = sendBusy() || accountExportBusy() || conversationExportBusy() || historyClearBusy() || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || accountDeletionOpen()
-        || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
-        || Boolean(accountRemovalRun || keyPackageRefill || retentionRun || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun);
-      if (files().length || voiceRecording() || sensitiveOperation) {
+      if (tabHandoffPreparation || tabHandoffBlocked()) {
         window.dispatchEvent(new Event(TAB_HANDOFF_DENIED_EVENT));
         return;
       }
       stopTyping();
-      void persistBeforeTabHandoff(() => flushComposerDraft()).then((result) => {
-        window.dispatchEvent(new Event(result === "ready" ? TAB_HANDOFF_READY_EVENT : TAB_HANDOFF_DENIED_EVENT));
-      });
+      tabHandoffCancelled = false;
+      tabHandoffPreparation = (async () => {
+        const result = await persistBeforeTabHandoff(() => flushComposerDraft());
+        if (tabHandoffCancelled) return;
+        if (result !== "ready" || tabHandoffBlocked()) {
+          window.dispatchEvent(new Event(TAB_HANDOFF_DENIED_EVENT));
+          return;
+        }
+        const sync = syncRef; const outbox = outboxRef; const archive = archiveRef;
+        archive?.close();
+        await Promise.all([sync?.quiesce(), outbox?.quiesce()]);
+        window.dispatchEvent(new Event(TAB_HANDOFF_READY_EVENT));
+      })().finally(() => { tabHandoffPreparation = null; });
     };
     window.addEventListener(PREPARE_TAB_HANDOFF_EVENT, prepareHandoff);
+    window.addEventListener(TAB_HANDOFF_CANCEL_EVENT, cancelHandoff);
     const manageProfiles = () => { setDevicesOpen(false); setLocalProfilesOpen(true); };
     window.addEventListener("edgechat:manage-local-profiles", manageProfiles);
-    onCleanup(() => { unsubscribeUpdates(); unsubscribeInstall(); window.removeEventListener(PREPARE_TAB_HANDOFF_EVENT, prepareHandoff); window.removeEventListener("edgechat:manage-local-profiles", manageProfiles); });
+    onCleanup(() => { unsubscribeUpdates(); unsubscribeInstall(); window.removeEventListener(PREPARE_TAB_HANDOFF_EVENT, prepareHandoff); window.removeEventListener(TAB_HANDOFF_CANCEL_EVENT, cancelHandoff); window.removeEventListener("edgechat:manage-local-profiles", manageProfiles); });
   });
 
   createEffect(() => {
@@ -2061,9 +2082,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   function submitComposer() { return editingMessage() ? sendEdit() : sendMessage(); }
 
   function mutateMls<T>(operation: () => Promise<T>): Promise<T> {
+    pendingMlsMutations += 1;
     const result = mlsMutationTail.then(operation);
     mlsMutationTail = result.then(() => undefined, () => undefined);
-    return result;
+    return result.finally(() => { pendingMlsMutations -= 1; });
   }
 
   function replenishKeyPackages(currentMls: OpenMlsMessagingCore): Promise<void> {

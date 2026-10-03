@@ -505,6 +505,28 @@ describe("SyncEngine event ingestion", () => {
     expect(cursor).toBe(4);
   });
 
+  it("does not report a tab-safe idle state until admitted durable sync has settled", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const sync = vi.fn(async () => { await blocked; return { next_cursor: 9, has_more: false, items: [] }; });
+    let cursor = 0;
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine({ sync } as unknown as ApiClient, db, async () => null, undefined, null);
+
+    const starting = engine.start();
+    await vi.waitFor(() => expect(sync).toHaveBeenCalledOnce());
+    expect(engine.isBusy()).toBe(true);
+    let quiet = false;
+    const quiescing = engine.quiesce().then(() => { quiet = true; });
+    await Promise.resolve();
+    expect(quiet).toBe(false);
+
+    release();
+    await Promise.all([starting, quiescing]);
+    expect(cursor).toBe(9);
+    expect(engine.isBusy()).toBe(false);
+  });
+
   it("recovers an offline startup through durable sync before reconnecting rooms", async () => {
     const network = new EventTarget();
     let offline = true; let cursor = 0;
