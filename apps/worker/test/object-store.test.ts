@@ -29,6 +29,7 @@ describe("R2 object-store contract", () => {
     const ranged = await store().get(key, { rangeHeader: "bytes=2-4" });
     expect(ranged).toMatchObject({ key, size: value.byteLength, range: { offset: 2, length: 3 } });
     expect(await bytes(ranged!.body)).toEqual([30, 40, 50]);
+    await expect(store().get(key, { rangeHeader: "bytes=4-2" })).rejects.toBeInstanceOf(TypeError);
 
     await store().delete([key, `${key}.already-missing`]);
     expect(await store().head(key)).toBeNull();
@@ -113,6 +114,38 @@ describe("SigV4 S3 object-store contract", () => {
     await expect(ignoresRange.get("range.bin", { rangeHeader: "bytes=0-0" })).rejects.toMatchObject({
       name: "ObjectStoreRequestError", operation: "get",
     } satisfies Partial<ObjectStoreRequestError>);
+  });
+
+  it("rejects mismatched or malformed ranges before ciphertext reaches the decoder", async () => {
+    const wrongRange = new S3ObjectStore(s3Config, async () => new Response(new Uint8Array([2]), {
+      status: 206, headers: { etag: '"etag"', "content-length": "1", "content-range": "bytes 1-1/3" },
+    }));
+    await expect(wrongRange.get("range.bin", { rangeHeader: "bytes=0-0" })).rejects.toThrow("does not exactly match");
+
+    const wrongLength = new S3ObjectStore(s3Config, async () => new Response(new Uint8Array([1, 2]), {
+      status: 206, headers: { etag: '"etag"', "content-length": "1", "content-range": "bytes 0-1/3" },
+    }));
+    await expect(wrongLength.get("range.bin", { rangeHeader: "bytes=0-1" })).rejects.toThrow("does not exactly match");
+
+    let requests = 0;
+    const malformed = new S3ObjectStore(s3Config, async () => { requests += 1; return new Response(); });
+    await expect(malformed.get("range.bin", { rangeHeader: "bytes=2-1" })).rejects.toBeInstanceOf(TypeError);
+    await expect(malformed.get("range.bin", { rangeHeader: "bytes=0-1,3-4" })).rejects.toBeInstanceOf(TypeError);
+    expect(requests).toBe(0);
+  });
+
+  it("accepts exact open-ended and suffix ranges", async () => {
+    const responses = [
+      new Response(new Uint8Array([30, 40, 50, 60]), { status: 206, headers: {
+        etag: '"open"', "content-length": "4", "content-range": "bytes 2-5/6",
+      } }),
+      new Response(new Uint8Array([50, 60]), { status: 206, headers: {
+        etag: '"suffix"', "content-length": "2", "content-range": "bytes 4-5/6",
+      } }),
+    ];
+    const ranged = new S3ObjectStore(s3Config, async () => responses.shift()!);
+    expect((await ranged.get("range.bin", { rangeHeader: "bytes=2-" }))?.range).toEqual({ offset: 2, length: 4 });
+    expect((await ranged.get("range.bin", { rangeHeader: "bytes=-2" }))?.range).toEqual({ offset: 4, length: 2 });
   });
 
   it("maps provider digest failures without exposing response bodies", async () => {

@@ -108,9 +108,17 @@ export class R2ObjectStore implements ObjectStore {
   }
 
   async get(key: string, options: { rangeHeader?: string } = {}): Promise<ObjectStoreBodyObject | null> {
+    const requestedRange = options.rangeHeader ? parseRangeHeader(options.rangeHeader) : undefined;
     const range = options.rangeHeader ? new Headers({ range: options.rangeHeader }) : undefined;
     const stored = await this.bucket.get(key, range ? { range } : undefined);
-    return stored ? bodyView(stored) : null;
+    if (!stored) return null;
+    const object = bodyView(stored);
+    if (requestedRange && (!object.range || !matchesRange(requestedRange, object.range.offset,
+      object.range.offset + object.range.length - 1, object.size))) {
+      await object.body.cancel().catch(() => undefined);
+      throw new ObjectStoreRequestError("get", 502, "R2 returned a byte range that does not exactly match the request");
+    }
+    return object;
   }
 
   async head(key: string): Promise<ObjectStoreObject | null> {
@@ -142,6 +150,37 @@ function validSize(value: string | null): number | null {
   if (!value || !/^\d+$/.test(value)) return null;
   const size = Number(value);
   return Number.isSafeInteger(size) ? size : null;
+}
+
+type RequestedRange =
+  | { kind: "bounded"; start: number; end: number }
+  | { kind: "open"; start: number }
+  | { kind: "suffix"; length: number };
+
+function parseRangeHeader(value: string): RequestedRange {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value);
+  if (!match || (!match[1] && !match[2])) throw new TypeError("Object-store Range must contain exactly one valid byte range");
+  if (!match[1]) {
+    const length = Number(match[2]);
+    if (!Number.isSafeInteger(length) || length <= 0) throw new TypeError("Object-store suffix Range must be a positive safe integer");
+    return { kind: "suffix", length };
+  }
+  const start = Number(match[1]);
+  if (!Number.isSafeInteger(start)) throw new TypeError("Object-store Range start must be a safe integer");
+  if (!match[2]) return { kind: "open", start };
+  const end = Number(match[2]);
+  if (!Number.isSafeInteger(end) || end < start) throw new TypeError("Object-store Range end must be a safe integer not below its start");
+  return { kind: "bounded", start, end };
+}
+
+function matchesRange(requested: RequestedRange, offset: number, end: number, size: number): boolean {
+  if (size <= 0) return false;
+  if (requested.kind === "suffix") {
+    const length = Math.min(requested.length, size);
+    return offset === size - length && end === size - 1;
+  }
+  if (requested.start >= size || offset !== requested.start) return false;
+  return end === (requested.kind === "open" ? size - 1 : Math.min(requested.end, size - 1));
 }
 
 function metadataFromHeaders(headers: Headers): Record<string, string> {
@@ -249,6 +288,7 @@ export class S3ObjectStore implements ObjectStore {
   }
 
   async get(key: string, options: { rangeHeader?: string } = {}): Promise<ObjectStoreBodyObject | null> {
+    const requestedRange = options.rangeHeader ? parseRangeHeader(options.rangeHeader) : undefined;
     const headers = new Headers({ "x-amz-content-sha256": EMPTY_SHA256 });
     if (options.rangeHeader) headers.set("range", options.rangeHeader);
     const response = await this.request(this.url(key), { method: "GET", headers });
@@ -257,16 +297,18 @@ export class S3ObjectStore implements ObjectStore {
     if (!response.body) throw new ObjectStoreRequestError("get", response.status, "S3 GET response omitted its body");
     const entityTag = response.headers.get("etag");
     if (!entityTag) { await response.body.cancel().catch(() => undefined); throw new ObjectStoreRequestError("get", response.status, "S3 GET response omitted ETag"); }
-    if (options.rangeHeader) {
-      const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
+    if (requestedRange) {
+      const match = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(response.headers.get("content-range") ?? "");
       if (response.status !== 206 || !match) {
         await response.body.cancel().catch(() => undefined);
         throw new ObjectStoreRequestError("get", response.status, "S3 did not honor the requested byte range");
       }
       const offset = Number(match[1]); const end = Number(match[2]); const size = Number(match[3]);
-      if (![offset, end, size].every(Number.isSafeInteger) || offset > end || end >= size) {
+      const contentLength = validSize(response.headers.get("content-length"));
+      if (![offset, end, size].every(Number.isSafeInteger) || offset > end || end >= size
+        || contentLength !== end - offset + 1 || !matchesRange(requestedRange, offset, end, size)) {
         await response.body.cancel().catch(() => undefined);
-        throw new ObjectStoreRequestError("get", response.status, "S3 returned an invalid Content-Range");
+        throw new ObjectStoreRequestError("get", response.status, "S3 returned a byte range that does not exactly match the request");
       }
       return { key, size, entityTag, metadata: metadataFromHeaders(response.headers), body: response.body, range: { offset, length: end - offset + 1 } };
     }
