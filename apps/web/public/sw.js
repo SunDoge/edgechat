@@ -132,7 +132,11 @@ self.addEventListener("fetch", event => {
   }
   if (event.request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
   const cacheKey = event.request.mode === "navigate" ? new Request("/") : event.request;
-  if (url.pathname.startsWith("/assets/") && !event.request.headers.has("range")) {
+  if (url.pathname.startsWith("/assets/")) {
+    // A full cached 200 response must never satisfy a byte-range request.
+    // Let the browser/network handle ranges; offline callers must fail instead
+    // of receiving subtly invalid framing for Wasm or other binary assets.
+    if (event.request.headers.has("range")) return;
     event.respondWith(caches.match(cacheKey).then(async hit => {
       if (hit) return hit;
       const response = await fetch(event.request);

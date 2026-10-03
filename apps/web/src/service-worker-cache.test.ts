@@ -21,6 +21,7 @@ describe("service worker application shell", () => {
 
   it("uses cache-first immutable assets and never substitutes HTML for a missing asset", () => {
     expect(source).toContain('url.pathname.startsWith("/assets/")');
+    expect(source).toContain('if (event.request.headers.has("range")) return;');
     expect(source).toContain('if (event.request.mode === "navigate")');
     expect(source).toContain("throw error");
     expect(source).not.toContain('hit || caches.match("/")');
