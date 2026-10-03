@@ -41,10 +41,25 @@ async function removeProfileStorage(profileId: string): Promise<void> {
     const settings = transaction.objectStore("settings");
     settings.delete(`active-data-dir:${profileId}`);
     settings.delete(`active-restore-id:${profileId}`);
+    settings.delete(`stale-data-dirs:${profileId}`);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   });
   config.close();
+}
+
+async function profileStorageNames(profileId: string): Promise<string[]> {
+  const names: string[] = [];
+  if (expectedPersistentBackend() === "opfs") {
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) if (name.includes(profileId)) names.push(`opfs:${name}`);
+  }
+  if (typeof indexedDB.databases === "function") {
+    for (const database of await indexedDB.databases()) {
+      if (database.name?.includes(profileId)) names.push(`idb:${database.name}`);
+    }
+  }
+  return names.sort();
 }
 
 function expectedPersistentBackend(): "opfs" | "indexeddb" {
@@ -63,6 +78,30 @@ afterEach(async () => {
 });
 
 describe("real browser local database", () => {
+  it("removes rejected restore slots after account validation fails", async () => {
+    const sourceProfileId = crypto.randomUUID();
+    const targetProfileId = crypto.randomUUID();
+    profiles.add(sourceProfileId);
+    profiles.add(targetProfileId);
+
+    const source = new LocalDatabase(sourceProfileId);
+    let snapshot: Blob;
+    try {
+      await source.bindAccount("@restore-source:example.com", "Restore Source");
+      snapshot = await source.backupSnapshot();
+    } finally { await source.close(); }
+
+    const target = new LocalDatabase(targetProfileId);
+    try {
+      await expect(target.stageRestoreSnapshot(snapshot, "@different-account:example.com"))
+        .rejects.toThrow("备份中的本机消息库不属于这个账户");
+    } finally { await target.close(); }
+    const cleaner = new LocalDatabase(targetProfileId);
+    try { await cleaner.query("SELECT 1"); }
+    finally { await cleaner.close(); }
+    expect((await profileStorageNames(targetProfileId)).filter((name) => name.includes("-restore-"))).toEqual([]);
+  });
+
   it("atomically persists and verifies a restored database slot across worker restart", async () => {
     const sourceProfileId = crypto.randomUUID();
     const targetProfileId = crypto.randomUUID();

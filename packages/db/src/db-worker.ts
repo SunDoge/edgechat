@@ -70,12 +70,78 @@ async function commitRestoredDataDir(profileId: string, value: string, restoreId
   config.close();
 }
 
+async function removeStagedDataDir(dataDir: string): Promise<void> {
+  if (dataDir.startsWith("opfs-ahp://")) {
+    const root = await navigator.storage.getDirectory();
+    const name = dataDir.slice("opfs-ahp://".length);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await root.removeEntry(name, { recursive: true });
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "NotFoundError") return;
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
+  if (dataDir.startsWith("idb://")) {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(`/pglite/${dataDir.slice("idb://".length)}`);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error("Staged local database deletion was blocked"));
+    });
+  }
+}
+
+async function staleDataDirs(profileId: string): Promise<string[]> {
+  const config = await configDatabase();
+  const value = await new Promise<unknown>((resolve, reject) => {
+    const request = config.transaction("settings").objectStore("settings").get(`stale-data-dirs:${profileId}`);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  config.close();
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && /^(?:opfs-ahp|idb):\/\/edgechat-local-/.test(item));
+}
+
+async function saveStaleDataDirs(profileId: string, dataDirs: readonly string[]): Promise<void> {
+  const config = await configDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = config.transaction("settings", "readwrite");
+    const settings = transaction.objectStore("settings");
+    if (dataDirs.length) settings.put([...new Set(dataDirs)], `stale-data-dirs:${profileId}`);
+    else settings.delete(`stale-data-dirs:${profileId}`);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+  config.close();
+}
+
+async function rememberStaleDataDir(profileId: string, dataDir: string): Promise<void> {
+  await saveStaleDataDirs(profileId, [...await staleDataDirs(profileId), dataDir]);
+}
+
+async function cleanupStaleDataDirs(profileId: string): Promise<void> {
+  const remaining: string[] = [];
+  for (const dataDir of await staleDataDirs(profileId)) {
+    try { await removeStagedDataDir(dataDir); }
+    catch { remaining.push(dataDir); }
+  }
+  await saveStaleDataDirs(profileId, remaining);
+}
+
 function databaseFor(profileId: string): Promise<PGlite> {
   if (!PROFILE_ID.test(profileId)) throw new Error("Invalid local profile identifier");
   const normalized = profileId.toLowerCase();
   if (openedProfileId && openedProfileId !== normalized) throw new Error("Database worker cannot cross local profile boundaries");
   openedProfileId = normalized;
   database ??= (async () => {
+    await cleanupStaleDataDirs(normalized);
     const configured = await activeDataDir(normalized);
     if (configured) {
       storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
@@ -126,19 +192,28 @@ async function stageRestoredDatabase(request: Extract<DbRequest, { kind: "restor
   for (const backend of backends) {
     const slot = `edgechat-local-${profileId}-restore-${crypto.randomUUID()}`;
     const dataDir = backend === "opfs" ? `opfs-ahp://${slot}` : `idb://${slot}`;
-    const restored = new PGlite(dataDir, { loadDataDir: request.snapshot });
+    let restored: PGlite | null = null;
     try {
+      restored = new PGlite(dataDir, { loadDataDir: request.snapshot });
       await restored.waitReady;
       await migrateLocalSchema(restored);
       const result = await restored.query<{ user_id: string }>("SELECT user_id FROM account_state WHERE id = 1");
       if (result.rows.length !== 1 || result.rows[0].user_id !== request.expectedUserId) throw new Error("备份中的本机消息库不属于这个账户");
       if (request.kind === "restore-device-history") await restored.exec(LOCAL_PREPARE_LINKED_DEVICE_HISTORY);
       await restored.close();
+      restored = null;
       await commitRestoredDataDir(profileId, dataDir, request.restoreId);
       return backend;
     } catch (error) {
       lastError = error;
-      await restored.close().catch(() => undefined);
+      if (restored && !restored.closed) await restored.close().catch(() => undefined);
+      restored = null;
+      await removeStagedDataDir(dataDir).catch(async (cleanupError) => {
+        console.warn("Failed to remove rejected local restore slot", cleanupError);
+        await rememberStaleDataDir(profileId, dataDir).catch((recordError) => {
+          console.warn("Failed to record rejected local restore slot for later cleanup", recordError);
+        });
+      });
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Unable to stage the restored local database");
