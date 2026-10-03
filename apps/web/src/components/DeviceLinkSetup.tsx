@@ -11,6 +11,7 @@ import { deviceHistoryStagingFor } from "../device-history-staging";
 import { AttachmentCiphertextCache } from "../attachment-cache";
 import { ArchiveSegmentCiphertextCache } from "../archive-segment-cache";
 import { openDeviceHistoryBundle } from "../device-history-bundle";
+import { useI18n } from "../i18n";
 
 type Stage = "preparing" | "waiting" | "approved" | "joining" | "error";
 
@@ -22,6 +23,7 @@ export function DeviceLinkSetup(props: {
   onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const [stage, setStage] = createSignal<Stage>("preparing");
   const [pending, setPending] = createSignal<PendingDeviceLink | null>(null);
   const [fingerprint, setFingerprint] = createSignal("");
@@ -61,7 +63,7 @@ export function DeviceLinkSetup(props: {
       await persistMlsState();
       const result = await props.api.createDeviceLink({
         device_id: identity.deviceId,
-        display_name: navigator.userAgent.includes("Mobile") ? "新手机" : "新浏览器",
+        display_name: navigator.userAgent.includes("Mobile") ? t("deviceLink.device.mobile") : t("deviceLink.device.desktop"),
         ...publicKeys,
         mls_key_packages: packages,
       });
@@ -83,12 +85,12 @@ export function DeviceLinkSetup(props: {
   }
 
   async function finishLink(current: PendingDeviceLink, nextStatus: DeviceLinkStatus): Promise<void> {
-    if (!identity || !mls || !nextStatus.rooms) throw new Error("链接信息不完整，请在旧设备上重试");
+    if (!identity || !mls || !nextStatus.rooms) throw new Error(t("deviceLink.error.incomplete"));
     setStage("joining");
     for (const room of nextStatus.rooms) {
       if (!room.encrypted_state || mls.hasGroup(room.room_id)) continue;
       const packet = JSON.parse(room.encrypted_state) as { version: number; welcome: string; ratchet_tree: string };
-      if (packet.version !== 1 || !packet.welcome || !packet.ratchet_tree) throw new Error("收到的对话加入凭证无效");
+      if (packet.version !== 1 || !packet.welcome || !packet.ratchet_tree) throw new Error(t("deviceLink.error.invalidWelcome"));
       mls.joinGroup(packet.welcome, packet.ratchet_tree);
       await persistMlsState();
     }
@@ -103,8 +105,8 @@ export function DeviceLinkSetup(props: {
       for (let index = 0; index < transfer.shard_count; index += 1) {
         let plaintext = await deviceHistoryStaging.targetPlaintextShard(current.link_id, index);
         if (!plaintext) {
-          if (acknowledged.has(index)) throw new Error("本机已清除部分暂存历史，请重新发起设备链接");
-          if (!ready.has(index)) throw new Error("设备历史分片尚未上传完整");
+          if (acknowledged.has(index)) throw new Error(t("deviceLink.error.localShardMissing"));
+          if (!ready.has(index)) throw new Error(t("deviceLink.error.remoteShardMissing"));
           const sealed = await props.api.downloadDeviceLinkHistoryShard(current.link_id, current.secret, index);
           plaintext = await openDeviceHistoryShard(sealed, manifest, index, context, identity);
           await deviceHistoryStaging.saveTargetPlaintextShard(current.link_id, index, plaintext);
@@ -113,9 +115,9 @@ export function DeviceLinkSetup(props: {
         plaintextParts.push(plaintext);
       }
       historySnapshot = new Blob(plaintextParts, { type: "application/gzip" });
-      if (historySnapshot.size !== manifest.plaintext_bytes) throw new Error("设备历史快照不完整");
+      if (historySnapshot.size !== manifest.plaintext_bytes) throw new Error(t("deviceLink.error.incompleteHistory"));
     } else if (nextStatus.history_transfer_ready) {
-      if (!nextStatus.history_source_device_id) throw new Error("历史传输缺少来源设备信息");
+      if (!nextStatus.history_source_device_id) throw new Error(t("deviceLink.error.missingSource"));
       setStage("joining");
       const sealed = await props.api.downloadDeviceLinkHistory(current.link_id, current.secret);
       historySnapshot = await openDeviceHistory(sealed, {
@@ -133,16 +135,16 @@ export function DeviceLinkSetup(props: {
       await props.db.stageLinkedDeviceHistory(bundle.databaseSnapshot, session.user_id);
       for (const attachment of bundle.attachments) {
         const ciphertext = await attachment.ciphertext.arrayBuffer();
-        if (!(await attachmentCache.put(attachment.id, ciphertext))) throw new Error("无法将附件历史保存到本机");
+        if (!(await attachmentCache.put(attachment.id, ciphertext))) throw new Error(t("deviceLink.error.saveAttachment"));
         const acknowledgement = await props.api.acknowledgeAttachmentRetention(attachment.id).catch(() => null);
         if (acknowledgement && acknowledgement.attachment_id !== attachment.id
           && !(await attachmentCache.put(acknowledgement.attachment_id, ciphertext))) {
-          throw new Error("无法将附件历史保存到本机");
+          throw new Error(t("deviceLink.error.saveAttachment"));
         }
       }
       for (const segment of bundle.segments) {
         const ciphertext = await segment.ciphertext.arrayBuffer();
-        if (!(await archiveSegmentCache.put(segment.id, ciphertext))) throw new Error("无法将历史分段保存到本机");
+        if (!(await archiveSegmentCache.put(segment.id, ciphertext))) throw new Error(t("deviceLink.error.saveSegment"));
         try { await props.api.acknowledgeArchiveSegmentRetention(segment.id); }
         catch (error) {
           // A 404 can mean the administrator intentionally GC'd the cloud copy.
@@ -165,11 +167,11 @@ export function DeviceLinkSetup(props: {
         await replenishPackages(current, next.required_packages); setStage("approved");
       } else if (next.status === "approved") setStage("approved");
       else if (next.status === "complete" || next.status === "claimed") return await finishLink(loadPendingDeviceLink(props.profileId) ?? current, next);
-      else if (next.status === "cancelled") throw new Error("这个链接申请已取消");
+      else if (next.status === "cancelled") throw new Error(t("deviceLink.error.cancelled"));
       else setStage("waiting");
       timer = window.setTimeout(() => void poll(), 1_500);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法继续链接设备"); setStage("error");
+      setError(cause instanceof Error ? cause.message : t("deviceLink.error.continue")); setStage("error");
     }
   }
 
@@ -183,21 +185,21 @@ export function DeviceLinkSetup(props: {
     window.clearTimeout(timer); clearPendingDeviceLink(props.profileId); await clearIdentity(props.profileId); props.onCancel();
   }
 
-  onMount(() => void begin().catch((cause) => { setError(cause instanceof Error ? cause.message : "无法创建链接"); setStage("error"); }));
+  onMount(() => void begin().catch((cause) => { setError(cause instanceof Error ? cause.message : t("deviceLink.error.create")); setStage("error"); }));
   onCleanup(() => { stopped = true; window.clearTimeout(timer); if (!handedOff) mls?.destroy(); });
 
   return <section class="grid gap-5">
-    <div><h1 class="text-2xl font-semibold tracking-tight text-ink">链接这台设备</h1><p class="mt-2 text-sm/6 text-muted">在已经登录的设备中打开“设备与账户”，扫描这里的二维码。扫描后仍需在旧设备上确认。</p></div>
-    <Show when={pending()} fallback={<div class="grid min-h-64 place-content-center justify-items-center gap-3 rounded-2xl bg-neutral-50"><span class="size-7 animate-pulse rounded-full bg-brand/20"/><p class="text-sm text-muted">正在创建独立设备密钥…</p></div>}>
+    <div><h1 class="text-2xl font-semibold tracking-tight text-ink">{t("deviceLink.title")}</h1><p class="mt-2 text-sm/6 text-muted">{t("deviceLink.description")}</p></div>
+    <Show when={pending()} fallback={<div class="grid min-h-64 place-content-center justify-items-center gap-3 rounded-2xl bg-neutral-50"><span class="size-7 animate-pulse rounded-full bg-brand/20"/><p class="text-sm text-muted">{t("deviceLink.preparingKeys")}</p></div>}>
       <div class="relative mx-auto grid w-full max-w-72 place-items-center overflow-hidden rounded-2xl bg-white p-5 shadow-[0_12px_40px_rgb(0_0_0/0.08)] ring-1 ring-black/8">
         <span class="pointer-events-none absolute left-3 top-3 size-5 border-l-2 border-t-2 border-brand"/><span class="pointer-events-none absolute right-3 top-3 size-5 border-r-2 border-t-2 border-brand"/><span class="pointer-events-none absolute bottom-3 left-3 size-5 border-b-2 border-l-2 border-brand"/><span class="pointer-events-none absolute bottom-3 right-3 size-5 border-b-2 border-r-2 border-brand"/>
-        <div class="w-full [&_svg]:block [&_svg]:h-auto [&_svg]:w-full" role="img" aria-label="设备链接二维码" innerHTML={qr()}/>
+        <div class="w-full [&_svg]:block [&_svg]:h-auto [&_svg]:w-full" role="img" aria-label={t("deviceLink.qrLabel")} innerHTML={qr()}/>
       </div>
-      <div class="rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5"><div class="flex items-center gap-2"><IconShieldCheck class="size-4 stroke-brand"/><strong class="text-sm font-semibold text-ink">在两台设备上核对</strong></div><div class="mt-3 grid grid-cols-4 gap-2 font-mono text-xs font-semibold tracking-wide text-ink">{fingerprint().split(" ").map((part) => <span class="rounded-md bg-white px-1 py-2 text-center ring-1 ring-black/8">{part}</span>)}</div></div>
-      <div class="flex gap-2"><button type="button" class="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg font-medium text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => void navigator.clipboard.writeText(url()).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1_500); })}><IconCopy class="size-4 stroke-brand"/>{copied() ? "已复制" : "复制链接"}</button></div>
+      <div class="rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5"><div class="flex items-center gap-2"><IconShieldCheck class="size-4 stroke-brand"/><strong class="text-sm font-semibold text-ink">{t("deviceLink.compare")}</strong></div><div class="mt-3 grid grid-cols-4 gap-2 font-mono text-xs font-semibold tracking-wide text-ink">{fingerprint().split(" ").map((part) => <span class="rounded-md bg-white px-1 py-2 text-center ring-1 ring-black/8">{part}</span>)}</div></div>
+      <div class="flex gap-2"><button type="button" class="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg font-medium text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => void navigator.clipboard.writeText(url()).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1_500); })}><IconCopy class="size-4 stroke-brand"/>{copied() ? t("deviceLink.copied") : t("deviceLink.copy")}</button></div>
     </Show>
-    <div aria-live="polite" class={`flex items-start gap-3 rounded-xl px-4 py-3 text-sm/5 ${stage() === "error" ? "bg-red-50 text-red-700" : "bg-brand-soft text-ink"}`}><IconDeviceMobile class={`mt-0.5 size-4 shrink-0 ${stage() === "error" ? "stroke-red-600" : "stroke-brand"}`}/><div><strong class="font-semibold">{stage() === "waiting" ? "等待旧设备确认" : stage() === "approved" ? "正在加入你的对话" : stage() === "joining" ? "正在恢复消息历史" : stage() === "error" ? "链接没有完成" : "正在准备"}</strong><p class="mt-0.5 text-xs/5 opacity-75">{stage() === "approved" ? `${status()?.room_count ?? status()?.rooms?.length ?? 0} 个对话将使用新的加密身份` : stage() === "error" ? error() : "保持此页面打开；历史只会以设备加密包短暂中转。"}</p></div></div>
-    <Show when={stage() === "error"}><button type="button" class="flex h-11 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white" onClick={() => void retry()}><IconRefresh class="size-4 stroke-white"/>继续尝试</button></Show>
-    <Show when={stage() === "preparing" || stage() === "waiting" || (stage() === "error" && (!status()?.status || status()?.status === "pending"))}><button type="button" class="h-10 text-sm font-medium text-muted hover:text-ink" onClick={() => void cancel()}>取消并返回登录</button></Show>
+    <div aria-live="polite" class={`flex items-start gap-3 rounded-xl px-4 py-3 text-sm/5 ${stage() === "error" ? "bg-red-50 text-red-700" : "bg-brand-soft text-ink"}`}><IconDeviceMobile class={`mt-0.5 size-4 shrink-0 ${stage() === "error" ? "stroke-red-600" : "stroke-brand"}`}/><div><strong class="font-semibold">{stage() === "waiting" ? t("deviceLink.stage.waiting") : stage() === "approved" ? t("deviceLink.stage.approved") : stage() === "joining" ? t("deviceLink.stage.joining") : stage() === "error" ? t("deviceLink.stage.error") : t("deviceLink.stage.preparing")}</strong><p class="mt-0.5 text-xs/5 opacity-75">{stage() === "approved" ? t("deviceLink.rooms", { count: status()?.room_count ?? status()?.rooms?.length ?? 0 }) : stage() === "error" ? error() : t("deviceLink.keepOpen")}</p></div></div>
+    <Show when={stage() === "error"}><button type="button" class="flex h-11 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white" onClick={() => void retry()}><IconRefresh class="size-4 stroke-white"/>{t("deviceLink.retry")}</button></Show>
+    <Show when={stage() === "preparing" || stage() === "waiting" || (stage() === "error" && (!status()?.status || status()?.status === "pending"))}><button type="button" class="h-10 text-sm font-medium text-muted hover:text-ink" onClick={() => void cancel()}>{t("deviceLink.cancel")}</button></Show>
   </section>;
 }

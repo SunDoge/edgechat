@@ -9,8 +9,10 @@ import { Brand, Input } from "./primitives";
 import { DeviceLinkSetup } from "./DeviceLinkSetup";
 import { BackupRestoreForm } from "./BackupRestoreForm";
 import { profileSessionKey } from "../local-profiles";
+import { useI18n } from "../i18n";
 
 export function AuthScreen(props: { profileId: string; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void>; onManageProfiles: () => void }) {
+  const { t } = useI18n();
   const restoreUserKey = profileSessionKey(props.profileId, "restore-user-id");
   const restoreCheckpointKey = profileSessionKey(props.profileId, "restore-checkpoint");
   const restorePhaseKey = profileSessionKey(props.profileId, "restore-phase");
@@ -42,7 +44,7 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
       const mlsKeyPackages = mls.generateKeyPackages(12);
       const publicKeys = await props.core.exportPublicIdentity(identity);
       const device = {
-        device_id: identity.deviceId, display_name: navigator.userAgent.includes("Mobile") ? "移动浏览器" : "网页浏览器",
+        device_id: identity.deviceId, display_name: navigator.userAgent.includes("Mobile") ? t("auth.device.mobile") : t("auth.device.desktop"),
         ...publicKeys, mls_key_packages: mlsKeyPackages,
         ...(restoreCheckpoint ? { backup_checkpoint: restoreCheckpoint } : {}),
         ...(identity.recoveryCredential ? { restore_credential: identity.recoveryCredential } : {}),
@@ -56,7 +58,7 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
       sessionStorage.removeItem(restoreCheckpointKey);
       sessionStorage.removeItem(restorePhaseKey);
       props.onReady(result, authenticatedIdentity, result.access_token, mls);
-    } catch (cause) { setError(authErrorMessage(cause)); }
+    } catch (cause) { setError(authErrorMessage(cause, t)); }
     finally { setBusy(false); }
   }
 
@@ -64,7 +66,7 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
     if (!receipt) return;
     setAppealBusy(true); setAppealError("");
     try { setAppealStatus((await props.api.accountAppealStatus(receipt)).status); }
-    catch (cause) { setAppealError(cause instanceof Error ? cause.message : "无法查询申诉状态"); }
+    catch (cause) { setAppealError(cause instanceof Error ? cause.message : t("auth.appeal.status.error")); }
     finally { setAppealBusy(false); }
   }
 
@@ -74,27 +76,27 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
       const result = await props.api.createAccountAppeal(username(), password(), appealCategory());
       localStorage.setItem(appealReceiptKey, result.receipt);
       setAppealReceipt(result.receipt); setAppealStatus(result.status);
-    } catch (cause) { setAppealError(cause instanceof Error ? cause.message : "无法提交申诉"); }
+    } catch (cause) { setAppealError(cause instanceof Error ? cause.message : t("auth.appeal.submit.error")); }
     finally { setAppealBusy(false); }
   }
 
   const AppealForm = () => <div class="grid gap-5">
-    <div><h1 class="text-2xl font-semibold tracking-tight text-ink">账户访问申诉</h1><p class="mt-2 text-sm/6 text-muted">申诉只处理服务器账户访问限制，无法恢复已丢失的设备密钥或聊天记录。我们不收集自由文本、邮箱或电话。</p></div>
+    <div><h1 class="text-2xl font-semibold tracking-tight text-ink">{t("auth.appeal.title")}</h1><p class="mt-2 text-sm/6 text-muted">{t("auth.appeal.description")}</p></div>
     <Show when={!appealReceipt()} fallback={<div class="grid gap-4 rounded-xl bg-neutral-50 p-4 ring-1 ring-black/5">
-      <div><p class="text-sm font-semibold text-ink">申诉状态</p><p class="mt-1 text-sm text-muted">{appealStatus() === "approved" ? "已批准，请重新尝试登录。" : appealStatus() === "denied" ? "未批准。服务器无法绕过密码或 MLS 设备密钥。" : appealStatus() === "expired" ? "回执已过期，可重新提交。" : "等待管理员审核。"}</p></div>
+      <div><p class="text-sm font-semibold text-ink">{t("auth.appeal.status.title")}</p><p class="mt-1 text-sm text-muted">{appealStatus() === "approved" ? t("auth.appeal.status.approved") : appealStatus() === "denied" ? t("auth.appeal.status.denied") : appealStatus() === "expired" ? t("auth.appeal.status.expired") : t("auth.appeal.status.pending")}</p></div>
       <Show when={appealError()}><p role="alert" class="text-sm text-red-600">{appealError()}</p></Show>
-      <div class="flex gap-2"><button type="button" disabled={appealBusy()} class="h-10 rounded-lg bg-white px-3 text-sm font-medium text-ink ring-1 ring-black/10" onClick={() => void refreshAppealStatus()}>{appealBusy() ? "正在查询…" : "刷新状态"}</button><button type="button" class="h-10 px-3 text-sm font-medium text-muted" onClick={() => { localStorage.removeItem(appealReceiptKey); setAppealReceipt(""); setAppealStatus(null); }}>重新提交</button></div>
+      <div class="flex gap-2"><button type="button" disabled={appealBusy()} class="h-10 rounded-lg bg-white px-3 text-sm font-medium text-ink ring-1 ring-black/10" onClick={() => void refreshAppealStatus()}>{appealBusy() ? t("auth.appeal.status.loading") : t("auth.appeal.status.refresh")}</button><button type="button" class="h-10 px-3 text-sm font-medium text-muted" onClick={() => { localStorage.removeItem(appealReceiptKey); setAppealReceipt(""); setAppealStatus(null); }}>{t("auth.appeal.submit.again")}</button></div>
     </div>}>
       <form class="grid gap-4" onSubmit={submitAppeal}>
-        <Input label="用户名" id="appeal-username" name="appeal_username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username" required/>
-        <Input label="当前账户密码" id="appeal-password" name="appeal_password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" required/>
-        <label class="grid gap-2 text-sm font-medium text-ink" for="appeal-category">问题类型<select id="appeal-category" class="h-11 rounded-lg bg-white px-3 text-sm ring-1 ring-inset ring-black/10 focus:outline-2 focus:outline-brand" value={appealCategory()} onChange={(event) => setAppealCategory(event.currentTarget.value as AccountAppealCategory)}><option value="login_locked">登录被临时锁定</option><option value="device_lost">原设备丢失</option><option value="account_access">其他账户访问问题</option></select></label>
-        <p class="text-xs/5 text-muted">密码只用于这次所有权验证，不会写入申诉记录。无论账号或密码是否有效，接口都会返回相同形式的回执。</p>
+        <Input label={t("auth.appeal.username")} id="appeal-username" name="appeal_username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username" required/>
+        <Input label={t("auth.appeal.password")} id="appeal-password" name="appeal_password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" required/>
+        <label class="grid gap-2 text-sm font-medium text-ink" for="appeal-category">{t("auth.appeal.category")}<select id="appeal-category" class="h-11 rounded-lg bg-white px-3 text-sm ring-1 ring-inset ring-black/10 focus:outline-2 focus:outline-brand" value={appealCategory()} onChange={(event) => setAppealCategory(event.currentTarget.value as AccountAppealCategory)}><option value="login_locked">{t("auth.appeal.category.loginLocked")}</option><option value="device_lost">{t("auth.appeal.category.deviceLost")}</option><option value="account_access">{t("auth.appeal.category.accountAccess")}</option></select></label>
+        <p class="text-xs/5 text-muted">{t("auth.appeal.passwordNotice")}</p>
         <Show when={appealError()}><p role="alert" class="text-sm text-red-600">{appealError()}</p></Show>
-        <button type="submit" disabled={appealBusy()} class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white disabled:bg-neutral-300">{appealBusy() ? "正在提交…" : "提交申诉"}</button>
+        <button type="submit" disabled={appealBusy()} class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white disabled:bg-neutral-300">{appealBusy() ? t("auth.appeal.submit.loading") : t("auth.appeal.submit.action")}</button>
       </form>
     </Show>
-    <button type="button" class="justify-self-start text-sm font-medium text-brand" onClick={() => setAppealOpen(false)}>返回登录</button>
+    <button type="button" class="justify-self-start text-sm font-medium text-brand" onClick={() => setAppealOpen(false)}>{t("auth.appeal.back")}</button>
   </div>;
 
   return <main class="isolate grid min-h-dvh place-items-center bg-white px-6 py-10 antialiased"><section class="w-full max-w-xs">
@@ -102,25 +104,25 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
     <Show when={!appealOpen()} fallback={<AppealForm/>}>
     <Show when={!restoreOpen()} fallback={<BackupRestoreForm onRestore={props.onRestoreBackup} onCancel={() => setRestoreOpen(false)}/>}>
     <Show when={mode() === "link"} fallback={<>
-    <Show when={!finishingRestore}><div class="mb-8 grid grid-cols-2 rounded-lg bg-neutral-100 p-1" role="tablist" aria-label="账户操作">
-      <button type="button" role="tab" aria-selected={mode() === "register"} class="h-9 rounded-md text-sm font-medium text-muted aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-sm" onClick={() => setMode("register")}>创建账户</button>
-      <button type="button" role="tab" aria-selected={mode() === "login"} class="h-9 rounded-md text-sm font-medium text-muted aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-sm" onClick={() => setMode("login")}>登录</button>
+    <Show when={!finishingRestore}><div class="mb-8 grid grid-cols-2 rounded-lg bg-neutral-100 p-1" role="tablist" aria-label={t("auth.tabs.label")}>
+      <button type="button" role="tab" aria-selected={mode() === "register"} class="h-9 rounded-md text-sm font-medium text-muted aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-sm" onClick={() => setMode("register")}>{t("auth.register.tab")}</button>
+      <button type="button" role="tab" aria-selected={mode() === "login"} class="h-9 rounded-md text-sm font-medium text-muted aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-sm" onClick={() => setMode("login")}>{t("common.login")}</button>
     </div></Show>
-    <div class="mb-7"><h1 class="text-balance text-2xl font-semibold tracking-tight text-ink">{finishingRestore ? "完成设备恢复" : mode() === "register" ? "创建你的身份" : "欢迎回来"}</h1><p class="mt-2 text-base/6 text-muted">{finishingRestore ? "输入账户密码，服务器会再次确认恢复检查点。" : mode() === "register" ? "密钥只在这台设备上生成和保存。" : "新浏览器会注册为一台独立设备。"}</p></div>
+    <div class="mb-7"><h1 class="text-balance text-2xl font-semibold tracking-tight text-ink">{finishingRestore ? t("auth.restore.finishTitle") : mode() === "register" ? t("auth.register.title") : t("auth.login.title")}</h1><p class="mt-2 text-base/6 text-muted">{finishingRestore ? t("auth.restore.finishDescription") : mode() === "register" ? t("auth.register.description") : t("auth.login.description")}</p></div>
     <form class="grid gap-5" onSubmit={submit}>
-      <Show when={mode() === "register"}><Input label="显示名称" id="display-name" name="display_name" value={displayName()} onInput={(event) => setDisplayName(event.currentTarget.value)} maxLength={60} required autofocus/></Show>
-      <Input label="用户名" id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "@alice:localhost"} autocomplete="username" required/>
-      <Input label="密码" id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete={mode() === "register" ? "new-password" : "current-password"} required/>
+      <Show when={mode() === "register"}><Input label={t("auth.displayName")} id="display-name" name="display_name" value={displayName()} onInput={(event) => setDisplayName(event.currentTarget.value)} maxLength={60} required autofocus/></Show>
+      <Input label={t("auth.username")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "@alice:localhost"} autocomplete="username" required/>
+      <Input label={t("auth.password")} id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete={mode() === "register" ? "new-password" : "current-password"} required/>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm/5 text-red-700">{error()}</div></Show>
-      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy()}>{busy() ? "正在准备设备…" : mode() === "register" ? "创建并继续" : "登录"}</button>
-      <Show when={mode() === "login" && !finishingRestore}><button type="button" class="text-sm font-medium text-brand" onClick={() => { setAppealOpen(true); if (appealReceipt()) void refreshAppealStatus(); }}>无法登录？查看或提交申诉</button></Show>
+      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy()}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
+      <Show when={mode() === "login" && !finishingRestore}><button type="button" class="text-sm font-medium text-brand" onClick={() => { setAppealOpen(true); if (appealReceipt()) void refreshAppealStatus(); }}>{t("auth.login.appealAction")}</button></Show>
     </form>
-    <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>或<span class="h-px flex-1 bg-black/10"/></div>
-    <div class="grid gap-2"><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-semibold text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => setMode("link")}><IconQrcode class="size-4 stroke-brand"/>链接已有账户</button><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-50" onClick={() => setRestoreOpen(true)}><IconUpload class="size-4 stroke-muted"/>从加密备份恢复</button></div></Show>
+    <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.alternative")}<span class="h-px flex-1 bg-black/10"/></div>
+    <div class="grid gap-2"><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-semibold text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" onClick={() => setMode("link")}><IconQrcode class="size-4 stroke-brand"/>{t("auth.link.action")}</button><button type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-50" onClick={() => setRestoreOpen(true)}><IconUpload class="size-4 stroke-muted"/>{t("auth.restore.action")}</button></div></Show>
     </>}><DeviceLinkSetup profileId={props.profileId} api={props.api} core={props.core} db={props.db} onReady={props.onReady} onCancel={() => setMode("login")}/></Show>
     </Show>
     </Show>
-    <button type="button" class="mt-7 flex min-h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-100" onClick={props.onManageProfiles}><IconSwitchHorizontal class="size-4 stroke-muted"/>切换本机身份</button>
-    <div class="mt-4 flex items-start gap-2 text-sm/5 text-muted"><IconShieldLock class="mt-0.5 size-4 shrink-0 stroke-muted"/><p>消息会在本机解密并存入 PGlite。使用共享设备后请退出账户。</p></div>
+    <button type="button" class="mt-7 flex min-h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-medium text-muted hover:bg-neutral-100" onClick={props.onManageProfiles}><IconSwitchHorizontal class="size-4 stroke-muted"/>{t("auth.profile.switch")}</button>
+    <div class="mt-4 flex items-start gap-2 text-sm/5 text-muted"><IconShieldLock class="mt-0.5 size-4 shrink-0 stroke-muted"/><p>{t("auth.localStorageNotice")}</p></div>
   </section></main>;
 }

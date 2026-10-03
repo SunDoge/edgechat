@@ -1,6 +1,6 @@
 # Accessibility baseline
 
-EdgeChat treats keyboard, assistive-technology, reduced-motion and CJK input behavior as messaging correctness, not visual polish. The current interface language is Simplified Chinese (`zh-Hans`); a complete string-catalog localization pass is still pending.
+EdgeChat treats keyboard, assistive-technology, reduced-motion and CJK input behavior as messaging correctness, not visual polish. The current interface language is Simplified Chinese (`zh-Hans`). The authentication, account-appeal, device-link and encrypted-backup entry journey now uses a typed, bundled string catalog; the signed-in workspace still needs the same migration before another language or a language selector can ship.
 
 ## Implemented interaction contract
 
@@ -30,4 +30,4 @@ Record browser/OS/screen-reader versions and every blocker. Automated type/compo
 
 ## Localization boundary
 
-Protocol identifiers, encrypted payloads and persisted room events must never contain presentation-only translations. Locale-sensitive dates, sizes and counts belong in presentation helpers. Future string catalogs should live at the Solid view boundary, preserve stable internal error codes, and keep fallback Chinese copy available offline. Changing UI language must not trigger sync, D1, R2 or S3 traffic.
+Protocol identifiers, encrypted payloads and persisted room events must never contain presentation-only translations. Locale-sensitive dates, sizes and counts belong in presentation helpers. The catalog lives at the Solid view boundary, preserves stable internal error codes, and is bundled so the default Chinese copy remains available offline. Catalog keys and named interpolation values are TypeScript-checked. Do not expose a language selector until every user-visible signed-in path and recovery/error state is catalog-backed; changing UI language must never trigger sync, D1, R2 or S3 traffic.

@@ -9,6 +9,7 @@ import { acquireTabLease, awaitTabHandoff, TAB_CHANNEL, type LockProvider, type 
 import { ensureActiveLocalProfile, listLocalProfiles, localProfileToken } from "./local-profiles";
 import { setActivePushProfile } from "./push-subscription";
 import { resumePendingLocalDatabaseDestructions } from "@edgechat/db";
+import { I18nProvider } from "./i18n";
 import "./styles.css";
 
 initializePwaInstall();
@@ -24,7 +25,7 @@ let waitingForLease = false;
 let handingOff = false;
 
 function replaceView(view: () => JSX.Element): void {
-  disposeView?.(); root.replaceChildren(); disposeView = render(view, root);
+  disposeView?.(); root.replaceChildren(); disposeView = render(() => <I18nProvider>{view()}</I18nProvider>, root);
 }
 
 function SecondaryTab() {
