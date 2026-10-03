@@ -23,7 +23,6 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
   if (restoredUserHint) sessionStorage.removeItem(restoreUserKey);
   const [mode, setMode] = createSignal<"register" | "login" | "link">(restoredUserHint ? "login" : "register");
   const [username, setUsername] = createSignal(restoredUserHint);
-  const [displayName, setDisplayName] = createSignal("");
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -51,7 +50,7 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
       };
       const stored = { ...identity, mlsState: mls.exportState() }; await saveIdentity(props.profileId, stored);
       const result = mode() === "register"
-        ? await props.api.register({ localpart: username(), display_name: displayName(), password: password(), device })
+        ? await props.api.register({ localpart: username(), password: password(), device })
         : await props.api.login({ user_id: username(), password: password(), device });
       const authenticatedIdentity = result.device_credential ? { ...stored, recoveryCredential: result.device_credential } : stored;
       if (authenticatedIdentity !== stored) await saveIdentity(props.profileId, authenticatedIdentity);
@@ -110,9 +109,14 @@ export function AuthScreen(props: { profileId: string; api: ApiClient; core: Web
     </div></Show>
     <div class="mb-7"><h1 class="text-balance text-2xl font-semibold tracking-tight text-ink">{finishingRestore ? t("auth.restore.finishTitle") : mode() === "register" ? t("auth.register.title") : t("auth.login.title")}</h1><p class="mt-2 text-base/6 text-muted">{finishingRestore ? t("auth.restore.finishDescription") : mode() === "register" ? t("auth.register.description") : t("auth.login.description")}</p></div>
     <form class="grid gap-5" onSubmit={submit}>
-      <Show when={mode() === "register"}><Input label={t("auth.displayName")} id="display-name" name="display_name" value={displayName()} onInput={(event) => setDisplayName(event.currentTarget.value)} maxLength={60} required autofocus/></Show>
-      <Input label={t("auth.username")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "@alice:localhost"} autocomplete="username" required/>
-      <Input label={t("auth.password")} id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete={mode() === "register" ? "new-password" : "current-password"} required/>
+      <div class="grid gap-1.5">
+        <Input label={mode() === "register" ? t("auth.accountName") : t("auth.accountIdentifier")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "alice 或 @alice:example.com"} autocomplete="username" aria-describedby={mode() === "register" ? "account-name-help" : undefined} required autofocus={!restoredUserHint}/>
+        <Show when={mode() === "register"}><p id="account-name-help" class="text-xs/5 text-muted">{t("auth.accountNameHint")}</p></Show>
+      </div>
+      <div class="grid gap-1.5">
+        <Input label={t("auth.loginPassword")} id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete={mode() === "register" ? "new-password" : "current-password"} aria-describedby="login-password-help" required autofocus={Boolean(restoredUserHint)}/>
+        <p id="login-password-help" class="text-xs/5 text-muted">{t("auth.loginPasswordHint")}</p>
+      </div>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm/5 text-red-700">{error()}</div></Show>
       <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy()}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
       <Show when={mode() === "login" && !finishingRestore}><button type="button" class="text-sm font-medium text-brand" onClick={() => { setAppealOpen(true); if (appealReceipt()) void refreshAppealStatus(); }}>{t("auth.login.appealAction")}</button></Show>

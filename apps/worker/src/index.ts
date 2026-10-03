@@ -1181,7 +1181,7 @@ function assertLocalId(id: string, prefix: "@" | "!" | "$", env: Env): void {
 async function register(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   const localpart = stringField(body, "localpart", 32).trim().toLowerCase();
-  const displayName = normalizedDisplayName(body.display_name);
+  const displayName = normalizedDisplayName(body.display_name ?? localpart);
   const password = stringField(body, "password", 256);
   const device = body.device as Record<string, unknown> | undefined;
   if (!/^[a-z0-9_][a-z0-9_.-]{1,30}$/.test(localpart)) throw new HttpError(400, "Invalid username", "invalid_username");

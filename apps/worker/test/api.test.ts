@@ -258,10 +258,12 @@ async function device(id: string) {
 async function register(localpart: string, currentDevice: Awaited<ReturnType<typeof device>>) {
   const response = await SELF.fetch("https://edgechat.test/api/v1/register", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ localpart, display_name: localpart, password: "correct-horse-battery", device: currentDevice.body }),
+    body: JSON.stringify({ localpart, password: "correct-horse-battery", device: currentDevice.body }),
   });
   expect(response.status, await response.clone().text()).toBe(201);
-  return response.json() as Promise<{ access_token: string; user_id: UserId; device_id: string }>;
+  const result = await response.json() as { access_token: string; user_id: UserId; device_id: string; display_name: string };
+  expect(result.display_name).toBe(localpart);
+  return result;
 }
 
 async function loginDevice(userId: UserId, currentDevice: Awaited<ReturnType<typeof device>>) {
