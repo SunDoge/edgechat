@@ -1,0 +1,30 @@
+import { isNamespacedUserId, type UserId } from "@edgechat/protocol";
+
+export type ContactInviteTarget =
+  | { status: "absent" }
+  | { status: "invalid" }
+  | { status: "remote"; userId: UserId }
+  | { status: "valid"; userId: UserId };
+
+export function contactInviteUrl(origin: string, userId: UserId): string {
+  const url = new URL("/", origin);
+  url.searchParams.set("contact", userId);
+  return url.toString();
+}
+
+export function contactInviteTarget(search: string, serverName: string): ContactInviteTarget {
+  const values = new URLSearchParams(search).getAll("contact");
+  if (!values.length) return { status: "absent" };
+  const value = values[0];
+  if (values.length !== 1 || value.length > 255 || !isNamespacedUserId(value)) return { status: "invalid" };
+  const domain = value.slice(value.lastIndexOf(":") + 1);
+  return domain.toLowerCase() === serverName.toLowerCase()
+    ? { status: "valid", userId: value }
+    : { status: "remote", userId: value };
+}
+
+export function withoutContactInvite(url: URL): string {
+  const next = new URL(url);
+  next.searchParams.delete("contact");
+  return `${next.pathname}${next.search}${next.hash}`;
+}
