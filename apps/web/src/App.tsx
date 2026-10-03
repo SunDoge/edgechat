@@ -19,7 +19,7 @@ import {
 } from "@tabler/icons-solidjs";
 import { LocalDatabase, LocalRestoreCommitUnknownError, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomAttachmentCursor, type LocalRoomListActivity, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
-import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
 import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type RoomDeviceSigningKey, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
@@ -35,7 +35,7 @@ import { EncryptedRoomAvatar } from "./components/EncryptedRoomAvatar";
 import { AccountDeletionDialog, BackupDialog, DevicesDialog, SearchDialog, type DeviceRevocationProgress, type DeviceRow, type LocalSearchResult } from "./components/UtilityDialogs";
 import { ForwardDialog } from "./components/ForwardDialog";
 import { avatarColor, initials, memberName, roomTitle, userName } from "./presenters";
-import { assertMessageEnvelope, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, messageAttachments, messageContacts, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot, readImageDimensions, type AttachmentMetadata, type ContactIdentity, type MessagePayload } from "./media";
+import { assertMessageEnvelope, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, embeddedImagePreviewByteLength, MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES, messageAttachments, messageContacts, messageText, normalizeMessagePayload, prepareImageMetadata, quoteTextForMessage, quoteTextSnapshot, type AttachmentMetadata, type ContactIdentity, type MessagePayload } from "./media";
 import { LocalImageSemanticSearch } from "./semantic-search";
 import { semanticSearchEnabled as storedSemanticSearchEnabled, setSemanticSearchEnabled as persistSemanticSearchEnabled } from "./semantic-search-preference";
 import { roomAllowsReceipts } from "./message-request";
@@ -710,6 +710,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     let stageAttempted = false;
     try {
       const ciphertext = encodeBase64Url(currentMls.encryptMessage(input.roomId, encoder.encode(JSON.stringify(input.payload))));
+      if (ciphertext.length > MAX_EVENT_CIPHERTEXT_LENGTH) throw new Error("加密消息超过服务器允许的大小");
       const nextState = currentMls.exportState();
       const unsigned: Omit<ClientEvent, "signature"> = {
         event_id: input.eventId, room_id: input.roomId, sender: currentSession.user_id as UserId,
@@ -1572,17 +1573,19 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const domain = currentSession.server_name ?? location.hostname;
     const eventId = `$${crypto.randomUUID()}:${domain}` as EventId;
     const createdAt = Date.now(); const attachments: AttachmentMetadata[] = []; const uploadedIds: string[] = [];
+    let previewBudget = MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES;
     let queued = false;
     try {
       for (const selectedFile of selectedFiles) {
-        const dimensions = await readImageDimensions(selectedFile);
+        const preparedImage = await prepareImageMetadata(selectedFile, previewBudget);
+        if (preparedImage.preview) previewBudget -= embeddedImagePreviewByteLength(preparedImage.preview);
         const encryptedFile = await core.encryptAttachment(await selectedFile.arrayBuffer());
         const upload = await api.uploadAttachment(room.room_id, encryptedFile.ciphertext);
         uploadedIds.push(upload.attachment_id);
         if (await attachmentCache.put(upload.attachment_id, encryptedFile.ciphertext)) {
           await attachmentLoader.acknowledgeCached(upload.attachment_id, encryptedFile.ciphertext);
         }
-        attachments.push({ id: upload.attachment_id, name: selectedFile.name, type: selectedFile.type || "application/octet-stream", size: selectedFile.size, key: encryptedFile.key, nonce: encryptedFile.nonce, ...(dimensions ?? {}), ...(durationMs && selectedFiles.length === 1 ? { duration_ms: durationMs } : {}) });
+        attachments.push({ id: upload.attachment_id, name: selectedFile.name, type: selectedFile.type || "application/octet-stream", size: selectedFile.size, key: encryptedFile.key, nonce: encryptedFile.nonce, ...(preparedImage.dimensions ?? {}), ...(preparedImage.preview ? { preview: preparedImage.preview } : {}), ...(durationMs && selectedFiles.length === 1 ? { duration_ms: durationMs } : {}) });
       }
       const payload = createMessagePayload(eventId as MessageId, text, attachments, relation);
       await mutateMls(async () => {

@@ -4,6 +4,7 @@ export const MIN_SUPPORTED_PROTOCOL_VERSION = 1 as const;
 export const MAX_ATTACHMENT_PLAINTEXT_BYTES = 25 * 1024 * 1024;
 export const MAX_MESSAGE_ATTACHMENTS = 10;
 export const MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES = 100 * 1024 * 1024;
+export const MAX_EVENT_CIPHERTEXT_LENGTH = 200_000;
 
 export const serverProtocolFeatures = ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1"] as const;
 export type ServerProtocolFeature = typeof serverProtocolFeatures[number];
@@ -357,7 +358,7 @@ export function isClientEventEnvelope(value: unknown): value is ClientEvent {
     || typeof event.device_id !== "string" || event.device_id.length < 1 || event.device_id.length > 96
     || !roomEventTypes.includes(event.type as RoomEventType)
     || !Number.isSafeInteger(event.created_at) || Number(event.created_at) < 0
-    || typeof event.ciphertext !== "string" || event.ciphertext.length > 200_000
+    || typeof event.ciphertext !== "string" || event.ciphertext.length > MAX_EVENT_CIPHERTEXT_LENGTH
     || typeof event.signature !== "string" || event.signature.length < 1 || event.signature.length > 1_024
     || !isEventMetadata(event.metadata)) return false;
   return true;

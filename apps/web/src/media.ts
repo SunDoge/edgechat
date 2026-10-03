@@ -10,6 +10,9 @@ export const PREVIEWABLE_IMAGE_TYPES = new Set([
 export const MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024;
 export const MAX_INLINE_IMAGE_PIXELS = 40_000_000;
 export const MAX_INLINE_IMAGE_EDGE = 16_384;
+export const MAX_EMBEDDED_IMAGE_PREVIEW_BYTES = 8 * 1024;
+export const MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES = 40 * 1024;
+const MAX_EMBEDDED_IMAGE_PREVIEW_EDGE = 256;
 const MAX_MESSAGE_PARTS = 32;
 const MAX_ATTACHMENT_NAME_LENGTH = 255;
 const MAX_ATTACHMENT_MIME_LENGTH = 128;
@@ -29,6 +32,14 @@ export type AttachmentMetadata = {
   width?: number;
   height?: number;
   duration_ms?: number;
+  preview?: EmbeddedImagePreview;
+};
+
+export type EmbeddedImagePreview = {
+  type: "image/webp" | "image/jpeg";
+  data: string;
+  width: number;
+  height: number;
 };
 
 export type TextPart = { part_id: MessagePartId; kind: "text"; text: string };
@@ -76,7 +87,7 @@ export function normalizeMessagePayload(payload: MessagePayload | LegacyMessageP
   if ("version" in payload && payload.version === 2 && Array.isArray(payload.parts)) {
     if (!isNamespacedMessageId(payload.message_id) || payload.message_id !== fallbackId) throw new Error("消息标识与事件不一致");
     if (payload.parts.length > MAX_MESSAGE_PARTS) throw new Error("消息内容格式无效");
-    const partIds = new Set<string>(); const attachmentIds = new Set<string>(); let attachmentBytes = 0; let attachmentCount = 0; let textBytes = 0;
+    const partIds = new Set<string>(); const attachmentIds = new Set<string>(); let attachmentBytes = 0; let attachmentCount = 0; let previewBytes = 0; let textBytes = 0;
     const parts = payload.parts.map((part): MessagePart => {
       if (!part || typeof part !== "object" || typeof part.part_id !== "string" || !/^[A-Za-z0-9_:$.-]{1,512}$/.test(part.part_id) || partIds.has(part.part_id)) throw new Error("消息内容格式无效");
       partIds.add(part.part_id);
@@ -93,6 +104,8 @@ export function normalizeMessagePayload(payload: MessagePayload | LegacyMessageP
         attachmentIds.add(attachment.id);
         attachmentCount += 1; attachmentBytes += attachment.size;
         if (attachmentCount > MAX_MESSAGE_ATTACHMENTS || attachmentBytes > MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES) throw new Error("附件数量或总大小无效");
+        previewBytes += attachment.preview ? embeddedImagePreviewByteLength(attachment.preview) : 0;
+        if (previewBytes > MAX_MESSAGE_EMBEDDED_IMAGE_PREVIEW_BYTES) throw new Error("图片预览总大小无效");
         return { part_id: part.part_id as MessagePartId, kind: "attachment", attachment };
       }
       if (part.kind === "contact") {
@@ -180,9 +193,32 @@ export function normalizeAttachmentMetadata(value: unknown): AttachmentMetadata 
   if (hasWidth !== hasHeight || (hasWidth && (!Number.isSafeInteger(attachment.width) || !Number.isSafeInteger(attachment.height)
     || Number(attachment.width) < 1 || Number(attachment.height) < 1 || Number(attachment.width) > 65_535 || Number(attachment.height) > 65_535))) return null;
   if (attachment.duration_ms !== undefined && (!Number.isSafeInteger(attachment.duration_ms) || Number(attachment.duration_ms) < 1 || Number(attachment.duration_ms) > 10 * 60_000)) return null;
+  const preview = attachment.preview === undefined ? undefined : normalizeEmbeddedImagePreview(attachment.preview);
+  if (attachment.preview !== undefined && (!preview || !isPreviewableImage(type))) return null;
   return { id: attachment.id, name, type, size: Number(attachment.size), key: attachment.key, nonce: attachment.nonce,
     ...(hasWidth ? { width: Number(attachment.width), height: Number(attachment.height) } : {}),
-    ...(attachment.duration_ms !== undefined ? { duration_ms: Number(attachment.duration_ms) } : {}) };
+    ...(attachment.duration_ms !== undefined ? { duration_ms: Number(attachment.duration_ms) } : {}), ...(preview ? { preview } : {}) };
+}
+
+function normalizeEmbeddedImagePreview(value: unknown): EmbeddedImagePreview | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const preview = value as Partial<EmbeddedImagePreview>;
+  if ((preview.type !== "image/webp" && preview.type !== "image/jpeg")
+    || typeof preview.data !== "string" || !/^[A-Za-z0-9_-]+$/.test(preview.data) || preview.data.length % 4 === 1
+    || !Number.isSafeInteger(preview.width) || !Number.isSafeInteger(preview.height)
+    || Number(preview.width) < 1 || Number(preview.height) < 1
+    || Number(preview.width) > MAX_EMBEDDED_IMAGE_PREVIEW_EDGE || Number(preview.height) > MAX_EMBEDDED_IMAGE_PREVIEW_EDGE) return null;
+  const normalized = { type: preview.type, data: preview.data, width: Number(preview.width), height: Number(preview.height) };
+  return embeddedImagePreviewByteLength(normalized) <= MAX_EMBEDDED_IMAGE_PREVIEW_BYTES ? normalized : null;
+}
+
+export function embeddedImagePreviewByteLength(preview: Pick<EmbeddedImagePreview, "data">): number {
+  return Math.floor(preview.data.length * 3 / 4);
+}
+
+export function embeddedImagePreviewUrl(preview: EmbeddedImagePreview): string {
+  const padding = "=".repeat((4 - preview.data.length % 4) % 4);
+  return `data:${preview.type};base64,${preview.data.replace(/-/g, "+").replace(/_/g, "/")}${padding}`;
 }
 
 export function createForwardPayload(messageId: MessageId, source: MessagePayload, attachmentAliases: readonly string[] = [], savedFrom?: MessageReference): MessagePayload {
@@ -309,16 +345,48 @@ export function attachmentEventTypeForFiles(files: readonly Pick<File, "type">[]
   return files.length ? "message.file" : "message.text";
 }
 
-export async function readImageDimensions(file: File): Promise<{ width: number; height: number } | null> {
-  if (!isPreviewableImage(file.type) || file.size > MAX_INLINE_IMAGE_BYTES || typeof createImageBitmap !== "function") return null;
+type PreparedImageMetadata = { dimensions: { width: number; height: number } | null; preview: EmbeddedImagePreview | null };
+
+function canvasBlob(canvas: HTMLCanvasElement, type: EmbeddedImagePreview["type"], quality: number): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob?.type === type ? blob : null), type, quality));
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+export async function prepareImageMetadata(file: File, previewBudget = MAX_EMBEDDED_IMAGE_PREVIEW_BYTES): Promise<PreparedImageMetadata> {
+  if (!isPreviewableImage(file.type) || file.size > MAX_INLINE_IMAGE_BYTES || typeof createImageBitmap !== "function") {
+    return { dimensions: null, preview: null };
+  }
+  let bitmap: ImageBitmap | null = null;
   try {
-    const bitmap = await createImageBitmap(file);
+    bitmap = await createImageBitmap(file);
     const dimensions = bitmap.width > 0 && bitmap.height > 0 && bitmap.width <= 65_535 && bitmap.height <= 65_535
       ? { width: bitmap.width, height: bitmap.height }
       : null;
-    bitmap.close();
-    return dimensions;
+    if (!dimensions || previewBudget < 256 || bitmap.width > MAX_INLINE_IMAGE_EDGE || bitmap.height > MAX_INLINE_IMAGE_EDGE
+      || bitmap.width * bitmap.height > MAX_INLINE_IMAGE_PIXELS) return { dimensions, preview: null };
+    const allowedBytes = Math.min(previewBudget, MAX_EMBEDDED_IMAGE_PREVIEW_BYTES);
+    for (const edge of [MAX_EMBEDDED_IMAGE_PREVIEW_EDGE, 192, 128]) {
+      const scale = Math.min(1, edge / Math.max(bitmap.width, bitmap.height));
+      const width = Math.max(1, Math.round(bitmap.width * scale)); const height = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) return { dimensions, preview: null };
+      context.drawImage(bitmap, 0, 0, width, height);
+      for (const [type, quality] of [["image/webp", 0.56], ["image/webp", 0.4], ["image/jpeg", 0.48], ["image/jpeg", 0.34]] as const) {
+        const blob = await canvasBlob(canvas, type, quality);
+        if (!blob || blob.size > allowedBytes) continue;
+        return { dimensions, preview: { type, data: base64Url(new Uint8Array(await blob.arrayBuffer())), width, height } };
+      }
+    }
+    return { dimensions, preview: null };
   } catch {
-    return null;
+    return { dimensions: null, preview: null };
+  } finally {
+    bitmap?.close();
   }
 }

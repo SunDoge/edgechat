@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { assertMessageAttachmentReferences, assertMessageEnvelope, attachmentEventType, attachmentEventTypeForFiles, attachmentPresentation, createContactMessagePayload, createForwardPayload, createMessagePayload, isAudioAttachment, isPreviewableImage, MAX_INLINE_IMAGE_BYTES, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
+import { describe, expect, it, vi } from "vitest";
+import { assertMessageAttachmentReferences, assertMessageEnvelope, attachmentEventType, attachmentEventTypeForFiles, attachmentPresentation, createContactMessagePayload, createForwardPayload, createMessagePayload, embeddedImagePreviewByteLength, isAudioAttachment, isPreviewableImage, MAX_EMBEDDED_IMAGE_PREVIEW_BYTES, MAX_INLINE_IMAGE_BYTES, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, prepareImageMetadata, quoteTextForMessage, quoteTextSnapshot } from "./media";
 
 describe("unified attachment presentation", () => {
   it("uses one attachment event and derives bounded previews locally", () => {
@@ -124,6 +124,45 @@ describe("unified attachment presentation", () => {
       { ...valid, key: "not+base64" },
     ]) {
       expect(() => normalizeMessagePayload({ version: 2, message_id: "$bad12345:example.com", parts: [{ part_id: "part", kind: "attachment", attachment }] } as never, "$bad12345:example.com")).toThrow("附件元数据无效");
+    }
+  });
+
+  it("keeps small image previews inside the E2EE payload and rejects preview amplification", () => {
+    const preview = { type: "image/webp" as const, data: "AAAA", width: 64, height: 48 };
+    const payload = createMessagePayload("$preview12:example.com", "", { id: "image", name: "photo.jpg", type: "image/jpeg", size: 42, key: "key", nonce: "nonce", preview });
+    expect(messageAttachments(payload)[0]?.attachment.preview).toEqual(preview);
+    expect(embeddedImagePreviewByteLength(preview)).toBe(3);
+
+    const oversized = "AAAA".repeat(Math.ceil((MAX_EMBEDDED_IMAGE_PREVIEW_BYTES + 1) / 3));
+    expect(() => createMessagePayload("$previewbig:example.com", "", { id: "image", name: "photo.jpg", type: "image/jpeg", size: 42, key: "key", nonce: "nonce", preview: { ...preview, data: oversized } })).toThrow("附件元数据无效");
+    expect(() => createMessagePayload("$previewfile:example.com", "", { id: "file", name: "notes.txt", type: "text/plain", size: 42, key: "key", nonce: "nonce", preview })).toThrow("附件元数据无效");
+
+    const maximum = "AAAA".repeat(Math.floor(MAX_EMBEDDED_IMAGE_PREVIEW_BYTES / 3));
+    const attachments = Array.from({ length: 6 }, (_, index) => ({ id: `image-${index}`, name: `${index}.jpg`, type: "image/jpeg", size: 42, key: "key", nonce: "nonce", preview: { ...preview, data: maximum } }));
+    expect(() => createMessagePayload("$previewsum:example.com", "", attachments)).toThrow("图片预览总大小无效");
+  });
+
+  it("generates a bounded thumbnail on the sending device and closes decoded image memory", async () => {
+    const close = vi.fn(); const drawImage = vi.fn();
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 800, height: 600, close })));
+    const originalCreateElement = document.createElement.bind(document);
+    const createElement = vi.spyOn(document, "createElement").mockImplementation(((tagName: string) => {
+      if (tagName !== "canvas") return originalCreateElement(tagName);
+      return {
+        width: 0, height: 0,
+        getContext: () => ({ drawImage }),
+        toBlob: (callback: BlobCallback, type?: string) => callback(new Blob([new Uint8Array(100)], { type })),
+      } as unknown as HTMLCanvasElement;
+    }) as typeof document.createElement);
+    try {
+      const prepared = await prepareImageMetadata(new File([new Uint8Array(1_024)], "photo.jpg", { type: "image/jpeg" }));
+      expect(prepared.dimensions).toEqual({ width: 800, height: 600 });
+      expect(prepared.preview).toMatchObject({ type: "image/webp", width: 256, height: 192 });
+      expect(embeddedImagePreviewByteLength(prepared.preview!)).toBe(100);
+      expect(drawImage).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      createElement.mockRestore(); vi.unstubAllGlobals();
     }
   });
 

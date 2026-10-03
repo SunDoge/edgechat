@@ -43,4 +43,11 @@ describe("ConversationMediaDialog", () => {
     expect(roomAttachmentMetadata(valid)?.id).toBe(valid.attachment_id);
     expect(roomAttachmentMetadata({ ...valid, metadata: { ...valid.metadata, id: "another-id" } })).toBeNull();
   });
+
+  it("preserves a bounded E2EE image preview from the local message projection", () => {
+    const valid = item("image", 1);
+    const preview = { type: "image/webp", data: "AAAA", width: 64, height: 48 };
+    expect(roomAttachmentMetadata({ ...valid, metadata: { ...valid.metadata, preview } })?.preview).toEqual(preview);
+    expect(roomAttachmentMetadata({ ...valid, metadata: { ...valid.metadata, preview: { ...preview, data: "A".repeat(20_000) } } })).toBeNull();
+  });
 });

@@ -1,4 +1,4 @@
-import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
 import { sql } from "kysely";
 import { authenticate, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
@@ -3012,7 +3012,7 @@ async function verifyEvent(env: Env, auth: AuthContext, body: Record<string, unk
   if (!isClientEventEnvelope(event)) throw new HttpError(400, "Invalid event envelope", "invalid_event");
   assertLocalId(event.event_id, "$", env);
   if (typeof event.created_at !== "number" || Math.abs(Date.now() - event.created_at) > 24 * 60 * 60 * 1_000) throw new HttpError(400, "Invalid event time", "invalid_event");
-  if (typeof event.ciphertext !== "string" || event.ciphertext.length > 200_000 || !event.metadata || typeof event.metadata !== "object" || typeof event.signature !== "string") throw new HttpError(400, "Invalid encrypted event", "invalid_event");
+  if (typeof event.ciphertext !== "string" || event.ciphertext.length > MAX_EVENT_CIPHERTEXT_LENGTH || !event.metadata || typeof event.metadata !== "object" || typeof event.signature !== "string") throw new HttpError(400, "Invalid encrypted event", "invalid_event");
   const complete = event as ClientEvent;
   const row = await createDatabase(env.DB).selectFrom("devices as d")
     .innerJoin("room_devices as rd", (join) => join.onRef("rd.device_id", "=", "d.device_id").on("rd.room_id", "=", roomId))
@@ -3750,7 +3750,7 @@ function parseRepairEvents(value: unknown, roomId: RoomId, env: Env): RoomEvent[
     if (!isRoomEventEnvelope(event) || event.room_id !== roomId
       || typeof event.sender !== "string" || typeof event.device_id !== "string" || !roomEventTypes.includes(event.type as never)
       || !Number.isSafeInteger(event.seq) || Number(event.seq) < 1 || !Number.isSafeInteger(event.created_at) || Number(event.created_at) < 0
-      || typeof event.ciphertext !== "string" || event.ciphertext.length > 200_000 || !event.metadata || typeof event.metadata !== "object" || Array.isArray(event.metadata)
+      || typeof event.ciphertext !== "string" || event.ciphertext.length > MAX_EVENT_CIPHERTEXT_LENGTH || !event.metadata || typeof event.metadata !== "object" || Array.isArray(event.metadata)
       || typeof event.signature !== "string" || event.signature.length > 1_024 || !receipt || typeof receipt.mac !== "string") {
       throw new HttpError(400, "Invalid repaired event", "invalid_repair_event");
     }

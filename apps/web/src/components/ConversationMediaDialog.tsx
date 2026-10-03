@@ -2,22 +2,14 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import { IconFile, IconMicrophone, IconPhoto, IconRefresh } from "@tabler/icons-solidjs";
 import type { LocalRoomAttachment, LocalRoomAttachmentCursor, LocalRoomAttachmentPage } from "@edgechat/db";
 import { useI18n } from "../i18n";
-import { attachmentPresentation, type AttachmentMetadata, type AttachmentPresentation } from "../media";
+import { attachmentPresentation, embeddedImagePreviewUrl, normalizeAttachmentMetadata, type AttachmentMetadata, type AttachmentPresentation } from "../media";
 import { Dialog } from "./primitives";
 
 type MediaFilter = "all" | AttachmentPresentation;
 
 export function roomAttachmentMetadata(item: LocalRoomAttachment): AttachmentMetadata | null {
-  const value = item.metadata;
-  if (value.id !== item.attachment_id || typeof value.name !== "string" || !value.name.trim()
-    || typeof value.type !== "string" || typeof value.size !== "number" || !Number.isFinite(value.size) || value.size < 0
-    || typeof value.key !== "string" || typeof value.nonce !== "string") return null;
-  return {
-    id: value.id, name: value.name, type: value.type, size: value.size, key: value.key, nonce: value.nonce,
-    ...(typeof value.width === "number" && Number.isFinite(value.width) ? { width: value.width } : {}),
-    ...(typeof value.height === "number" && Number.isFinite(value.height) ? { height: value.height } : {}),
-    ...(typeof value.duration_ms === "number" && Number.isFinite(value.duration_ms) ? { duration_ms: value.duration_ms } : {}),
-  };
+  const normalized = normalizeAttachmentMetadata(item.metadata);
+  return normalized?.id === item.attachment_id ? normalized : null;
 }
 
 function formatBytes(bytes: number): string {
@@ -27,7 +19,8 @@ function formatBytes(bytes: number): string {
 }
 
 function LocalImageThumbnail(props: { attachment: AttachmentMetadata; loadCached: (attachment: AttachmentMetadata) => Promise<ArrayBuffer | null> }) {
-  const [url, setUrl] = createSignal<string | null>(null);
+  const embeddedUrl = props.attachment.preview ? embeddedImagePreviewUrl(props.attachment.preview) : null;
+  const [url, setUrl] = createSignal<string | null>(embeddedUrl);
   const [checked, setChecked] = createSignal(false);
   let root: HTMLDivElement | undefined;
   let observer: IntersectionObserver | undefined;
@@ -51,10 +44,10 @@ function LocalImageThumbnail(props: { attachment: AttachmentMetadata; loadCached
     }, { rootMargin: "160px" });
     if (root) observer.observe(root);
   });
-  onCleanup(() => { active = false; observer?.disconnect(); const current = url(); if (current) URL.revokeObjectURL(current); });
+  onCleanup(() => { active = false; observer?.disconnect(); const current = url(); if (current?.startsWith("blob:")) URL.revokeObjectURL(current); });
 
   return <div ref={root} class="grid aspect-[4/3] w-full place-items-center overflow-hidden bg-neutral-100">
-    <Show when={url()} fallback={<IconPhoto class="size-7 stroke-neutral-400"/>}>{(src) => <img src={src()} alt="" class="size-full object-cover" loading="lazy" decoding="async"/>}</Show>
+    <Show when={url()} fallback={<IconPhoto class="size-7 stroke-neutral-400"/>}>{(src) => <img src={src()} alt="" class="size-full object-cover" loading="lazy" decoding="async" onError={() => setUrl(null)}/>}</Show>
   </div>;
 }
 

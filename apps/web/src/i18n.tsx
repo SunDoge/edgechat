@@ -513,6 +513,8 @@ export const zhHansMessages = {
   "deviceLinkApproval.notice": "批准只允许这台设备加入现有加密对话。二维码本身不能读取消息，也不会自动批准。",
   "attachment.image.checkingCache": "正在检查本机缓存…",
   "attachment.image.load": "加载图片 · {size}",
+  "attachment.image.loadOriginal": "加载原图 {name}，大小 {size}",
+  "attachment.image.loadOriginalShort": "加载原图 · {size}",
   "attachment.image.loading": "正在下载并解密…",
   "attachment.image.error": "图片加载失败",
   "attachment.image.retry": "重试",
