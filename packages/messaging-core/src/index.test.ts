@@ -49,7 +49,8 @@ describe("device support crypto", () => {
     expect(await deviceFingerprint(reordered, firstKeys.encryption_key)).toBe(stable);
     expect(await deviceFingerprint(secondKeys.signing_key, firstKeys.encryption_key)).not.toBe(stable);
     expect(stable).toMatch(/^[0-9A-F]{4}( [0-9A-F]{4}){7}$/);
-    expect(new TextDecoder().decode(deviceLinkClaimBytes("link", "device", "hash"))).toBe('{"version":1,"link_id":"link","device_id":"device","access_token_hash":"hash"}');
+    expect(new TextDecoder().decode(deviceLinkClaimBytes("link", "device", "access-hash", "device-hash")))
+      .toBe('{"version":2,"link_id":"link","device_id":"device","access_token_hash":"access-hash","device_credential_hash":"device-hash"}');
   });
 
   it("wraps an archive key independently to each active device", async () => {

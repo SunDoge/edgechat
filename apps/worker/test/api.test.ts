@@ -323,13 +323,17 @@ it("requires a target-device envelope before an opaque account can claim a linke
   const preview = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { headers: sourceHeaders });
   expect(await preview.json()).toMatchObject({ account_mode: "opaque", account_credential_ready: false });
 
-  const accessToken = "opaque-linked-device-client-token-00000001";
-  const accessTokenHash = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(accessToken)));
-  const transcript = new TextEncoder().encode(JSON.stringify({ version: 1, link_id: link.link_id, device_id: target.id, access_token_hash: accessTokenHash }));
+  const accessToken = "T".repeat(43); const deviceCredential = "D".repeat(43);
+  const [accessTokenHash, deviceCredentialHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(accessToken)).then(b64url),
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(deviceCredential)).then(b64url),
+  ]);
+  const transcript = new TextEncoder().encode(JSON.stringify({ version: 2, link_id: link.link_id, device_id: target.id,
+    access_token_hash: accessTokenHash, device_credential_hash: deviceCredentialHash }));
   const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, target.signing.privateKey, transcript));
   const claim = () => SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
     method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" },
-    body: JSON.stringify({ access_token: accessToken, signature }),
+    body: JSON.stringify({ access_token: accessToken, device_credential: deviceCredential, signature }),
   });
   const premature = await claim();
   expect(premature.status).toBe(409);
@@ -344,7 +348,47 @@ it("requires a target-device envelope before an opaque account can claim a linke
   const status = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
   expect(await status.json()).toMatchObject({ account_mode: "opaque", account_credential_ready: true,
     account_credential: { envelope, source_device_id: source.id } });
+  const bypass = await SELF.fetch("https://edgechat.test/api/v1/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: account.user_id, password: account.account_credential, device: target.body }),
+  });
+  expect(bypass.status).toBe(403);
+  expect(await bypass.json()).toMatchObject({ code: "device_link_claim_required" });
   expect((await claim()).status).toBe(200);
+  expect(await env.DB.prepare("SELECT device_credential_hash FROM devices WHERE device_id = ?").bind(target.id).first())
+    .toEqual({ device_credential_hash: deviceCredentialHash });
+  const otherDeviceCredential = "E".repeat(43);
+  const otherDeviceCredentialHash = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(otherDeviceCredential)));
+  const conflictingTranscript = new TextEncoder().encode(JSON.stringify({ version: 2, link_id: link.link_id, device_id: target.id,
+    access_token_hash: accessTokenHash, device_credential_hash: otherDeviceCredentialHash }));
+  const conflictingSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, target.signing.privateKey, conflictingTranscript));
+  const conflictingReplay = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
+    method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" },
+    body: JSON.stringify({ access_token: accessToken, device_credential: otherDeviceCredential, signature: conflictingSignature }),
+  });
+  expect(conflictingReplay.status).toBe(409);
+  expect(await conflictingReplay.json()).toMatchObject({ code: "device_link_claimed" });
+  expect((await claim()).status).toBe(200);
+  const challenge = await requestDeviceSessionChallenge(target.id, deviceCredential);
+  expect((await claimDeviceSession(target, deviceCredential, challenge)).status).toBe(200);
+
+  const revoked = await SELF.fetch(`https://edgechat.test/api/v1/devices/${target.id}/revocations`, { method: "POST", headers: sourceHeaders });
+  expect(revoked.status, await revoked.clone().text()).toBe(201);
+  expect(await revoked.json()).toMatchObject({ target_device_id: target.id, status: "complete", rooms: [] });
+  const rejectedOldDevice = await SELF.fetch("https://edgechat.test/api/v1/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: account.user_id, password: account.account_credential,
+      device: { ...target.body, device_credential: deviceCredential } }),
+  });
+  expect(rejectedOldDevice.status).toBe(403);
+  expect(await rejectedOldDevice.json()).toMatchObject({ code: "device_rejected" });
+  const unlinked = await device(`opaque-unlinked-${crypto.randomUUID()}`);
+  const rejectedFreshDevice = await SELF.fetch("https://edgechat.test/api/v1/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: account.user_id, password: account.account_credential, device: unlinked.body }),
+  });
+  expect(rejectedFreshDevice.status).toBe(403);
+  expect(await rejectedFreshDevice.json()).toMatchObject({ code: "device_link_required" });
   expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
 });
 
@@ -1763,17 +1807,21 @@ describe("single-server durable delivery", () => {
     expect(downloadedHistory.status).toBe(200);
     expect(new Uint8Array(await downloadedHistory.arrayBuffer())).toEqual(historyTransfer);
 
-    const accessToken = "linked-device-client-generated-token-00000001";
-    const accessTokenHash = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(accessToken)));
-    const transcript = new TextEncoder().encode(JSON.stringify({ version: 1, link_id: link.link_id, device_id: linkedDevice.id, access_token_hash: accessTokenHash }));
+    const accessToken = "A".repeat(43); const linkedDeviceCredential = "C".repeat(43);
+    const [accessTokenHash, linkedDeviceCredentialHash] = await Promise.all([
+      crypto.subtle.digest("SHA-256", new TextEncoder().encode(accessToken)).then(b64url),
+      crypto.subtle.digest("SHA-256", new TextEncoder().encode(linkedDeviceCredential)).then(b64url),
+    ]);
+    const transcript = new TextEncoder().encode(JSON.stringify({ version: 2, link_id: link.link_id, device_id: linkedDevice.id,
+      access_token_hash: accessTokenHash, device_credential_hash: linkedDeviceCredentialHash }));
     const proof = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, linkedDevice.signing.privateKey, transcript));
     const invalidProof = `${proof[0] === "A" ? "B" : "A"}${proof.slice(1)}`;
     const badClaim = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
-      method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" }, body: JSON.stringify({ access_token: accessToken, signature: invalidProof }),
+      method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" }, body: JSON.stringify({ access_token: accessToken, device_credential: linkedDeviceCredential, signature: invalidProof }),
     });
     expect(badClaim.status).toBe(400);
     const claim = () => SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
-      method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" }, body: JSON.stringify({ access_token: accessToken, signature: proof }),
+      method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" }, body: JSON.stringify({ access_token: accessToken, device_credential: linkedDeviceCredential, signature: proof }),
     });
     expect((await claim()).status).toBe(200);
     expect((await claim()).status).toBe(200);

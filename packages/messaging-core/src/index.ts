@@ -193,8 +193,9 @@ export async function deviceFingerprint(signingKey: JsonWebKey | string, encrypt
   return Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase().match(/.{4}/g)!.join(" ");
 }
 
-export function deviceLinkClaimBytes(linkId: string, deviceId: string, accessTokenHash: string): Uint8Array {
-  return encoder.encode(JSON.stringify({ version: 1, link_id: linkId, device_id: deviceId, access_token_hash: accessTokenHash }));
+export function deviceLinkClaimBytes(linkId: string, deviceId: string, accessTokenHash: string, deviceCredentialHash: string): Uint8Array {
+  return encoder.encode(JSON.stringify({ version: 2, link_id: linkId, device_id: deviceId,
+    access_token_hash: accessTokenHash, device_credential_hash: deviceCredentialHash }));
 }
 
 export class WebCryptoMessagingCore {

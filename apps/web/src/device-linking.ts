@@ -11,6 +11,7 @@ export type PendingDeviceLink = {
   package_count: number;
   expires_at: number;
   access_token?: string;
+  device_credential?: string;
 };
 
 export function deviceLinkUrl(origin: string, linkId: string, secret: string): string {
@@ -42,7 +43,10 @@ export function savePendingDeviceLink(profileId: string, link: PendingDeviceLink
 export function loadPendingDeviceLink(profileId: string): PendingDeviceLink | null {
   try {
     const value = JSON.parse(localStorage.getItem(pendingDeviceLinkKey(profileId)) ?? "null") as Partial<PendingDeviceLink> | null;
-    return value?.version === 1 && typeof value.link_id === "string" && typeof value.secret === "string" && typeof value.device_id === "string" && typeof value.package_count === "number" && typeof value.expires_at === "number" ? value as PendingDeviceLink : null;
+    return value?.version === 1 && typeof value.link_id === "string" && typeof value.secret === "string" && typeof value.device_id === "string"
+      && typeof value.package_count === "number" && typeof value.expires_at === "number"
+      && (value.access_token === undefined || /^[A-Za-z0-9_-]{43}$/.test(value.access_token))
+      && (value.device_credential === undefined || /^[A-Za-z0-9_-]{43}$/.test(value.device_credential)) ? value as PendingDeviceLink : null;
   } catch { return null; }
 }
 

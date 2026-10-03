@@ -134,10 +134,13 @@ export function DeviceLinkSetup(props: {
       }, identity);
     }
     const accessToken = current.access_token ?? randomDeviceLinkToken();
-    const withToken = { ...current, access_token: accessToken }; savePendingDeviceLink(props.profileId, withToken); setPending(withToken);
-    const tokenHash = await sha256Base64Url(accessToken);
-    const signature = await props.core.sign(identity, deviceLinkClaimBytes(current.link_id, current.device_id, tokenHash));
-    const session = await props.api.claimDeviceLink(current.link_id, current.secret, accessToken, signature);
+    const deviceCredential = current.device_credential ?? randomDeviceLinkToken();
+    const withToken = { ...current, access_token: accessToken, device_credential: deviceCredential };
+    savePendingDeviceLink(props.profileId, withToken); setPending(withToken);
+    const [tokenHash, deviceCredentialHash] = await Promise.all([sha256Base64Url(accessToken), sha256Base64Url(deviceCredential)]);
+    const signature = await props.core.sign(identity,
+      deviceLinkClaimBytes(current.link_id, current.device_id, tokenHash, deviceCredentialHash));
+    const session = await props.api.claimDeviceLink(current.link_id, current.secret, accessToken, deviceCredential, signature);
     props.api.setToken(accessToken);
     if (historySnapshot) {
       const bundle = await openDeviceHistoryBundle(historySnapshot);
@@ -164,6 +167,8 @@ export function DeviceLinkSetup(props: {
       if (!nextStatus.history_transfer) await props.api.acknowledgeDeviceLinkHistory(current.link_id, current.secret);
       await deviceHistoryStaging.clearLink(current.link_id);
     }
+    identity = { ...identity, deviceCredential };
+    await saveIdentity(props.profileId, identity);
     clearPendingDeviceLink(props.profileId); handedOff = true;
     props.onReady(session, identity, accessToken, mls, Boolean(historySnapshot));
   }

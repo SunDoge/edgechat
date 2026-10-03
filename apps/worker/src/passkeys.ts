@@ -22,6 +22,7 @@ export type PasskeyAuthentication = {
   user_id: string;
   display_name: string;
   avatar_id: string | null;
+  account_mode: "password" | "opaque";
   device: Record<string, unknown>;
 };
 
@@ -178,7 +179,7 @@ export async function authenticatePasskey(request: Request, env: Env): Promise<P
   if (key.counter !== 0 || verification.authenticationInfo.newCounter !== 0) update = update.where("counter", "=", key.counter);
   const updated = await update.executeTakeFirst();
   if (updated.numUpdatedRows !== 1n) throw new HttpError(401, "Passkey counter changed concurrently", "invalid_passkey_response");
-  const user = await db.selectFrom("users").select(["user_id", "display_name", "avatar_id"])
+  const user = await db.selectFrom("users").select(["user_id", "display_name", "avatar_id", "account_mode"])
     .where("user_id", "=", userId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirst();
   if (!user) throw new HttpError(401, "Passkey authentication failed", "invalid_passkey_response");
   return { ...user, device: device as Record<string, unknown> };

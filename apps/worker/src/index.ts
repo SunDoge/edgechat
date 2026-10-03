@@ -1382,7 +1382,7 @@ async function login(request: Request, env: Env): Promise<Response> {
   const password = stringField(body, "password", 256);
   await limitUnauthenticatedRequest(request, env, "login", userId);
   const db = createDatabase(env.DB);
-  const user = await db.selectFrom("users").select(["user_id", "display_name", "avatar_id", "password_hash", "password_salt", "deletion_requested_at", "deleted_at"])
+  const user = await db.selectFrom("users").select(["user_id", "display_name", "avatar_id", "password_hash", "password_salt", "account_mode", "deletion_requested_at", "deleted_at"])
     .where("user_id", "=", userId).executeTakeFirst();
   const blocked = user ? await loginTemporarilyBlocked(env, userId) : false;
   if (!user || user.deletion_requested_at !== null || user.deleted_at !== null || blocked) {
@@ -1398,10 +1398,10 @@ async function login(request: Request, env: Env): Promise<Response> {
   }
   const device = body.device as Record<string, unknown> | undefined;
   if (!device || typeof device !== "object" || Array.isArray(device)) throw new HttpError(400, "Device is required", "invalid_device");
-  return establishDeviceSession(env, userId, user, device, true, true);
+  return establishDeviceSession(env, userId, user, device, true, user.account_mode !== "opaque");
 }
 
-async function establishDeviceSession(env: Env, userId: UserId, user: { display_name: string; avatar_id: string | null }, device: Record<string, unknown>, allowBackupRestore: boolean, allowNewDevice: boolean): Promise<Response> {
+async function establishDeviceSession(env: Env, userId: UserId, user: { display_name: string; avatar_id: string | null; account_mode: "password" | "opaque" }, device: Record<string, unknown>, allowBackupRestore: boolean, allowNewDevice: boolean): Promise<Response> {
   const db = createDatabase(env.DB);
   const deviceId = stringField(device, "device_id", 96);
   const deviceName = stringField(device, "display_name", 60);
@@ -1417,6 +1417,9 @@ async function establishDeviceSession(env: Env, userId: UserId, user: { display_
   if (existing && (existing.user_id !== userId || existing.revoked_at !== null)) throw new HttpError(403, "Device cannot be used", "device_rejected");
   if (existing && (!samePublicKey(existing.signing_key, signingKey) || !samePublicKey(existing.encryption_key, encryptionKey))) {
     throw new HttpError(403, "Device public keys do not match the registered identity", "device_key_mismatch");
+  }
+  if (existing && !existing.device_credential_hash && user.account_mode === "opaque") {
+    throw new HttpError(403, "This device must finish its approved device link", "device_link_claim_required");
   }
   if (!existing && (backupCheckpoint || deviceCredential)) throw new HttpError(403, "Backup device is no longer registered", "backup_device_missing");
   const now = Date.now();
@@ -2072,22 +2075,43 @@ async function claimDeviceLink(request: Request, env: Env, linkId: string): Prom
   const link = await deviceLinkBySecret(request, env, linkId);
   if (!link.user_id || (link.status !== "complete" && link.status !== "claimed")) throw new HttpError(409, "Device link is not ready", "device_link_not_ready");
   const body = await readJson(request);
-  const accessToken = stringField(body, "access_token", 128); const signature = stringField(body, "signature", 512);
-  if (!/^[A-Za-z0-9_-]{32,128}$/.test(accessToken)) throw new HttpError(400, "Invalid access token", "invalid_input");
-  const tokenHash = await sha256(accessToken);
-  const transcript = new TextEncoder().encode(JSON.stringify({ version: 1, link_id: linkId, device_id: link.device_id, access_token_hash: tokenHash }));
+  const accessToken = stringField(body, "access_token", 128);
+  const deviceCredential = stringField(body, "device_credential", 64);
+  const signature = stringField(body, "signature", 512);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(accessToken) || !/^[A-Za-z0-9_-]{43}$/.test(deviceCredential)) {
+    throw new HttpError(400, "Invalid device claim credentials", "invalid_input");
+  }
+  const [tokenHash, deviceCredentialHash] = await Promise.all([sha256(accessToken), sha256(deviceCredential)]);
+  const claimBindingHash = await sha256(`edgechat-device-link-claim-v2\0${tokenHash}\0${deviceCredentialHash}`);
+  const transcript = new TextEncoder().encode(JSON.stringify({ version: 2, link_id: linkId, device_id: link.device_id,
+    access_token_hash: tokenHash, device_credential_hash: deviceCredentialHash }));
   const key = await crypto.subtle.importKey("jwk", JSON.parse(link.signing_key) as JsonWebKey, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
   if (!(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, fromB64url(signature), transcript))) throw new HttpError(400, "Invalid device proof", "invalid_signature");
-  if (link.status === "claimed" && link.claim_token_hash !== tokenHash) throw new HttpError(409, "Device link was already claimed", "device_link_claimed");
   const db = createDatabase(env.DB); const now = Date.now();
   const user = await db.selectFrom("users").select(["display_name", "avatar_id", "account_mode"]).where("user_id", "=", link.user_id).executeTakeFirstOrThrow();
   if (user.account_mode === "opaque" && (!link.account_credential_envelope || !link.account_credential_source_device_id)) {
     throw new HttpError(409, "Account credential transfer is not ready", "account_credential_not_ready");
   }
-  if (link.status === "complete") await batch(env.DB, [
-    db.insertInto("sessions").values({ token_hash: tokenHash, user_id: link.user_id, device_id: link.device_id, created_at: now, expires_at: now + DEVICE_LINK_SESSION_MS }).onConflict((conflict) => conflict.column("token_hash").doNothing()),
-    db.updateTable("device_links").set({ status: "claimed", claim_token_hash: tokenHash, claimed_at: now, updated_at: now }).where("link_id", "=", linkId).where("status", "=", "complete"),
-  ]);
+  const linkedDevice = await db.selectFrom("devices").select("device_credential_hash").where("device_id", "=", link.device_id)
+    .where("user_id", "=", link.user_id).executeTakeFirstOrThrow();
+  if (link.status === "claimed") {
+    if (link.claim_token_hash !== claimBindingHash || linkedDevice.device_credential_hash !== deviceCredentialHash) {
+      throw new HttpError(409, "Device link was already claimed", "device_link_claimed");
+    }
+  } else {
+    if (linkedDevice.device_credential_hash !== null) throw new HttpError(409, "Linked device credential is already set", "device_link_claimed");
+    const results = await env.DB.batch([
+      env.DB.prepare("UPDATE device_links SET status = 'claimed', claim_token_hash = ?1, claimed_at = ?2, updated_at = ?2 WHERE link_id = ?3 AND status = 'complete' AND NOT EXISTS (SELECT 1 FROM sessions WHERE token_hash = ?4)")
+        .bind(claimBindingHash, now, linkId, tokenHash),
+      env.DB.prepare("UPDATE devices SET device_credential_hash = ?1, last_seen_at = ?2 WHERE device_id = ?3 AND user_id = ?4 AND device_credential_hash IS NULL AND EXISTS (SELECT 1 FROM device_links WHERE link_id = ?5 AND claim_token_hash = ?6)")
+        .bind(deviceCredentialHash, now, link.device_id, link.user_id, linkId, claimBindingHash),
+      env.DB.prepare("INSERT OR IGNORE INTO sessions (token_hash,user_id,device_id,created_at,expires_at) SELECT ?1,?2,?3,?4,?5 WHERE EXISTS (SELECT 1 FROM device_links WHERE link_id = ?6 AND claim_token_hash = ?7)")
+        .bind(tokenHash, link.user_id, link.device_id, now, now + DEVICE_LINK_SESSION_MS, linkId, claimBindingHash),
+    ]);
+    if (results.some((result) => Number(result.meta.changes ?? 0) !== 1)) {
+      throw new HttpError(409, "Device link was claimed concurrently", "device_link_claimed");
+    }
+  }
   return json({ user_id: link.user_id, device_id: link.device_id, display_name: user.display_name, avatar_url: avatarUrl(user.avatar_id), server_name: env.SERVER_NAME, ...sessionCapabilities(env) });
 }
 
