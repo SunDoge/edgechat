@@ -6,6 +6,7 @@ describe("portable encrypted backup", () => {
   it("round-trips multiple authenticated chunks and rejects a changed tag", async () => {
     const core = new WebCryptoMessagingCore();
     const identity = await core.createIdentity();
+    identity.accountCredential = "a".repeat(43);
     identity.mlsState = Uint8Array.from({ length: 90_000 }, (_, index) => index % 251);
     const portable = await core.exportPortableIdentity(identity);
     const database = new Blob([Uint8Array.from({ length: 100_000 }, (_, index) => index % 239)]);

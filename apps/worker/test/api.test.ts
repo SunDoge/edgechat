@@ -45,7 +45,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
   expect(tooNew.status).toBe(426);
@@ -267,6 +267,86 @@ async function register(localpart: string, currentDevice: Awaited<ReturnType<typ
   expect(result.device_credential).toMatch(/^[A-Za-z0-9_-]{43}$/);
   return result;
 }
+
+async function registerOpaque(displayName: string, currentDevice: Awaited<ReturnType<typeof device>>) {
+  const response = await SELF.fetch("https://edgechat.test/api/v1/register/opaque", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ display_name: displayName, device: currentDevice.body }),
+  });
+  expect(response.status, await response.clone().text()).toBe(201);
+  return response.json() as Promise<{ access_token: string; user_id: UserId; device_id: string; device_credential: string; account_credential: string; account_mode: "opaque"; display_name: string }>;
+}
+
+it("creates an opaque account from a nickname and persists only credential hashes in D1", async () => {
+  const r2Before = (await env.ARCHIVE.list()).objects.length;
+  const currentDevice = await device(`opaque-register-${crypto.randomUUID()}`);
+  const account = await registerOpaque("Alice", currentDevice);
+  expect(account).toMatchObject({ device_id: currentDevice.id, account_mode: "opaque", display_name: "Alice" });
+  expect(account.user_id).toMatch(/^@u_[a-z0-9_-]{20,}:localhost$/);
+  expect(account.account_credential).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(account.device_credential).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  const stored = await env.DB.prepare("SELECT localpart, display_name, account_mode, password_hash, password_salt FROM users WHERE user_id = ?")
+    .bind(account.user_id).first<{ localpart: string; display_name: string; account_mode: string; password_hash: string; password_salt: string }>();
+  expect(stored).toMatchObject({ display_name: "Alice", account_mode: "opaque" });
+  expect(stored?.localpart).toBe(account.user_id.slice(1, account.user_id.indexOf(":")));
+  expect(stored?.password_hash).not.toContain(account.account_credential);
+  expect(stored?.password_salt).not.toContain(account.account_credential);
+  const login = await SELF.fetch("https://edgechat.test/api/v1/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: account.user_id, password: account.account_credential, device: { ...currentDevice.body, device_credential: account.device_credential } }),
+  });
+  expect(login.status, await login.clone().text()).toBe(200);
+  expect((await login.json() as Record<string, unknown>)).not.toHaveProperty("account_credential");
+  const passwordChange = await SELF.fetch("https://edgechat.test/api/v1/account/password", {
+    method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" },
+    body: JSON.stringify({ current_password: account.account_credential, new_password: "replacement-password-value", logout_other_devices: true }),
+  });
+  expect(passwordChange.status).toBe(409);
+  expect(await passwordChange.json()).toMatchObject({ code: "password_change_not_supported" });
+  expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
+});
+
+it("requires a target-device envelope before an opaque account can claim a linked device", async () => {
+  const r2Before = (await env.ARCHIVE.list()).objects.length;
+  const source = await device(`opaque-link-source-${crypto.randomUUID()}`);
+  const target = await device(`opaque-link-target-${crypto.randomUUID()}`);
+  const account = await registerOpaque("Linked profile", source);
+  const initiated = await SELF.fetch("https://edgechat.test/api/v1/device-links", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...target.body, mls_key_packages: ["L".repeat(120)] }),
+  });
+  expect(initiated.status, await initiated.clone().text()).toBe(201);
+  const link = await initiated.json() as { link_id: string; secret: string };
+  const sourceHeaders = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
+  const approved = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "POST", headers: sourceHeaders });
+  expect(await approved.json()).toMatchObject({ status: "complete", required_packages: 0 });
+  const preview = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { headers: sourceHeaders });
+  expect(await preview.json()).toMatchObject({ account_mode: "opaque", account_credential_ready: false });
+
+  const accessToken = "opaque-linked-device-client-token-00000001";
+  const accessTokenHash = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(accessToken)));
+  const transcript = new TextEncoder().encode(JSON.stringify({ version: 1, link_id: link.link_id, device_id: target.id, access_token_hash: accessTokenHash }));
+  const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, target.signing.privateKey, transcript));
+  const claim = () => SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/claim`, {
+    method: "POST", headers: { "x-device-link-secret": link.secret, "content-type": "application/json" },
+    body: JSON.stringify({ access_token: accessToken, signature }),
+  });
+  const premature = await claim();
+  expect(premature.status).toBe(409);
+  expect(await premature.json()).toMatchObject({ code: "account_credential_not_ready" });
+
+  const envelope = "A".repeat(128);
+  const uploaded = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/account-credential`, {
+    method: "PUT", headers: sourceHeaders, body: JSON.stringify({ envelope }),
+  });
+  expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+  expect(await uploaded.json()).toEqual({ ready: true, source_device_id: source.id });
+  const status = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
+  expect(await status.json()).toMatchObject({ account_mode: "opaque", account_credential_ready: true,
+    account_credential: { envelope, source_device_id: source.id } });
+  expect((await claim()).status).toBe(200);
+  expect((await env.ARCHIVE.list()).objects.length).toBe(r2Before);
+});
 
 async function loginDevice(userId: UserId, currentDevice: Awaited<ReturnType<typeof device>>, deviceCredential?: string) {
   const response = await SELF.fetch("https://edgechat.test/api/v1/login", {

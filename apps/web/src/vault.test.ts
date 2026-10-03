@@ -12,6 +12,7 @@ describe("Dexie device vault", () => {
   it("round-trips the structured-cloned device identity without exporting private keys", async () => {
     const identity = await new WebCryptoMessagingCore().createIdentity();
     identity.mlsState = new Uint8Array([1, 2, 3]);
+    identity.accountCredential = "a".repeat(43);
 
     await saveIdentity(FIRST, identity);
     const restored = await loadIdentity(FIRST);
@@ -20,6 +21,7 @@ describe("Dexie device vault", () => {
     expect(Array.from(restored?.mlsState ?? [])).toEqual([1, 2, 3]);
     expect(restored?.signingPrivateKey).toBeInstanceOf(CryptoKey);
     expect(restored?.encryptionPrivateKey).toBeInstanceOf(CryptoKey);
+    expect(restored?.accountCredential).toBe("a".repeat(43));
   });
 
   it("isolates and clears only the selected local profile identity", async () => {

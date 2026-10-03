@@ -13,7 +13,7 @@ import { BackupRestoreForm } from "./BackupRestoreForm";
 import { profileSessionKey } from "../local-profiles";
 import { useI18n } from "../i18n";
 
-export function AuthScreen(props: { profileId: string; accountHint?: string | null; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void>; onManageProfiles: () => void }) {
+export function AuthScreen(props: { profileId: string; accountHint?: string | null; api: ApiClient; core: WebCryptoMessagingCore; db: LocalDatabase; onReady: (session: SessionIdentity, identity: DeviceIdentity, token: string, mls: OpenMlsMessagingCore, restoredHistory?: boolean) => void; onRestoreBackup: (file: File, password: string) => Promise<void>; onManageProfiles: () => void }) {
   const { t } = useI18n();
   const restoreUserKey = profileSessionKey(props.profileId, "restore-user-id");
   const restoreCheckpointKey = profileSessionKey(props.profileId, "restore-checkpoint");
@@ -24,6 +24,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   const finishingRestore = Boolean(restoreCheckpoint);
   if (restoredUserHint) sessionStorage.removeItem(restoreUserKey);
   const [mode, setMode] = createSignal<"register" | "login" | "link">(restoredUserHint ? "login" : "register");
+  const [displayName, setDisplayName] = createSignal("");
   const [username, setUsername] = createSignal(restoredUserHint);
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -39,14 +40,15 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   const [appealError, setAppealError] = createSignal("");
   const [deviceContinueAvailable, setDeviceContinueAvailable] = createSignal(false);
   const [localIdentityAvailable, setLocalIdentityAvailable] = createSignal(false);
+  const [localAccountCredential, setLocalAccountCredential] = createSignal("");
   const [passkeysSupported, setPasskeysSupported] = createSignal(false);
 
   onMount(() => {
     setPasskeysSupported(browserSupportsWebAuthn());
-    if (!restoredUserHint) return;
     void loadIdentity(props.profileId).then((identity) => {
       setLocalIdentityAvailable(Boolean(identity));
       setDeviceContinueAvailable(Boolean(identity?.deviceCredential));
+      setLocalAccountCredential(identity?.accountCredential ?? "");
     }).catch(() => undefined);
   });
 
@@ -113,9 +115,14 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     try {
       const { stored, mls, device } = await prepareDevice();
       const result = mode() === "register"
-        ? await props.api.register({ localpart: username(), password: password(), device })
-        : await props.api.login({ user_id: username(), password: password(), device });
-      const authenticatedIdentity = result.device_credential ? { ...stored, deviceCredential: result.device_credential } : stored;
+        ? await props.api.registerOpaque({ display_name: displayName().trim(), device })
+        : await props.api.login({ user_id: username(), password: localAccountCredential() || stored.accountCredential || password(), device });
+      const accountCredential = "account_credential" in result && typeof result.account_credential === "string" ? result.account_credential : undefined;
+      const authenticatedIdentity: DeviceIdentity = {
+        ...stored,
+        ...(result.device_credential ? { deviceCredential: result.device_credential } : {}),
+        ...(accountCredential ? { accountCredential } : {}),
+      };
       if (authenticatedIdentity !== stored) await saveIdentity(props.profileId, authenticatedIdentity);
       sessionStorage.removeItem(restoreCheckpointKey);
       sessionStorage.removeItem(restorePhaseKey);
@@ -135,7 +142,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   async function submitAppeal(event: SubmitEvent) {
     event.preventDefault(); setAppealBusy(true); setAppealError("");
     try {
-      const result = await props.api.createAccountAppeal(username(), password(), appealCategory());
+      const result = await props.api.createAccountAppeal(username(), localAccountCredential() || password(), appealCategory());
       localStorage.setItem(appealReceiptKey, result.receipt);
       setAppealReceipt(result.receipt); setAppealStatus(result.status);
     } catch (cause) { setAppealError(cause instanceof Error ? cause.message : t("auth.appeal.submit.error")); }
@@ -151,7 +158,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     </div>}>
       <form class="grid gap-4" onSubmit={submitAppeal}>
         <Input label={t("auth.appeal.username")} id="appeal-username" name="appeal_username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username" required/>
-        <Input label={t("auth.appeal.password")} id="appeal-password" name="appeal_password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" required/>
+        <Show when={!localAccountCredential()} fallback={<p class="rounded-lg bg-brand-soft px-3 py-2.5 text-xs/5 text-brand">{t("auth.accountCredential.local")}</p>}><Input label={t("auth.appeal.password")} id="appeal-password" name="appeal_password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" required/></Show>
         <label class="grid gap-2 text-sm font-medium text-ink" for="appeal-category">{t("auth.appeal.category")}<select id="appeal-category" class="h-11 rounded-lg bg-white px-3 text-sm ring-1 ring-inset ring-black/10 focus:outline-2 focus:outline-brand" value={appealCategory()} onChange={(event) => setAppealCategory(event.currentTarget.value as AccountAppealCategory)}><option value="login_locked">{t("auth.appeal.category.loginLocked")}</option><option value="device_lost">{t("auth.appeal.category.deviceLost")}</option><option value="account_access">{t("auth.appeal.category.accountAccess")}</option></select></label>
         <p class="text-xs/5 text-muted">{t("auth.appeal.passwordNotice")}</p>
         <Show when={appealError()}><p role="alert" class="text-sm text-red-600">{appealError()}</p></Show>
@@ -182,16 +189,20 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
       <div class="flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.deviceContinue.passwordFallback")}<span class="h-px flex-1 bg-black/10"/></div>
     </div></Show>
     <form class="grid gap-5" onSubmit={submit}>
-      <div class="grid gap-1.5">
-        <Input label={mode() === "register" ? t("auth.accountName") : t("auth.accountIdentifier")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "alice 或 @alice:example.com"} autocomplete={mode() === "login" ? "username webauthn" : "username"} aria-describedby={mode() === "register" ? "account-name-help" : undefined} required autofocus={!restoredUserHint}/>
-        <Show when={mode() === "register"}><p id="account-name-help" class="text-xs/5 text-muted">{t("auth.accountNameHint")}</p></Show>
-      </div>
-      <div class="grid gap-1.5">
-        <Input label={t("auth.loginPassword")} id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete={mode() === "register" ? "new-password" : "current-password"} aria-describedby="login-password-help" required autofocus={Boolean(restoredUserHint)}/>
-        <p id="login-password-help" class="text-xs/5 text-muted">{t("auth.loginPasswordHint")}</p>
-      </div>
+      <Show when={mode() === "register"} fallback={<>
+        <Show when={!finishingRestore}><Input label={t("auth.accountIdentifier")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username webauthn" required autofocus={!restoredUserHint}/></Show>
+        <Show when={!localAccountCredential()} fallback={<div class="rounded-lg bg-brand-soft px-3 py-3 text-sm/6 text-brand">{t("auth.accountCredential.local")}</div>}>
+          <Input label={t("auth.loginPassword")} id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" aria-describedby="login-password-help" required autofocus={Boolean(restoredUserHint)}/>
+          <p id="login-password-help" class="text-xs/5 text-muted">{t("auth.loginPasswordHint")}</p>
+        </Show>
+      </>}>
+        <div class="grid gap-1.5">
+          <Input label={t("auth.displayName")} id="display-name" name="display_name" value={displayName()} onInput={(event) => setDisplayName(event.currentTarget.value)} maxLength={80} autocomplete="nickname" aria-describedby="display-name-help" required autofocus/>
+          <p id="display-name-help" class="text-xs/5 text-muted">{t("auth.displayNameHint")}</p>
+        </div>
+      </Show>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm/5 text-red-700">{error()}</div></Show>
-      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy() || deviceBusy() || passkeyBusy()}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
+      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy() || deviceBusy() || passkeyBusy() || (mode() === "register" ? !displayName().trim() : !username() || (!localAccountCredential() && password().length < 10))}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
       <Show when={mode() === "login" && !finishingRestore}><button type="button" class="text-sm font-medium text-brand" onClick={() => { setAppealOpen(true); if (appealReceipt()) void refreshAppealStatus(); }}>{t("auth.login.appealAction")}</button></Show>
     </form>
     <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.alternative")}<span class="h-px flex-1 bg-black/10"/></div>

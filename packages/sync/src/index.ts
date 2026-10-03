@@ -69,6 +69,9 @@ export type DeviceLinkStatus = {
   history_transfer_bytes: number | null;
   history_source_device_id: string | null;
   history_transfer: DeviceHistoryTransfer | null;
+  account_credential_ready: boolean;
+  account_credential?: { envelope: string; source_device_id: string };
+  account_mode?: "password" | "opaque";
   user_id?: string;
   room_count?: number;
   rooms?: Array<{ room_id: RoomId; expected_epoch: number; status: "pending" | "complete"; encrypted_state: string | null; name: string | null; kind: "direct" | "group"; purpose: "chat" | "saved" }>;
@@ -88,6 +91,8 @@ export type DeviceLinkPreview = {
   status: DeviceLinkStatus["status"]; required_packages: number; expires_at: number;
   history_transfer_ready: boolean; history_transfer_bytes: number | null; history_source_device_id: string | null;
   history_transfer: DeviceHistoryTransfer | null;
+  account_credential_ready: boolean;
+  account_mode?: "password" | "opaque";
   rooms: Array<{ room_id: RoomId; key_package: string; expected_epoch: number; status: "pending" | "complete"; event_id: string | null; name: string | null; kind: "direct" | "group"; purpose: "chat" | "saved" }>;
 };
 export type AccountRemovalTask = {
@@ -140,6 +145,7 @@ export class ApiClient {
   getToken(): string | null { return this.token; }
 
   register(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/register", { method: "POST", body: JSON.stringify(payload) }); }
+  registerOpaque(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string; account_credential: string; account_mode: "opaque" }>("/api/v1/register/opaque", { method: "POST", body: JSON.stringify(payload) }); }
   login(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/login", { method: "POST", body: JSON.stringify(payload) }); }
   deviceSessionChallenge(deviceId: string, deviceCredential: string) {
     return this.request<{ challenge: DeviceSessionChallenge }>("/api/v1/device-sessions/challenge", {
@@ -199,6 +205,7 @@ export class ApiClient {
   }
   deviceLinkPreview(linkId: string) { return this.request<DeviceLinkPreview>(`/api/v1/device-links/${encodeURIComponent(linkId)}`); }
   approveDeviceLink(linkId: string) { return this.request<{ link_id: string; status: DeviceLinkStatus["status"]; required_packages: number; expires_at: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}`, { method: "POST" }); }
+  uploadDeviceLinkAccountCredential(linkId: string, envelope: string) { return this.request<{ ready: true; source_device_id: string }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/account-credential`, { method: "PUT", body: JSON.stringify({ envelope }) }); }
   commitDeviceLinkRoom(linkId: string, roomId: RoomId, event: ClientEvent, encryptedState: string) { return this.request<{ link_id: string; room_id: RoomId; status: "complete"; event: RoomEvent }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/rooms/${encodeURIComponent(roomId)}`, { method: "POST", body: JSON.stringify({ event, encrypted_state: encryptedState }) }); }
   claimDeviceLink(linkId: string, secret: string, accessToken: string, signature: string) { return this.sessionRequest<SessionIdentity>(`/api/v1/device-links/${encodeURIComponent(linkId)}/claim`, { method: "POST", headers: { "x-device-link-secret": secret }, body: JSON.stringify({ access_token: accessToken, signature }) }); }
   checkBackupRestore(payload: Record<string, unknown>) { return this.request<{ valid: true }>("/api/v1/backup-restores/check", { method: "POST", body: JSON.stringify(payload) }); }

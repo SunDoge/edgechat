@@ -1214,6 +1214,41 @@ async function register(request: Request, env: Env): Promise<Response> {
   return json({ access_token: token, user_id: userId, device_id: deviceId, device_credential: deviceCredential, display_name: displayName, avatar_url: null, server_name: env.SERVER_NAME, ...sessionCapabilities(env) }, 201);
 }
 
+async function registerOpaqueAccount(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  const displayName = normalizedDisplayName(body.display_name);
+  const device = body.device as Record<string, unknown> | undefined;
+  if (!device || typeof device !== "object" || Array.isArray(device)) throw new HttpError(400, "Device is required", "invalid_device");
+  const deviceId = stringField(device, "device_id", 96);
+  const deviceName = stringField(device, "display_name", 60);
+  const signingKey = stringField(device, "signing_key", 2_000);
+  const encryptionKey = stringField(device, "encryption_key", 2_000);
+  const packages = mlsKeyPackages(device);
+  await limitUnauthenticatedRequest(request, env, "register", deviceId);
+  await validatePublicKeys(signingKey, encryptionKey);
+  const localpart = `u_${randomId(18).toLowerCase()}`;
+  const accountCredential = randomId(32);
+  const credential = await passwordHash(accountCredential);
+  const deviceCredential = randomId(32);
+  const userId = `@${localpart}:${env.SERVER_NAME}` as UserId;
+  const now = Date.now();
+  try {
+    const db = createDatabase(env.DB);
+    await batch(env.DB, [
+      db.insertInto("users").values({ user_id: userId, localpart, display_name: displayName, bio: "", account_mode: "opaque", password_hash: credential.hash, password_salt: credential.salt, created_at: now }),
+      db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, device_credential_hash: await sha256(deviceCredential), created_at: now, last_seen_at: now, revoked_at: null }),
+      ...(await keyPackageInserts(db, deviceId, packages, now)),
+    ]);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("UNIQUE")) throw new HttpError(409, "Device already exists", "already_exists");
+    throw error;
+  }
+  const token = await createSession(env, userId, deviceId);
+  return json({ access_token: token, user_id: userId, device_id: deviceId, device_credential: deviceCredential,
+    account_credential: accountCredential, account_mode: "opaque", display_name: displayName, avatar_url: null,
+    server_name: env.SERVER_NAME, ...sessionCapabilities(env) }, 201);
+}
+
 async function changePassword(request: Request, env: Env, auth: AuthContext): Promise<Response> {
   requireUser(auth);
   await limitUnauthenticatedRequest(request, env, "password-change", auth.userId);
@@ -1225,8 +1260,9 @@ async function changePassword(request: Request, env: Env, auth: AuthContext): Pr
   if (newPassword.length < 10) throw new HttpError(400, "Password must be at least 10 characters", "weak_password");
 
   const db = createDatabase(env.DB);
-  const user = await db.selectFrom("users").select(["password_hash", "password_salt"])
+  const user = await db.selectFrom("users").select(["password_hash", "password_salt", "account_mode"])
     .where("user_id", "=", auth.userId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirst();
+  if (user?.account_mode === "opaque") throw new HttpError(409, "Generated account credentials cannot be changed manually", "password_change_not_supported");
   let verified = false;
   try { verified = Boolean(user) && currentPassword.length >= 10 && await verifyPassword(currentPassword, user!.password_hash, user!.password_salt); }
   catch { verified = false; }
@@ -1717,6 +1753,7 @@ async function createDeviceLink(request: Request, env: Env): Promise<Response> {
 async function deviceLinkStatus(request: Request, env: Env, linkId: string): Promise<Response> {
   const link = await deviceLinkBySecret(request, env, linkId);
   const db = createDatabase(env.DB);
+  const account = link.user_id ? await db.selectFrom("users").select("account_mode").where("user_id", "=", link.user_id).executeTakeFirst() : null;
   const rooms = link.user_id ? await db.selectFrom("device_link_rooms as dlr").innerJoin("rooms as r", "r.room_id", "dlr.room_id")
     .select(["dlr.room_id", "dlr.expected_epoch", "dlr.status", "dlr.encrypted_state", "r.name", "r.kind", "r.purpose"])
     .where("dlr.link_id", "=", linkId).orderBy("dlr.room_id").execute() : [];
@@ -1728,6 +1765,11 @@ async function deviceLinkStatus(request: Request, env: Env, linkId: string): Pro
     history_transfer_bytes: transfer?.ciphertext_bytes ?? link.history_bytes ?? null,
     history_source_device_id: transfer?.source_device_id ?? link.history_source_device_id ?? null,
     history_transfer: transfer,
+    account_credential_ready: Boolean(link.account_credential_envelope && link.account_credential_source_device_id),
+    account_mode: account?.account_mode,
+    ...(link.account_credential_envelope && link.account_credential_source_device_id ? {
+      account_credential: { envelope: link.account_credential_envelope, source_device_id: link.account_credential_source_device_id },
+    } : {}),
     ...(link.status === "complete" || link.status === "claimed" ? { user_id: link.user_id, rooms } : { room_count: rooms.length }),
   });
 }
@@ -1736,7 +1778,7 @@ async function previewDeviceLink(env: Env, auth: AuthContext, linkId: string): P
   requireUser(auth);
   const db = createDatabase(env.DB);
   const link = await db.selectFrom("device_links")
-    .select(["link_id", "device_id", "display_name", "signing_key", "encryption_key", "user_id", "approved_by_device_id", "status", "required_packages", "expires_at", "history_object_key", "history_bytes", "history_source_device_id"])
+    .select(["link_id", "device_id", "display_name", "signing_key", "encryption_key", "user_id", "approved_by_device_id", "status", "required_packages", "expires_at", "history_object_key", "history_bytes", "history_source_device_id", "account_credential_envelope"])
     .where("link_id", "=", linkId).executeTakeFirst();
   if (!link || link.status === "cancelled" || (link.status === "pending" && link.expires_at <= Date.now())) throw new HttpError(404, "Device link not found", "not_found");
   if (link.user_id && link.user_id !== auth.userId) throw new HttpError(404, "Device link not found", "not_found");
@@ -1750,9 +1792,36 @@ async function previewDeviceLink(env: Env, auth: AuthContext, linkId: string): P
   const rooms = link.user_id ? await db.selectFrom("device_link_rooms as dlr").innerJoin("rooms as r", "r.room_id", "dlr.room_id")
     .select(["dlr.room_id", "dlr.key_package", "dlr.expected_epoch", "dlr.status", "dlr.event_id", "r.name", "r.kind", "r.purpose"])
     .where("dlr.link_id", "=", linkId).orderBy("dlr.room_id").execute() : [];
-  const { history_object_key: historyObjectKey, ...publicLink } = link;
+  const { history_object_key: historyObjectKey, account_credential_envelope: accountCredentialEnvelope, ...publicLink } = link;
   const transfer = await deviceLinkHistoryTransfer(env, linkId);
-  return json({ ...publicLink, history_transfer_ready: transfer ? transfer.ready_shards.length + transfer.acked_shards.length === transfer.shard_count : Boolean(historyObjectKey && link.history_bytes), history_transfer_bytes: transfer?.ciphertext_bytes ?? link.history_bytes ?? null, history_source_device_id: transfer?.source_device_id ?? link.history_source_device_id, history_transfer: transfer, signing_key: JSON.parse(link.signing_key), encryption_key: JSON.parse(link.encryption_key), rooms });
+  const account = link.user_id ? await db.selectFrom("users").select("account_mode").where("user_id", "=", link.user_id).executeTakeFirst() : null;
+  return json({ ...publicLink, account_credential_ready: Boolean(accountCredentialEnvelope), account_mode: account?.account_mode,
+    history_transfer_ready: transfer ? transfer.ready_shards.length + transfer.acked_shards.length === transfer.shard_count : Boolean(historyObjectKey && link.history_bytes),
+    history_transfer_bytes: transfer?.ciphertext_bytes ?? link.history_bytes ?? null, history_source_device_id: transfer?.source_device_id ?? link.history_source_device_id,
+    history_transfer: transfer, signing_key: JSON.parse(link.signing_key), encryption_key: JSON.parse(link.encryption_key), rooms });
+}
+
+async function uploadDeviceLinkAccountCredential(request: Request, env: Env, auth: AuthContext, linkId: string): Promise<Response> {
+  requireUser(auth);
+  const body = await readJson(request, 8_192);
+  const envelope = stringField(body, "envelope", 4_096);
+  if (!/^[A-Za-z0-9_-]{128,4096}$/.test(envelope)) throw new HttpError(400, "Invalid account credential envelope", "invalid_account_credential_envelope");
+  const db = createDatabase(env.DB);
+  const link = await db.selectFrom("device_links").select(["user_id", "device_id", "approved_by_device_id", "status", "account_credential_envelope", "account_credential_source_device_id"])
+    .where("link_id", "=", linkId).executeTakeFirst();
+  if (!link || link.user_id !== auth.userId || link.approved_by_device_id !== auth.deviceId || link.device_id === auth.deviceId
+    || !["awaiting_packages", "approved", "complete", "claimed"].includes(link.status)) throw new HttpError(404, "Device link not found", "not_found");
+  if (link.account_credential_envelope) {
+    if (link.account_credential_envelope !== envelope || link.account_credential_source_device_id !== auth.deviceId) {
+      throw new HttpError(409, "A different account credential envelope is already attached", "account_credential_conflict");
+    }
+    return json({ ready: true, source_device_id: auth.deviceId });
+  }
+  const updated = await db.updateTable("device_links").set({ account_credential_envelope: envelope,
+    account_credential_source_device_id: auth.deviceId, updated_at: Date.now() })
+    .where("link_id", "=", linkId).where("account_credential_envelope", "is", null).executeTakeFirst();
+  if (updated.numUpdatedRows !== 1n) throw new HttpError(409, "Account credential envelope changed concurrently", "account_credential_conflict");
+  return json({ ready: true, source_device_id: auth.deviceId }, 201);
 }
 
 async function createDeviceLinkHistoryTransfer(request: Request, env: Env, auth: AuthContext, linkId: string): Promise<Response> {
@@ -2011,11 +2080,14 @@ async function claimDeviceLink(request: Request, env: Env, linkId: string): Prom
   if (!(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, fromB64url(signature), transcript))) throw new HttpError(400, "Invalid device proof", "invalid_signature");
   if (link.status === "claimed" && link.claim_token_hash !== tokenHash) throw new HttpError(409, "Device link was already claimed", "device_link_claimed");
   const db = createDatabase(env.DB); const now = Date.now();
+  const user = await db.selectFrom("users").select(["display_name", "avatar_id", "account_mode"]).where("user_id", "=", link.user_id).executeTakeFirstOrThrow();
+  if (user.account_mode === "opaque" && (!link.account_credential_envelope || !link.account_credential_source_device_id)) {
+    throw new HttpError(409, "Account credential transfer is not ready", "account_credential_not_ready");
+  }
   if (link.status === "complete") await batch(env.DB, [
     db.insertInto("sessions").values({ token_hash: tokenHash, user_id: link.user_id, device_id: link.device_id, created_at: now, expires_at: now + DEVICE_LINK_SESSION_MS }).onConflict((conflict) => conflict.column("token_hash").doNothing()),
     db.updateTable("device_links").set({ status: "claimed", claim_token_hash: tokenHash, claimed_at: now, updated_at: now }).where("link_id", "=", linkId).where("status", "=", "complete"),
   ]);
-  const user = await db.selectFrom("users").select(["display_name", "avatar_id"]).where("user_id", "=", link.user_id).executeTakeFirstOrThrow();
   return json({ user_id: link.user_id, device_id: link.device_id, display_name: user.display_name, avatar_url: avatarUrl(user.avatar_id), server_name: env.SERVER_NAME, ...sessionCapabilities(env) });
 }
 
@@ -4573,6 +4645,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (publicAvatar && request.method === "GET") return publicProfileAvatar(env, publicAvatar[1]);
   if (!path.startsWith("/api/")) return env.ASSETS.fetch(request);
   if (path === "/api/v1/register" && request.method === "POST") return register(request, env);
+  if (path === "/api/v1/register/opaque" && request.method === "POST") return registerOpaqueAccount(request, env);
   if (path === "/api/v1/login" && request.method === "POST") return login(request, env);
   if (path === "/api/v1/device-sessions/challenge" && request.method === "POST") return issueDeviceSessionChallenge(request, env);
   if (path === "/api/v1/device-sessions" && request.method === "POST") return claimDeviceSession(request, env);
@@ -4710,6 +4783,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (deviceLink && request.method === "POST") return approveDeviceLink(env, auth, decodeURIComponent(deviceLink[1]));
   const deviceLinkHistory = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history$/);
   if (deviceLinkHistory && request.method === "PUT") return uploadDeviceLinkHistory(request, env, auth, decodeURIComponent(deviceLinkHistory[1]));
+  const deviceLinkAccountCredential = path.match(/^\/api\/v1\/device-links\/([^/]+)\/account-credential$/);
+  if (deviceLinkAccountCredential && request.method === "PUT") return uploadDeviceLinkAccountCredential(request, env, auth, decodeURIComponent(deviceLinkAccountCredential[1]));
   const deviceLinkHistoryManifest = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history\/manifest$/);
   if (deviceLinkHistoryManifest && request.method === "PUT") return createDeviceLinkHistoryTransfer(request, env, auth, decodeURIComponent(deviceLinkHistoryManifest[1]));
   const deviceLinkHistoryShard = path.match(/^\/api\/v1\/device-links\/([^/]+)\/history\/shards\/(\d+)$/);

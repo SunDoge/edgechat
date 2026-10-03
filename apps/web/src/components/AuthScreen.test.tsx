@@ -38,19 +38,16 @@ function renderAuth(accountHint?: string) {
 }
 
 describe("AuthScreen account identity", () => {
-  it("asks for one account name and explains the separate login credential", () => {
+  it("asks only for a public nickname and hides internal account credentials", () => {
     renderAuth();
-    const username = document.querySelector<HTMLInputElement>("#username")!;
-    const password = document.querySelector<HTMLInputElement>("#password")!;
+    const displayName = document.querySelector<HTMLInputElement>("#display-name")!;
 
-    expect(document.querySelector("#display-name")).toBeNull();
-    expect(username.labels?.[0]?.textContent).toContain("账号名");
-    expect(username.getAttribute("aria-describedby")).toBe("account-name-help");
-    expect(password.labels?.[0]?.textContent).toContain("登录密码");
-    expect(password.getAttribute("aria-describedby")).toBe("login-password-help");
-    expect(document.body.textContent).toContain("昵称先使用账号名");
-    expect(document.body.textContent).toContain("不是消息密钥");
-    expect(document.body.textContent).toContain("不能恢复已丢失的聊天记录");
+    expect(displayName.labels?.[0]?.textContent).toContain("显示名称");
+    expect(displayName.getAttribute("aria-describedby")).toBe("display-name-help");
+    expect(document.querySelector("#username")).toBeNull();
+    expect(document.querySelector("#password")).toBeNull();
+    expect(document.body.textContent).toContain("内部地址会自动生成");
+    expect(document.body.textContent).toContain("账户凭据");
   });
 
   it("accepts either the short account name or full user ID on login", () => {
@@ -62,7 +59,7 @@ describe("AuthScreen account identity", () => {
     const username = document.querySelector<HTMLInputElement>("#username")!;
     expect(username.labels?.[0]?.textContent).toContain("账号名或用户 ID");
     expect(username.placeholder).toContain("@alice:example.com");
-    expect(document.querySelector("#account-name-help")).toBeNull();
+    expect(document.querySelector<HTMLInputElement>("#password")).not.toBeNull();
   });
 
   it("offers device continuation only when this profile retains its possession credential", async () => {

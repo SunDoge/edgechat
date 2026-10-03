@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeBase64Url, deviceFingerprint, deviceLinkClaimBytes, openArchiveSegmentKey, sealArchiveSegmentKey, WebCryptoMessagingCore } from "./index";
+import { decodeBase64Url, deviceFingerprint, deviceLinkClaimBytes, openAccountCredential, openArchiveSegmentKey, sealAccountCredential, sealArchiveSegmentKey, WebCryptoMessagingCore } from "./index";
 
 describe("device support crypto", () => {
   it("encrypts attachments and rejects a changed authentication tag", async () => {
@@ -14,14 +14,29 @@ describe("device support crypto", () => {
     const core = new WebCryptoMessagingCore();
     const identity = await core.createIdentity();
     identity.mlsState = new Uint8Array([4, 5, 6]);
+    identity.accountCredential = "a".repeat(43);
     const before = await core.exportPublicIdentity(identity);
     const restored = await core.importPortableIdentity(await core.exportPortableIdentity(identity));
     expect(restored.deviceId).toBe(identity.deviceId);
     expect(Array.from(restored.mlsState ?? [])).toEqual([4, 5, 6]);
+    expect(restored.accountCredential).toBe("a".repeat(43));
     expect(await core.exportPublicIdentity(restored)).toEqual(before);
     const message = new TextEncoder().encode("portable identity");
     const signature = await core.sign(restored, message);
     expect(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, restored.signingPublicKey, decodeBase64Url(signature), message)).toBe(true);
+  });
+
+  it("transfers an account credential only to the exact linked device and context", async () => {
+    const core = new WebCryptoMessagingCore();
+    const [target, outsider] = await Promise.all([core.createIdentity(), core.createIdentity()]);
+    const targetKeys = await core.exportPublicIdentity(target);
+    const context = { linkId: "link_0123456789abcdef", sourceDeviceId: "source-device", targetDeviceId: target.deviceId };
+    const envelope = await sealAccountCredential("z".repeat(43), context, targetKeys.encryption_key);
+    expect(await openAccountCredential(envelope, context, target)).toBe("z".repeat(43));
+    await expect(openAccountCredential(envelope, { ...context, linkId: "link_other_0123456789" }, target)).rejects.toThrow("authentication failed");
+    await expect(openAccountCredential(envelope, { ...context, targetDeviceId: outsider.deviceId }, outsider)).rejects.toThrow("authentication failed");
+    const bytes = decodeBase64Url(envelope); bytes[bytes.length - 2] ^= 1;
+    await expect(openAccountCredential(btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""), context, target)).rejects.toThrow();
   });
 
   it("renders a stable fingerprint and a deterministic device-link claim transcript", async () => {

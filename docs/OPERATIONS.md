@@ -27,7 +27,7 @@ The initial service objectives are deliberately easy to explain:
 - pending R2 write intents must be finalized or rolled back within 30 minutes;
 - object deletion, repair, account deletion, device revocation and peer recovery
   work must make progress within 24 hours;
-- password-verified account appeals must be handled or expire within seven days.
+- credential-verified account appeals must be handled or expire within seven days.
 
 The endpoint becomes `degraded` and emits stable reason codes when the oldest
 item breaches one of these objectives. A non-empty but young queue is healthy.

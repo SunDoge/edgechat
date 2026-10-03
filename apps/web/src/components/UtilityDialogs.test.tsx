@@ -24,6 +24,17 @@ describe("account safety dialogs", () => {
     await vi.waitFor(() => expect(onDelete).toHaveBeenCalledWith("correct horse battery staple"));
   });
 
+  it("uses a device-held opaque credential for deletion without exposing a password field", async () => {
+    const onDelete = vi.fn(async () => undefined);
+    dispose = render(() => <AccountDeletionDialog accountCredential={"q".repeat(43)} onDelete={onDelete} onClose={vi.fn()}/>, root());
+    expect(document.querySelector("#delete-account-password")).toBeNull();
+    const confirmation = document.querySelector<HTMLInputElement>("#delete-account-confirmation")!;
+    confirmation.value = "删除账户"; confirmation.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    const action = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "永久删除")!;
+    expect(action.disabled).toBe(false); action.click();
+    await vi.waitFor(() => expect(onDelete).toHaveBeenCalledWith("q".repeat(43)));
+  });
+
   it("states that a portable backup does not duplicate messages into cloud storage", () => {
     dispose = render(() => <BackupDialog onCreate={vi.fn()} onClose={vi.fn()}/>, root());
     expect(document.body.textContent).toContain("服务器仅保存一个不含消息内容的防回滚检查点");

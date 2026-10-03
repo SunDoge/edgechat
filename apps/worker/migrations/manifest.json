@@ -176,6 +176,10 @@
     {
       "file": "0044_passkeys.sql",
       "sha256": "4d278f8397f05896e60b59b91b243c295afddf03c14da7d13efc33cbb78c8abc"
+    },
+    {
+      "file": "0045_device_link_account_credentials.sql",
+      "sha256": "b2b89ad53bf0d4cc4f56b5462edee5dc4a027a393ba2c640a0f1986eaeb5ce25"
     }
   ]
 }

@@ -6,14 +6,26 @@ export type DeviceIdentity = {
   encryptionPublicKey: CryptoKey;
   mlsState?: Uint8Array<ArrayBufferLike>;
   deviceCredential?: string;
+  accountCredential?: string;
 };
 
 export type PortableDeviceIdentity = {
-  version: 1;
+  version: 2;
   device_id: string;
   signing_private_key: JsonWebKey;
   encryption_private_key: JsonWebKey;
   mls_state: string;
+  account_credential: string;
+};
+
+export type AccountCredentialTransferContext = { linkId: string; sourceDeviceId: string; targetDeviceId: string };
+type AccountCredentialEnvelope = {
+  format: "edgechat-account-credential";
+  version: 1;
+  ephemeral_key: JsonWebKey;
+  salt: string;
+  nonce: string;
+  ciphertext: string;
 };
 
 export type EncryptedAttachment = { key: string; nonce: string; ciphertext: ArrayBuffer };
@@ -66,6 +78,60 @@ function publicEncryptionKey(value: JsonWebKey | string): JsonWebKey {
   const key = typeof value === "string" ? JSON.parse(value) as JsonWebKey : value;
   if (key.kty !== "EC" || key.crv !== "P-256" || typeof key.x !== "string" || typeof key.y !== "string") throw new Error("Invalid archive recipient key");
   return { kty: "EC", crv: "P-256", x: key.x, y: key.y, ext: true };
+}
+
+function assertAccountCredential(value: string): void {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) throw new Error("Invalid account credential");
+}
+
+function accountCredentialTranscript(context: AccountCredentialTransferContext): Uint8Array<ArrayBuffer> {
+  for (const [label, value] of Object.entries(context)) {
+    if (!value || value.length > 128 || !/^[A-Za-z0-9_!:@.$-]+$/.test(value)) throw new Error(`Invalid account credential ${label}`);
+  }
+  return encoder.encode(`edgechat/account-credential/v1|${context.linkId}|${context.sourceDeviceId}|${context.targetDeviceId}`) as Uint8Array<ArrayBuffer>;
+}
+
+async function accountCredentialWrappingKey(privateKey: CryptoKey, peer: CryptoKey, salt: Uint8Array<ArrayBuffer>, transcript: Uint8Array<ArrayBuffer>, usages: KeyUsage[]): Promise<CryptoKey> {
+  const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: peer }, privateKey, 256);
+  const material = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: salt.buffer, info: transcript.buffer }, material,
+    { name: "AES-GCM", length: 256 }, false, usages);
+}
+
+/** Encrypt the account login credential directly to a newly linked device. */
+export async function sealAccountCredential(credential: string, context: AccountCredentialTransferContext, targetEncryptionKey: JsonWebKey | string): Promise<string> {
+  assertAccountCredential(credential);
+  const transcript = accountCredentialTranscript(context);
+  const target = await crypto.subtle.importKey("jwk", publicEncryptionKey(targetEncryptionKey), { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const ephemeral = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const salt = crypto.getRandomValues(new Uint8Array(16)); const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const key = await accountCredentialWrappingKey(ephemeral.privateKey, target, salt, transcript, ["encrypt"]);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce.buffer, additionalData: transcript.buffer }, key, encoder.encode(credential));
+  const envelope: AccountCredentialEnvelope = {
+    format: "edgechat-account-credential", version: 1,
+    ephemeral_key: await crypto.subtle.exportKey("jwk", ephemeral.publicKey),
+    salt: encodeBase64Url(salt), nonce: encodeBase64Url(nonce), ciphertext: encodeBase64Url(ciphertext),
+  };
+  return encodeBase64Url(encoder.encode(JSON.stringify(envelope)));
+}
+
+/** Open an account credential envelope bound to one exact device-link request. */
+export async function openAccountCredential(envelopeBytes: string, context: AccountCredentialTransferContext, target: DeviceIdentity): Promise<string> {
+  if (target.deviceId !== context.targetDeviceId || envelopeBytes.length < 128 || envelopeBytes.length > 4096) throw new Error("Invalid account credential envelope");
+  const transcript = accountCredentialTranscript(context);
+  let envelope: AccountCredentialEnvelope;
+  try { envelope = JSON.parse(decoder.decode(decodeBase64Url(envelopeBytes))) as AccountCredentialEnvelope; }
+  catch { throw new Error("Invalid account credential envelope"); }
+  const salt = decodeBase64Url(envelope.salt); const nonce = decodeBase64Url(envelope.nonce); const ciphertext = decodeBase64Url(envelope.ciphertext);
+  if (envelope.format !== "edgechat-account-credential" || envelope.version !== 1 || salt.length !== 16 || nonce.length !== 12 || ciphertext.length !== 59) {
+    throw new Error("Invalid account credential envelope");
+  }
+  try {
+    const peer = await crypto.subtle.importKey("jwk", publicEncryptionKey(envelope.ephemeral_key), { name: "ECDH", namedCurve: "P-256" }, false, []);
+    const key = await accountCredentialWrappingKey(target.encryptionPrivateKey, peer, salt, transcript, ["decrypt"]);
+    const credential = decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce.buffer, additionalData: transcript.buffer }, key, ciphertext.buffer));
+    assertAccountCredential(credential); return credential;
+  } catch { throw new Error("Account credential envelope authentication failed"); }
 }
 
 async function archiveWrappingKey(privateKey: CryptoKey, peer: CryptoKey, salt: Uint8Array<ArrayBuffer>, transcript: Uint8Array<ArrayBuffer>, usages: KeyUsage[]): Promise<CryptoKey> {
@@ -161,17 +227,21 @@ export class WebCryptoMessagingCore {
       crypto.subtle.exportKey("jwk", identity.signingPrivateKey),
       crypto.subtle.exportKey("jwk", identity.encryptionPrivateKey),
     ]);
+    if (!identity.accountCredential) throw new Error("这台设备缺少账户恢复凭证，请先通过已完整配置的设备重新链接");
+    assertAccountCredential(identity.accountCredential);
     return {
-      version: 1,
+      version: 2,
       device_id: identity.deviceId,
       signing_private_key: signing,
       encryption_private_key: encryption,
       mls_state: encodeBase64Url(identity.mlsState ?? new Uint8Array()),
+      account_credential: identity.accountCredential,
     };
   }
 
   async importPortableIdentity(value: PortableDeviceIdentity): Promise<DeviceIdentity> {
-    if (value.version !== 1 || !value.device_id || !isPrivateP256Jwk(value.signing_private_key) || !isPrivateP256Jwk(value.encryption_private_key)) {
+    if (value.version !== 2 || !value.device_id || !isPrivateP256Jwk(value.signing_private_key) || !isPrivateP256Jwk(value.encryption_private_key)
+      || !/^[A-Za-z0-9_-]{43}$/.test(value.account_credential)) {
       throw new Error("Invalid portable device identity");
     }
     const signingPublic = publicP256Jwk(value.signing_private_key);
@@ -186,6 +256,7 @@ export class WebCryptoMessagingCore {
       deviceId: value.device_id,
       signingPrivateKey, signingPublicKey, encryptionPrivateKey, encryptionPublicKey,
       mlsState: decodeBase64Url(value.mls_state),
+      accountCredential: value.account_credential,
     };
   }
 

@@ -10,7 +10,7 @@ export function StartupRecoveryScreen(props: {
   inactive?: boolean;
   onRetry: () => void;
   onManageProfiles: () => void;
-  onRestoreBackup: (file: File, password: string, accountPassword: string) => Promise<void>;
+  onRestoreBackup: (file: File, password: string) => Promise<void>;
 }) {
   const [restoreOpen, setRestoreOpen] = createSignal(false);
   return <main inert={props.inactive ? true : undefined} class="isolate grid min-h-dvh place-items-center bg-chat px-5 py-10 antialiased">

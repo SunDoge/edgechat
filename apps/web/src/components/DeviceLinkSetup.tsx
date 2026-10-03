@@ -1,6 +1,6 @@
 import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { IconCopy, IconDeviceMobile, IconRefresh, IconShieldCheck } from "@tabler/icons-solidjs";
-import { deviceFingerprint, deviceLinkClaimBytes, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
+import { deviceFingerprint, deviceLinkClaimBytes, openAccountCredential, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import type { ApiClient, DeviceLinkStatus, SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { renderSVG } from "uqr";
@@ -87,6 +87,15 @@ export function DeviceLinkSetup(props: {
   async function finishLink(current: PendingDeviceLink, nextStatus: DeviceLinkStatus): Promise<void> {
     if (!identity || !mls || !nextStatus.rooms) throw new Error(t("deviceLink.error.incomplete"));
     setStage("joining");
+    if (nextStatus.account_mode === "opaque") {
+      const transfer = nextStatus.account_credential;
+      if (!transfer) throw new Error(t("deviceLink.error.accountCredentialMissing"));
+      const accountCredential = await openAccountCredential(transfer.envelope, {
+        linkId: current.link_id, sourceDeviceId: transfer.source_device_id, targetDeviceId: current.device_id,
+      }, identity);
+      identity = { ...identity, accountCredential };
+      await saveIdentity(props.profileId, identity);
+    }
     for (const room of nextStatus.rooms) {
       if (!room.encrypted_state || mls.hasGroup(room.room_id)) continue;
       const packet = JSON.parse(room.encrypted_state) as { version: number; welcome: string; ratchet_tree: string };
@@ -166,6 +175,7 @@ export function DeviceLinkSetup(props: {
       if (next.status === "awaiting_packages") {
         await replenishPackages(current, next.required_packages); setStage("approved");
       } else if (next.status === "approved") setStage("approved");
+      else if ((next.status === "complete" || next.status === "claimed") && next.account_mode === "opaque" && !next.account_credential_ready) setStage("approved");
       else if (next.status === "complete" || next.status === "claimed") return await finishLink(loadPendingDeviceLink(props.profileId) ?? current, next);
       else if (next.status === "cancelled") throw new Error(t("deviceLink.error.cancelled"));
       else setStage("waiting");

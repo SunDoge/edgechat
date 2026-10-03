@@ -34,8 +34,8 @@ describe("StartupRecoveryScreen", () => {
     expect(root.querySelector('input[type="file"]')).not.toBeNull();
   });
 
-  it("requires both passwords and explicit replacement confirmation", async () => {
-    const restore = vi.fn(async (_file: File, _password: string, _accountPassword: string) => undefined);
+  it("requires the backup password and explicit replacement confirmation", async () => {
+    const restore = vi.fn(async (_file: File, _password: string) => undefined);
     const root = document.createElement("div"); document.body.append(root);
     dispose = render(() => <BackupRestoreForm onRestore={restore} onCancel={vi.fn()}/>, root);
     const submit = root.querySelector('button[type="submit"]') as HTMLButtonElement;
@@ -43,16 +43,14 @@ describe("StartupRecoveryScreen", () => {
     const fileInput = root.querySelector('input[type="file"]') as HTMLInputElement;
     Object.defineProperty(fileInput, "files", { configurable: true, value: [new File(["encrypted"], "backup.edgechat-backup")] });
     fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-    for (const [id, value] of [["restore-password", "backup password"], ["restore-account-password", "account password"]] as const) {
-      const input = root.querySelector(`#${id}`) as HTMLInputElement;
-      input.value = value; input.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
-    }
+    const input = root.querySelector("#restore-password") as HTMLInputElement;
+    input.value = "backup password"; input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "backup password" }));
     (root.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
     expect(submit.disabled).toBe(false);
     root.querySelector("form")!.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(restore).toHaveBeenCalledOnce());
     expect(restore.mock.calls[0]?.[0].name).toBe("backup.edgechat-backup");
-    expect(restore.mock.calls[0]?.slice(1)).toEqual(["backup password", "account password"]);
+    expect(restore.mock.calls[0]?.slice(1)).toEqual(["backup password"]);
   });
 
   it("opens backup selection instead of looping reload after an interrupted restore", () => {

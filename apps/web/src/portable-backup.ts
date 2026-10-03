@@ -91,8 +91,9 @@ function validateMetadata(value: unknown, expectedOrigin?: string): BackupMetada
     || typeof metadata.user_id !== "string" || typeof metadata.server_origin !== "string"
     || typeof metadata.backup_checkpoint !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(metadata.backup_checkpoint) || !portableIdentity
     || typeof portableIdentity.device_id !== "string" || portableIdentity.device_id.length === 0
-    || portableIdentity.version !== 1 || typeof portableIdentity.signing_private_key !== "object"
-    || typeof portableIdentity.encryption_private_key !== "object" || typeof portableIdentity.mls_state !== "string") throw new Error("备份内容无效");
+    || portableIdentity.version !== 2 || typeof portableIdentity.signing_private_key !== "object"
+    || typeof portableIdentity.encryption_private_key !== "object" || typeof portableIdentity.mls_state !== "string"
+    || typeof portableIdentity.account_credential !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(portableIdentity.account_credential)) throw new Error("备份内容无效");
   if (expectedOrigin && metadata.server_origin !== expectedOrigin) throw new Error("这个备份属于另一台 EdgeChat 服务器");
   return metadata as BackupMetadata;
 }

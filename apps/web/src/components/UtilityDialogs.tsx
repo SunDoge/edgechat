@@ -122,18 +122,19 @@ export function BackupDialog(props: { onCreate: (password: string) => Promise<vo
   </Dialog>;
 }
 
-export function AccountDeletionDialog(props: { onDelete: (password: string) => Promise<void>; onClose: () => void }) {
+export function AccountDeletionDialog(props: { accountCredential?: string; onDelete: (password: string) => Promise<void>; onClose: () => void }) {
   const { t } = useI18n();
   const [password, setPassword] = createSignal("");
   const [confirmation, setConfirmation] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
-  const confirmed = () => confirmation().trim() === t("accountDelete.confirmationText") && password().length > 0;
+  const reauthenticationCredential = () => props.accountCredential ?? password();
+  const confirmed = () => confirmation().trim() === t("accountDelete.confirmationText") && reauthenticationCredential().length > 0;
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!confirmed() || busy()) return;
     setBusy(true); setError("");
-    try { await props.onDelete(password()); }
+    try { await props.onDelete(reauthenticationCredential()); }
     catch (cause) { setError(cause instanceof Error ? cause.message : t("accountDelete.error")); setBusy(false); }
   }
   return <Dialog id="delete-account" title={t("accountDelete.title")} description={t("accountDelete.description")} onClose={() => { if (!busy()) props.onClose(); }}>
@@ -141,8 +142,8 @@ export function AccountDeletionDialog(props: { onDelete: (password: string) => P
       <div class="rounded-lg bg-red-50 px-3 py-3 text-sm/6 text-red-800">
         {t("accountDelete.warning")}
       </div>
-      <label class="grid gap-2 text-sm font-medium text-ink" for="delete-account-password">{t("accountDelete.password")}<input id="delete-account-password" name="password" type="password" autocomplete="current-password" class="h-11 rounded-lg px-3 text-base ring-1 ring-neutral-300 outline-none focus:ring-2 focus:ring-red-500" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} autofocus/></label>
-      <label class="grid gap-2 text-sm font-medium text-ink" for="delete-account-confirmation">{t("accountDelete.confirmation")}<input id="delete-account-confirmation" name="confirmation" class="h-11 rounded-lg px-3 text-base ring-1 ring-neutral-300 outline-none focus:ring-2 focus:ring-red-500" value={confirmation()} onInput={(event) => setConfirmation(event.currentTarget.value)} autocomplete="off"/></label>
+      <Show when={!props.accountCredential} fallback={<p class="rounded-lg bg-neutral-50 px-3 py-2.5 text-xs/5 text-muted">{t("accountDelete.deviceConfirmation")}</p>}><label class="grid gap-2 text-sm font-medium text-ink" for="delete-account-password">{t("accountDelete.password")}<input id="delete-account-password" name="password" type="password" autocomplete="current-password" class="h-11 rounded-lg px-3 text-base ring-1 ring-neutral-300 outline-none focus:ring-2 focus:ring-red-500" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} autofocus/></label></Show>
+      <label class="grid gap-2 text-sm font-medium text-ink" for="delete-account-confirmation">{t("accountDelete.confirmation")}<input id="delete-account-confirmation" name="confirmation" class="h-11 rounded-lg px-3 text-base ring-1 ring-neutral-300 outline-none focus:ring-2 focus:ring-red-500" value={confirmation()} onInput={(event) => setConfirmation(event.currentTarget.value)} autocomplete="off" autofocus={Boolean(props.accountCredential)}/></label>
       <Show when={error()}><p role="alert" class="text-sm text-red-600">{error()}</p></Show>
       <div class="mt-1 flex justify-end gap-2"><button type="button" disabled={busy()} class="h-10 rounded-lg px-4 text-sm font-medium text-ink hover:bg-neutral-100 disabled:opacity-50" onClick={props.onClose}>{t("common.cancel")}</button><button type="submit" disabled={!confirmed() || busy()} class="h-10 rounded-lg bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-700 disabled:bg-neutral-300">{busy() ? t("accountDelete.deleting") : t("accountDelete.action")}</button></div>
     </form>

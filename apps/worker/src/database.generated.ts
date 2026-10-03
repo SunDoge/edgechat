@@ -237,6 +237,8 @@ export interface DeviceLinkRooms {
 }
 
 export interface DeviceLinks {
+  account_credential_envelope: string | null;
+  account_credential_source_device_id: string | null;
   approved_by_device_id: string | null;
   claim_token_hash: string | null;
   claimed_at: number | null;
@@ -597,6 +599,7 @@ export interface UserBlocks {
 }
 
 export interface Users {
+  account_mode: Generated<string>;
   avatar_bytes: Generated<number>;
   avatar_id: string | null;
   avatar_object_key: string | null;

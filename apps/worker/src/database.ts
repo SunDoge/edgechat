@@ -32,7 +32,7 @@ type SemanticTables = {
   room_reports: { category: "spam" | "abuse" | "other"; status: Generated<"open" | "confirmed" | "dismissed"> };
   rooms: { kind: "direct" | "group"; purpose: Generated<"chat" | "saved"> };
   sync_log: { kind: "room.event" | "device.event" | "room.event.available" };
-  users: { invitation_policy: Generated<"everyone" | "shared_rooms" | "nobody"> };
+  users: { account_mode: Generated<"password" | "opaque">; invitation_policy: Generated<"everyone" | "shared_rooms" | "nobody"> };
 };
 
 export type Database = Omit<GeneratedDatabase, keyof SemanticTables> & {

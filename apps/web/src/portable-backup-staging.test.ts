@@ -7,11 +7,12 @@ const PROFILE = "11111111-1111-4111-8111-111111111111";
 const OTHER_PROFILE = "22222222-2222-4222-8222-222222222222";
 const PASSWORD = "correct horse battery staple";
 const identity: PortableDeviceIdentity = {
-  version: 1,
+  version: 2,
   device_id: "device-a",
   signing_private_key: { crv: "Ed25519", d: "private", kty: "OKP", x: "public" },
   encryption_private_key: { crv: "X25519", d: "private", kty: "OKP", x: "public" },
   mls_state: "state",
+  account_credential: "a".repeat(43),
 };
 
 function backupInput(bytes = 150_000) {
