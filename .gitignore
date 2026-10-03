@@ -10,3 +10,4 @@ worker-configuration.d.ts
 .dev.vars
 coverage
 .vitest-attachments
+__screenshots__

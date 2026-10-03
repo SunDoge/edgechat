@@ -4139,15 +4139,21 @@ async function retentionCoverage(request: Request, env: Env, auth: AuthContext):
 async function downloadAttachment(request: Request, env: Env, auth: AuthContext, id: string): Promise<Response> {
   const db = createDatabase(env.DB);
   const original = await db.selectFrom("attachments as a")
-    .innerJoin("room_members as rm", "rm.room_id", "a.room_id").select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256"])
+    .innerJoin("room_members as rm", "rm.room_id", "a.room_id")
+    .leftJoin("attachment_repair_jobs as repair", "repair.attachment_id", "a.attachment_id")
+    .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256", "repair.attachment_id as repair_attachment_id"])
     .where("a.attachment_id", "=", id).where("a.source_deleted_at", "is", null)
     .where("rm.user_id", "=", auth.userId).where("rm.removed_at", "is", null).executeTakeFirst();
   const row = original ?? await db.selectFrom("attachment_grants as g")
     .innerJoin("attachments as a", "a.attachment_id", "g.source_attachment_id")
     .innerJoin("room_members as rm", "rm.room_id", "g.room_id")
-    .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256"])
+    .leftJoin("attachment_repair_jobs as repair", "repair.attachment_id", "a.attachment_id")
+    .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256", "repair.attachment_id as repair_attachment_id"])
     .where("g.grant_id", "=", id).where("rm.user_id", "=", auth.userId).where("rm.removed_at", "is", null).executeTakeFirst();
   if (!row) throw new HttpError(404, "Attachment not found", "not_found");
+  if (row.repair_attachment_id) {
+    throw new HttpError(503, "Attachment ciphertext is awaiting device repair", row.ciphertext_sha256 ? "attachment_repair_pending" : "attachment_repair_unverified", { "retry-after": "30" });
+  }
   const object = await env.ARCHIVE.get(row.object_key, { range: request.headers });
   if (!object?.body) {
     const deletion = await db.selectFrom("attachment_deletions").select("delete_event_id").where("attachment_id", "=", row.attachment_id).executeTakeFirst();
@@ -4353,10 +4359,14 @@ async function downloadSegment(request: Request, env: Env, auth: AuthContext, ro
   if (!(await memberRole(env, roomId, auth.userId))) throw new HttpError(404, "Segment not found", "not_found");
   const db = createDatabase(env.DB);
   const row = await db.selectFrom("archive_segments as s").innerJoin("rooms as r", "r.room_id", "s.room_id")
-    .select(["s.object_key", "s.byte_size", "s.ciphertext_sha256", "s.start_seq", "r.retention_floor_seq", "r.created_by"])
+    .leftJoin("archive_segment_repair_jobs as repair", "repair.segment_id", "s.segment_id")
+    .select(["s.object_key", "s.byte_size", "s.ciphertext_sha256", "s.start_seq", "r.retention_floor_seq", "r.created_by", "repair.segment_id as repair_segment_id"])
     .where("s.segment_id", "=", segmentId).where("s.room_id", "=", roomId).executeTakeFirst();
   if (!row) throw new HttpError(404, "Segment not found", "not_found");
   if (row.start_seq <= row.retention_floor_seq) throw new HttpError(410, "Archive segment was intentionally removed", "history_intentionally_deleted");
+  if (row.repair_segment_id) {
+    throw new HttpError(503, "Archive segment is awaiting device repair", row.ciphertext_sha256 ? "archive_repair_pending" : "archive_repair_unverified", { "retry-after": "30" });
+  }
   const object = await env.ARCHIVE.get(row.object_key, { range: request.headers });
   if (!object?.body) {
     await markArchiveRepairNeeded(env, segmentId, roomId);

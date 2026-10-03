@@ -1103,6 +1103,13 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT attachment_id FROM attachment_repair_jobs WHERE attachment_id = ?").bind(attachmentId).first()).toEqual({ attachment_id: attachmentId });
     expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageBefore);
 
+    await env.ARCHIVE.put(attachment!.object_key, new Uint8Array(ciphertext.byteLength), { customMetadata: { roomId, sha256: "invalid" } });
+    const circuitBroken = await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}`, { headers });
+    expect(circuitBroken.status).toBe(503);
+    expect(await circuitBroken.json()).toMatchObject({ code: "attachment_repair_pending" });
+    expect(await env.ARCHIVE.head(attachment!.object_key)).not.toBeNull();
+    await env.ARCHIVE.delete(attachment!.object_key);
+
     const jobs = await SELF.fetch("https://edgechat.test/api/v1/attachment-repair/jobs", { headers });
     expect(await jobs.json()).toMatchObject({ jobs: [{ attachment_id: attachmentId, ciphertext_bytes: ciphertext.byteLength, ciphertext_sha256: attachment!.ciphertext_sha256 }] });
     const leaseResponse = await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}/repair/lease`, { method: "POST", headers });
@@ -1186,6 +1193,15 @@ describe("single-server durable delivery", () => {
     expect(await env.DB.prepare("SELECT segment_id FROM archive_segments WHERE segment_id = ?").bind(segmentId).first()).toEqual({ segment_id: segmentId });
     expect(await env.DB.prepare("SELECT segment_id FROM archive_segment_repair_jobs WHERE segment_id = ?").bind(segmentId).first()).toEqual({ segment_id: segmentId });
     expect(await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageBefore);
+
+    await env.ARCHIVE.put(segment!.object_key, new Uint8Array(ciphertext.byteLength), { customMetadata: { roomId, sha256: "invalid" } });
+    const circuitBroken = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${segmentId}`, {
+      headers: { authorization: `Bearer ${account.access_token}`, range: "bytes=0-1" },
+    });
+    expect(circuitBroken.status).toBe(503);
+    expect(await circuitBroken.json()).toMatchObject({ code: "archive_repair_pending" });
+    expect(await env.ARCHIVE.head(segment!.object_key)).not.toBeNull();
+    await env.ARCHIVE.delete(segment!.object_key);
 
     const jobs = await SELF.fetch("https://edgechat.test/api/v1/archive-repair/jobs", { headers });
     expect(await jobs.json()).toMatchObject({ jobs: [{ segment_id: segmentId, room_id: roomId, byte_size: ciphertext.byteLength, ciphertext_sha256: segment!.ciphertext_sha256 }] });
