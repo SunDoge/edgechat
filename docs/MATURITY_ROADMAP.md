@@ -19,7 +19,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 - [x] User quota UI with attachment/archive split and warning thresholds.
 - [x] D1-only Operator totals and configurable per-user byte/object overrides, without bucket listing.
 - [x] Crash-safe D1 write intents, bounded orphan cleanup, and on-read missing-object quota repair without routine bucket listing.
-- [x] Read-only, bounded-memory offline operator audit for legacy/manual R2 objects that predate or bypass the write-intent ledger.
+- [x] Read-only, bounded-memory offline operator audit for legacy/manual R2 or S3 objects that predate or bypass the write-intent ledger. Both providers page at most 1,000 current names per request, enforce an explicit LIST-request budget, report the exact request count, and never fetch object bodies; B2 hidden-version lifecycle verification remains a separate release gate.
 - [x] Seven-day cleanup for uploaded attachments that never become referenced by a durable event.
 - [x] Sender-only deletion/tombstone flow that removes local search content and decrements usage only after attachment object deletion succeeds.
 - [x] Paginated account export plus resumable account deletion covering local plaintext, exact-key R2 cleanup, private-room Durable Objects, shared-room ownership transfer, and client-produced MLS Remove Commits. Export pages stream to a native file or profile-scoped OPFS with exact crash/failure cleanup; the 64 MiB whole-Blob fallback is bounded, and D1 object manifests never read/copy R2 bodies.

@@ -3,13 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "edgechat-storage-audit": "./src/cli.mjs"
   },
   "scripts": {
-    "build": "node --check src/audit.mjs && node --check src/cloudflare.mjs && node --check src/cli.mjs",
-    "typecheck": "node --check src/audit.mjs && node --check src/cloudflare.mjs && node --check src/cli.mjs",
+    "build": "node --check src/audit.mjs && node --check src/cloudflare.mjs && node --check src/s3.mjs && node --check src/cli.mjs",
+    "typecheck": "node --check src/audit.mjs && node --check src/cloudflare.mjs && node --check src/s3.mjs && node --check src/cli.mjs",
     "test": "node --test"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20"
   }
 }

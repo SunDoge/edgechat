@@ -22,18 +22,29 @@ function message(body, status) {
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export class CloudflareAuditClient {
-  /** @param {{ accountId: string, databaseId: string, bucket: string, token: string, jurisdiction?: string, fetchImpl?: typeof fetch, apiBaseUrl?: string }} options */
+  /** @param {{ accountId: string, databaseId: string, bucket?: string, token: string, jurisdiction?: string, maxListRequests?: number, fetchImpl?: typeof fetch, apiBaseUrl?: string }} options */
   constructor(options) {
-    for (const [name, value] of Object.entries({ accountId: options.accountId, databaseId: options.databaseId, bucket: options.bucket, token: options.token })) {
+    for (const [name, value] of Object.entries({ accountId: options.accountId, databaseId: options.databaseId, token: options.token })) {
       if (typeof value !== "string" || !value) throw new Error(`${name} is required`);
     }
     this.accountId = options.accountId; this.databaseId = options.databaseId; this.bucket = options.bucket;
     this.token = options.token; this.jurisdiction = options.jurisdiction; this.fetch = options.fetchImpl ?? fetch;
     this.base = (options.apiBaseUrl ?? "https://api.cloudflare.com/client/v4").replace(/\/$/, "");
+    this.maxListRequests = options.maxListRequests ?? 1_000;
+    if (!Number.isSafeInteger(this.maxListRequests) || this.maxListRequests < 1 || this.maxListRequests > 1_000_000) {
+      throw new Error("maxListRequests must be an integer from 1 to 1000000");
+    }
+    this.listRequests = 0;
   }
 
-  async request(path, init = {}) {
+  async request(path, init = {}, options = {}) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (options.countListRequest) {
+        if (this.listRequests >= this.maxListRequests) {
+          throw new Error(`R2 audit stopped at its ${this.maxListRequests}-request LIST budget before reaching the end of the bucket`);
+        }
+        this.listRequests += 1;
+      }
       const headers = new Headers(init.headers); headers.set("authorization", `Bearer ${this.token}`); headers.set("accept", "application/json");
       if (init.body) headers.set("content-type", "application/json");
       if (this.jurisdiction && path.includes("/r2/")) headers.set("cf-r2-jurisdiction", this.jurisdiction);
@@ -75,10 +86,11 @@ export class CloudflareAuditClient {
   }
 
   async *bucketObjects() {
+    if (!this.bucket) throw new Error("bucket is required for an R2 audit");
     let cursor = null;
     do {
       const query = new URLSearchParams({ per_page: "1000" }); if (cursor) query.set("cursor", cursor);
-      const body = await this.request(`/accounts/${encodeURIComponent(this.accountId)}/r2/buckets/${encodeURIComponent(this.bucket)}/objects?${query}`);
+      const body = await this.request(`/accounts/${encodeURIComponent(this.accountId)}/r2/buckets/${encodeURIComponent(this.bucket)}/objects?${query}`, {}, { countListRequest: true });
       if (!Array.isArray(body?.result)) throw new Error("Cloudflare R2 returned an invalid object listing");
       for (const object of body.result) {
         const modified = Date.parse(object.last_modified);

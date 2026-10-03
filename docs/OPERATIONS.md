@@ -1,9 +1,9 @@
 # Operations and recovery runbook
 
 EdgeChat's routine operational plane is D1-ledger driven. It must not list or
-read the R2 bucket to render a dashboard. R2 inspection is reserved for an
-explicit offline integrity audit because bucket scans create Class A operations
-and do not scale as a health check.
+read the R2/S3 bucket to render a dashboard. Provider inspection is reserved for
+an explicit offline integrity audit because bucket scans consume billable
+operations and do not scale as a health check.
 
 ## Readiness snapshot and SLOs
 
@@ -130,8 +130,9 @@ Never practice an in-place restore against production.
    be undone.
 4. Redeploy the matching Worker revision and verify the readiness query before
    allowing clients to write.
-5. Run `pnpm run audit:storage` once. This is the exceptional operation allowed
-   to list R2; record request count and findings.
+5. Run `pnpm run audit:storage` once with the staging provider and an explicit
+   `--max-list-requests` budget. This is the exceptional operation allowed to
+   list the bucket; record the reported request count and findings.
 6. Verify a client can sync ciphertext, decrypt locally, search plaintext locally,
    and repair an intentionally missing attachment or segment from an acknowledged
    device cache without changing quota.
@@ -203,3 +204,22 @@ versions: a name-only delete can leave a hidden prior version, so configure a
 reviewed lifecycle rule for hidden/old versions. Until that lifecycle is proven,
 application quota reclamation may precede physical B2 byte reclamation and B2
 must not be presented as immediate physical erasure.
+
+The offline D1-ledger audit also supports this provider. Use a separate list-only
+application key and an explicit request cap:
+
+```sh
+S3_ENDPOINT='https://s3.<region>.backblazeb2.com' \
+S3_REGION='<region>' \
+S3_ACCESS_KEY_ID='<list-only-key-id>' \
+S3_SECRET_ACCESS_KEY='<list-only-application-key>' \
+CLOUDFLARE_API_TOKEN='<D1-read-only-token>' \
+pnpm run audit:storage -- --provider s3 --account-id '<account>' \
+  --database-id '<database>' --bucket '<bucket>' --max-list-requests 1000
+```
+
+The audit performs only D1 queries and ListObjectsV2, records the exact LIST
+count, and aborts before crossing its request budget. It does not GET bodies,
+HEAD objects, mutate D1, or delete keys. ListObjectsV2 reports current names; it
+cannot prove that B2 hidden versions have been reclaimed, so review the bucket's
+version/lifecycle state separately.

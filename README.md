@@ -280,19 +280,35 @@ Server cleanup is a resumable D1 job. It repeatedly reconciles its room/object i
 
 Removing a user from a shared room is deliberately not just an ACL change. The account is frozen while the selected surviving owner creates a normal OpenMLS Remove Commit covering every former device. The PWA persists the mutated MLS snapshot and exact signed Commit in PGlite before submission, so reloads retry the same cryptographic operation. Only after every shared room acknowledges its Commit are devices, sessions, push records, and remaining account metadata finalized. The immutable namespaced user ID remains as a non-reusable “Deleted user” tombstone for signed historical events. As with message retraction, deletion cannot erase plaintext or ciphertext already saved by another participant.
 
-### Offline R2 ledger audit
+### Offline object-store ledger audit
 
-Run the read-only audit occasionally—not in the Worker request path or daily cron—to compare the complete D1 object ledger with R2 metadata:
+Run the read-only audit occasionally—not in the Worker request path or daily cron—to compare the complete D1 object ledger with current object metadata. For R2:
 
 ```bash
 export CLOUDFLARE_API_TOKEN='a-scoped-read-only-token'
 pnpm run audit:storage -- \
   --account-id "$CLOUDFLARE_ACCOUNT_ID" \
   --database-id "$EDGECHAT_D1_DATABASE_ID" \
-  --bucket edgechat-archive
+  --bucket edgechat-archive \
+  --max-list-requests 1000
 ```
 
-Give the token D1 Read access and permission to list objects only in the target R2 bucket; do not reuse the deployment token. The command paginates D1 in 5,000-row batches and R2 at the maximum 1,000 metadata rows per request, then performs a bounded-memory ordered merge. It never fetches object bodies, mutates D1, or deletes objects. Findings distinguish untracked R2 objects, missing objects, size mismatches, and stale write/deletion intents. A 30-minute grace window suppresses normal in-flight differences and can be changed with `--grace-seconds`. Exit code `0` means clean, `2` means integrity findings, and `1` means configuration/API failure. Add `--ndjson` to stream every finding for large audits; the normal JSON report retains at most 100 samples.
+For B2 or another path-style SigV4 provider, keep the Cloudflare token scoped to D1 Read, supply a separate list-only application key, and select `s3`:
+
+```bash
+export S3_ENDPOINT='https://s3.<region>.backblazeb2.com'
+export S3_REGION='<region>'
+export S3_ACCESS_KEY_ID='<list-only-key-id>'
+export S3_SECRET_ACCESS_KEY='<list-only-application-key>'
+pnpm run audit:storage -- \
+  --provider s3 \
+  --account-id "$CLOUDFLARE_ACCOUNT_ID" \
+  --database-id "$EDGECHAT_D1_DATABASE_ID" \
+  --bucket edgechat-archive \
+  --max-list-requests 1000
+```
+
+Do not reuse deployment credentials. The command paginates D1 in 5,000-row batches and either provider at no more than 1,000 current object names per LIST, then performs a bounded-memory ordered merge. It never fetches object bodies, mutates D1, or deletes objects. `--max-list-requests` defaults to 1,000 and fails the audit before another provider request would exceed that budget; increase it deliberately for buckets above roughly one million current names. The JSON result records the exact LIST request count. Findings distinguish untracked bucket objects, missing objects, size mismatches, and stale write/deletion intents. A 30-minute grace window suppresses normal in-flight differences and can be changed with `--grace-seconds`. Exit code `0` means clean, `2` means integrity findings, and `1` means configuration/API failure. Add `--ndjson` to stream every finding for large audits; the normal JSON report retains at most 100 samples. S3 ListObjectsV2 exposes current names, not every hidden B2 version, so lifecycle/version verification remains a separate provider-console release check.
 
 The segment builder, authenticated decoder, R2 upload/metadata API, HTTP `Range` endpoint, and progressive-indexing primitive are implemented. The PWA now pages older rows from PGlite in 100-message batches and preserves the visible scroll anchor; this path performs no network or object read. The history manifest returns no more than four segment descriptors immediately before its sequence cursor, instead of returning a large room's complete segment catalog. Cloudflare's Worker R2 API receives the HTTP Range header, so the existing decoder reads only framing, encrypted index, and selected chunks. The client requires an exact `206 Content-Range`, enforces a bounded streamed body, and rejects a server or proxy that returns the whole object. After decrypting the index it cross-checks the manifest, header, contiguous chunk extents, sequence mapping, and total object size before any event reaches the MLS processor.
 
@@ -442,7 +458,7 @@ pnpm run operator -- retention '!opaque-room-id-1234:example.com' --days 30 --mi
 pnpm run operator -- retention '!opaque-room-id-1234:example.com' --days indefinite
 ```
 
-Remote URLs must use HTTPS; plain HTTP is accepted only for localhost development. `rooms --all` follows bounded cursor pagination. The separate `pnpm run audit:storage` command is the exceptional offline integrity audit that deliberately lists R2 and should not be part of routine retention administration.
+Remote URLs must use HTTPS; plain HTTP is accepted only for localhost development. `rooms --all` follows bounded cursor pagination. The separate `pnpm run audit:storage` command is the exceptional, request-budgeted offline integrity audit that deliberately lists the selected object provider and should not be part of routine retention administration.
 
 Operational SLOs, structured security-event privacy rules, D1 Time Travel rollout preflight, and the staging disaster-recovery exercise are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md). The readiness snapshot is one D1 statement and never inspects R2; this keeps routine monitoring predictable even for long-lived personal archives.
 

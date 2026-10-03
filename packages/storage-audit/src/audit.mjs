@@ -14,7 +14,7 @@ function compareKeys(left, right) {
 
 function blankCounts() {
   return {
-    ledger_objects: 0, ledger_bytes: 0, r2_objects: 0, r2_bytes: 0,
+    ledger_objects: 0, ledger_bytes: 0, bucket_objects: 0, bucket_bytes: 0,
     orphan_objects: 0, orphan_bytes: 0, missing_objects: 0, missing_bytes: 0,
     size_mismatch_objects: 0, size_delta_bytes: 0, stale_pending_writes: 0,
     stale_pending_deletes: 0, deferred_recent_objects: 0,
@@ -55,7 +55,7 @@ export async function auditStorage(options) {
   let lastLedgerKey = null; let lastBucketKey = null;
   while (ledgerItem || bucketItem) {
     if (ledgerItem && lastLedgerKey !== null && compareKeys(ledgerItem.key, lastLedgerKey) <= 0) throw new Error("D1 ledger stream is not strictly ordered");
-    if (bucketItem && lastBucketKey !== null && compareKeys(bucketItem.key, lastBucketKey) <= 0) throw new Error("R2 object stream is not strictly ordered");
+    if (bucketItem && lastBucketKey !== null && compareKeys(bucketItem.key, lastBucketKey) <= 0) throw new Error("Object-store bucket stream is not strictly ordered");
     if (ledgerItem && (!bucketItem || compareKeys(ledgerItem.key, bucketItem.key) < 0)) {
       lastLedgerKey = ledgerItem.key;
       counts.ledger_objects += 1; counts.ledger_bytes += ledgerItem.expectedBytes;
@@ -76,7 +76,7 @@ export async function auditStorage(options) {
     }
     if (bucketItem && (!ledgerItem || compareKeys(bucketItem.key, ledgerItem.key) < 0)) {
       lastBucketKey = bucketItem.key;
-      counts.r2_objects += 1; counts.r2_bytes += bucketItem.size;
+      counts.bucket_objects += 1; counts.bucket_bytes += bucketItem.size;
       if (bucketItem.lastModified >= cutoff) counts.deferred_recent_objects += 1;
       else {
         counts.orphan_objects += 1; counts.orphan_bytes += bucketItem.size;
@@ -88,7 +88,7 @@ export async function auditStorage(options) {
 
     lastLedgerKey = ledgerItem.key; lastBucketKey = bucketItem.key;
     counts.ledger_objects += 1; counts.ledger_bytes += ledgerItem.expectedBytes;
-    counts.r2_objects += 1; counts.r2_bytes += bucketItem.size;
+    counts.bucket_objects += 1; counts.bucket_bytes += bucketItem.size;
     await staleIntents(ledgerItem);
     if (ledgerItem.expectedBytes !== bucketItem.size && Math.min(ledgerItem.createdAt, bucketItem.lastModified) < cutoff) {
       counts.size_mismatch_objects += 1;
