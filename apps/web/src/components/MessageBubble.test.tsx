@@ -11,7 +11,7 @@ describe("MessageBubble attachment presentation", () => {
   it("renders an oversized raster image as a file without decrypting or indexing it", async () => {
     const download = vi.fn(); const decrypt = vi.fn(async () => new ArrayBuffer(0)); const index = vi.fn();
     const message: LocalMessage = {
-      event_id: "$event123:example.com", message_id: "$message123:example.com", room_id: "!0123456789abcdef:example.com", seq: 1,
+      event_id: "$message123:example.com", message_id: "$message123:example.com", room_id: "!0123456789abcdef:example.com", seq: 1,
       sender: "@alice:example.com", device_id: "device", event_type: "message.file", created_at: 1, ciphertext: "ciphertext", plaintext: null,
       payload: { version: 2, message_id: "$message123:example.com", parts: [{ part_id: "attachment-part", kind: "attachment",
         attachment: { id: "attachment_123456", name: "large.jpg", type: "image/jpeg", size: MAX_INLINE_IMAGE_BYTES + 1, key: "key", nonce: "nonce" } }] },

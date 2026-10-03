@@ -10,7 +10,7 @@ describe("PersonalBotClient", () => {
     const fetcher: typeof fetch = async (input, init) => {
       const path = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).pathname;
       const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
-      if (path === "/api/v1/bots") return Response.json({ bot_id: "bot_test", access_token: "bot-secret", expires_at: Date.now() + 86_400_000, user_id: "@alice:example.com", device_id: (body.device as { device_id: string }).device_id, server_name: "example.com", display_name: "Builds" }, { status: 201 });
+      if (path === "/api/v1/bots") return Response.json({ bot_id: "bot_0123456789abcdef", access_token: "bot-secret", expires_at: Date.now() + 86_400_000, user_id: "@alice:example.com", device_id: (body.device as { device_id: string }).device_id, server_name: "example.com", display_name: "Builds" }, { status: 201 });
       if (path === "/api/v1/mls/key-packages/claim") return Response.json({ key_packages: [{ claim_id: "claim-1", device_id: "owner-browser", user_id: "@alice:example.com", key_package: recipientPackage }] });
       if (path === "/api/v1/rooms") {
         roomId = body.room_id as string; welcome = body.mls_welcome as string; tree = body.mls_ratchet_tree as string;
@@ -19,6 +19,7 @@ describe("PersonalBotClient", () => {
       }
       if (path.endsWith("/events")) {
         wire = body.ciphertext as string;
+        expect(body.metadata).toMatchObject({ sender_kind: "bot", bot_id: "bot_0123456789abcdef" });
         expect(JSON.stringify(body)).not.toContain("deployment finished");
         return Response.json({ event: { ...body, seq: 1 } }, { status: 201 });
       }
@@ -43,7 +44,7 @@ describe("PersonalBotClient", () => {
     const fetcher: typeof fetch = async (input, init) => {
       const path = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).pathname;
       const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
-      if (path === "/api/v1/bots") return Response.json({ bot_id: "bot_durable", access_token: "bot-secret", expires_at: Date.now() + 86_400_000, user_id: "@alice:example.com", device_id: (body.device as { device_id: string }).device_id, server_name: "example.com", display_name: "Alerts", scope: "message:create", max_messages_per_minute: 60 }, { status: 201 });
+      if (path === "/api/v1/bots") return Response.json({ bot_id: "bot_abcdef0123456789", access_token: "bot-secret", expires_at: Date.now() + 86_400_000, user_id: "@alice:example.com", device_id: (body.device as { device_id: string }).device_id, server_name: "example.com", display_name: "Alerts", scope: "message:create", max_messages_per_minute: 60 }, { status: 201 });
       if (path === "/api/v1/mls/key-packages/claim") return Response.json({ key_packages: [{ claim_id: "claim-durable", device_id: "durable-owner-browser", user_id: "@alice:example.com", key_package: recipientPackage }] });
       if (path === "/api/v1/rooms") {
         roomId = body.room_id as string;

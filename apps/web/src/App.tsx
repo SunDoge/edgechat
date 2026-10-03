@@ -34,7 +34,7 @@ import { EncryptedRoomAvatar } from "./components/EncryptedRoomAvatar";
 import { AccountDeletionDialog, BackupDialog, DevicesDialog, SearchDialog, type DeviceRevocationProgress, type DeviceRow, type LocalSearchResult } from "./components/UtilityDialogs";
 import { ForwardDialog } from "./components/ForwardDialog";
 import { avatarColor, initials, memberName, roomTitle, userName } from "./presenters";
-import { assertMessageAttachmentReferences, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, messageAttachments, messageContacts, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot, readImageDimensions, type AttachmentMetadata, type ContactIdentity, type MessagePayload } from "./media";
+import { assertMessageEnvelope, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, messageAttachments, messageContacts, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot, readImageDimensions, type AttachmentMetadata, type ContactIdentity, type MessagePayload } from "./media";
 import { LocalImageSemanticSearch } from "./semantic-search";
 import { replenishMlsKeyPackages } from "./key-package-replenishment";
 import { applyRoomMute, applyRoomPreferenceAction, defaultRoomPreference, organizedRooms, type RoomPreferenceAction } from "./room-preferences";
@@ -592,7 +592,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     }
     if (!event.type.startsWith("message.")) return null;
     const message = normalizeMessagePayload(decoded as MessagePayload, event.event_id);
-    assertMessageAttachmentReferences(message, event.type, event.metadata);
+    assertMessageEnvelope(message, event);
     return { plaintext: messageText(message), payload: message as unknown as Record<string, unknown> };
   }
 

@@ -5,12 +5,12 @@ import { formatRoomActivityPreview } from "./room-list-preview";
 function activity(overrides: Partial<LocalRoomListActivity> = {}): LocalRoomListActivity {
   return {
     room_id: "!roomroomroomroom:example.com",
-    message_id: "$message:example.com",
+    message_id: "$message123:example.com",
     sender: "@bob:example.com",
     event_type: "message.text",
     created_at: 1,
     plaintext: "hello",
-    payload: { version: 2, message_id: "$message:example.com", parts: [{ part_id: "text", kind: "text", text: "  hello\nworld " }] },
+    payload: { version: 2, message_id: "$message123:example.com", parts: [{ part_id: "text", kind: "text", text: "  hello\nworld " }] },
     deleted_at: null,
     outbox_status: null,
     ...overrides,
@@ -26,7 +26,7 @@ describe("room list preview", () => {
 
   it("describes deleted messages and structured non-text parts", () => {
     expect(formatRoomActivityPreview(activity({ deleted_at: 2 }), "@alice:example.com", false, String)).toBe("消息已撤回");
-    expect(formatRoomActivityPreview(activity({ payload: { version: 2, message_id: "$message:example.com", parts: [
+    expect(formatRoomActivityPreview(activity({ payload: { version: 2, message_id: "$message123:example.com", parts: [
       { part_id: "one", kind: "attachment", attachment: { id: "one", name: "1.png", type: "image/png", size: 1, key: "k", nonce: "n" } },
       { part_id: "two", kind: "attachment", attachment: { id: "two", name: "2.png", type: "image/png", size: 1, key: "k", nonce: "n" } },
     ] } }), "@alice:example.com", false, String)).toBe("2 张图片");

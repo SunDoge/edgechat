@@ -2148,7 +2148,19 @@ describe("single-server durable delivery", () => {
     const botRoomBody = await botRooms.json() as { rooms: Array<{ room_id: string }> };
     expect(botRoomBody.rooms.map((item) => item.room_id)).toEqual([roomId]);
     await env.DB.prepare("UPDATE bot_integrations SET max_messages_per_minute = 1 WHERE bot_id = ?").bind(bot.bot_id).run();
-    const unsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: bot.device_id, type: "message.text", created_at: Date.now(), ciphertext: "opaque-bot-ciphertext", metadata: { mls_epoch: 1, sender_kind: "bot" } };
+    const wrongBotUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: bot.device_id, type: "message.text", created_at: Date.now(), ciphertext: "wrong-bot-provenance", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: "bot_wrong" } };
+    const wrongBotSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, botDevice.signing.privateKey, canonicalEventBytes(wrongBotUnsigned)));
+    const wrongBot = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bot.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...wrongBotUnsigned, signature: wrongBotSignature }) });
+    expect(wrongBot.status).toBe(403);
+    expect(await wrongBot.json()).toMatchObject({ code: "bot_provenance_mismatch" });
+
+    const spoofedBotUnsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: owner.device_id, type: "message.text", created_at: Date.now(), ciphertext: "human-spoofed-bot-provenance", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: bot.bot_id } };
+    const spoofedBotSignature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, ownerDevice.signing.privateKey, canonicalEventBytes(spoofedBotUnsigned)));
+    const spoofedBot = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${owner.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...spoofedBotUnsigned, signature: spoofedBotSignature }) });
+    expect(spoofedBot.status).toBe(403);
+    expect(await spoofedBot.json()).toMatchObject({ code: "bot_provenance_forbidden" });
+
+    const unsigned: Omit<ClientEvent, "signature"> = { event_id: crypto.randomUUID(), room_id: roomId, sender: owner.user_id, device_id: bot.device_id, type: "message.text", created_at: Date.now(), ciphertext: "opaque-bot-ciphertext", metadata: { mls_epoch: 1, sender_kind: "bot", bot_id: bot.bot_id } };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, botDevice.signing.privateKey, canonicalEventBytes(unsigned)));
     const sent = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/events`, { method: "POST", headers: { authorization: `Bearer ${bot.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ ...unsigned, signature }) });
     expect(sent.status, await sent.clone().text()).toBe(201);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertMessageAttachmentReferences, attachmentEventType, attachmentEventTypeForFiles, attachmentPresentation, createContactMessagePayload, createForwardPayload, createMessagePayload, isAudioAttachment, isPreviewableImage, MAX_INLINE_IMAGE_BYTES, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
+import { assertMessageAttachmentReferences, assertMessageEnvelope, attachmentEventType, attachmentEventTypeForFiles, attachmentPresentation, createContactMessagePayload, createForwardPayload, createMessagePayload, isAudioAttachment, isPreviewableImage, MAX_INLINE_IMAGE_BYTES, MAX_QUOTE_TEXT_LENGTH, messageAttachments, messageContacts, messageQuote, messageSavedFrom, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot } from "./media";
 
 describe("unified attachment presentation", () => {
   it("uses one attachment event and derives bounded previews locally", () => {
@@ -21,8 +21,8 @@ describe("unified attachment presentation", () => {
   });
 
   it("gives every logical message and content part a stable ID", () => {
-    const payload = createMessagePayload("$message:example.com", "hello", { id: "attachment", name: "photo.png", type: "image/png", size: 4, key: "key", nonce: "nonce" }, { type: "reply", target: { kind: "message", message_id: "$target123:example.com", room_id: "!0123456789abcdef:example.com" } });
-    expect(payload.message_id).toBe("$message:example.com");
+    const payload = createMessagePayload("$message123:example.com", "hello", { id: "attachment", name: "photo.png", type: "image/png", size: 4, key: "key", nonce: "nonce" }, { type: "reply", target: { kind: "message", message_id: "$target123:example.com", room_id: "!0123456789abcdef:example.com" } });
+    expect(payload.message_id).toBe("$message123:example.com");
     expect(new Set(payload.parts.map((part) => part.part_id)).size).toBe(2);
     expect(messageText(payload)).toBe("hello");
     expect(messageAttachments(payload)[0].kind).toBe("attachment");
@@ -30,15 +30,15 @@ describe("unified attachment presentation", () => {
   });
 
   it("keeps legacy payloads readable", () => {
-    const payload = normalizeMessagePayload({ text: "old message" }, "$legacy:example.com");
-    expect(payload.message_id).toBe("$legacy:example.com");
+    const payload = normalizeMessagePayload({ text: "old message" }, "$legacy123:example.com");
+    expect(payload.message_id).toBe("$legacy123:example.com");
     expect(messageText(payload)).toBe("old message");
   });
 
   it("keeps a bounded quote snapshot inside the encrypted payload", () => {
-    const payload = createMessagePayload("$quote:example.com", "my response", undefined, {
+    const payload = createMessagePayload("$quote1234:example.com", "my response", undefined, {
       type: "quote",
-      target: { kind: "message", message_id: "$target:example.com", room_id: "!0123456789abcdef:example.com" },
+      target: { kind: "message", message_id: "$target123:example.com", room_id: "!0123456789abcdef:example.com" },
       snapshot: { text: "quoted text", sender: "@alice:example.com", display_name: "Alice" },
     });
     expect(messageQuote(payload)).toEqual({ text: "quoted text", sender: "@alice:example.com", display_name: "Alice" });
@@ -81,8 +81,8 @@ describe("unified attachment presentation", () => {
       { part_id: "one", kind: "contact", contact: { user_id: "alice", display_name: "Alice" } },
       { part_id: "two", kind: "contact", contact: { user_id: "@alice:example.com", display_name: "x".repeat(129) } },
     ] } as never;
-    expect(() => normalizeMessagePayload(malformed, "$fallback:example.com")).toThrow("联系人名片无效");
-    expect(() => createContactMessagePayload("$bad:example.com", { user_id: "alice" as never, display_name: "Alice" })).toThrow("联系人名片无效");
+    expect(() => normalizeMessagePayload(malformed, "$bad-contact:example.com")).toThrow("联系人名片无效");
+    expect(() => createContactMessagePayload("$bad12345:example.com", { user_id: "alice" as never, display_name: "Alice" })).toThrow("联系人名片无效");
   });
 
   it("keeps multiple attachments in one logical message and assigns independent forward aliases", () => {
@@ -99,7 +99,7 @@ describe("unified attachment presentation", () => {
     expect(isAudioAttachment({ type: "audio/webm;codecs=opus" })).toBe(true);
     expect(isAudioAttachment({ type: "application/octet-stream" })).toBe(false);
 
-    const payload = createMessagePayload("$voice:example.com", "", { id: "audio", name: "voice.webm", type: "audio/webm;codecs=opus", size: 42, key: "key", nonce: "nonce", duration_ms: 12_500 });
+    const payload = createMessagePayload("$voice1234:example.com", "", { id: "audio", name: "voice.webm", type: "audio/webm;codecs=opus", size: 42, key: "key", nonce: "nonce", duration_ms: 12_500 });
     expect(messageAttachments(payload)[0]).toMatchObject({ kind: "attachment", attachment: { duration_ms: 12_500 } });
   });
 
@@ -111,7 +111,7 @@ describe("unified attachment presentation", () => {
 
   it("bounds and normalizes untrusted attachment metadata before local projection", () => {
     const valid = { id: "attachment_123", name: " photo.JPG ", type: "IMAGE/JPEG", size: 42, key: "key_123", nonce: "nonce_123", width: 800, height: 600 };
-    const payload = normalizeMessagePayload({ version: 2, message_id: "$safe:example.com", parts: [{ part_id: "part", kind: "attachment", attachment: valid }] }, "$safe:example.com");
+    const payload = normalizeMessagePayload({ version: 2, message_id: "$safe12345:example.com", parts: [{ part_id: "part", kind: "attachment", attachment: valid }] }, "$safe12345:example.com");
     expect(messageAttachments(payload)[0]?.attachment).toMatchObject({ name: "photo.JPG", type: "image/jpeg", width: 800, height: 600 });
     for (const attachment of [
       { ...valid, id: "../escape" },
@@ -123,7 +123,7 @@ describe("unified attachment presentation", () => {
       { ...valid, duration_ms: 600_001 },
       { ...valid, key: "not+base64" },
     ]) {
-      expect(() => normalizeMessagePayload({ version: 2, message_id: "$bad:example.com", parts: [{ part_id: "part", kind: "attachment", attachment }] } as never, "$bad:example.com")).toThrow("附件元数据无效");
+      expect(() => normalizeMessagePayload({ version: 2, message_id: "$bad12345:example.com", parts: [{ part_id: "part", kind: "attachment", attachment }] } as never, "$bad12345:example.com")).toThrow("附件元数据无效");
     }
   });
 
@@ -132,7 +132,7 @@ describe("unified attachment presentation", () => {
     expect(() => normalizeMessagePayload({ version: 2, message_id: "$duplicate:example.com", parts: [
       { part_id: "same", kind: "text", text: "one" }, { part_id: "same", kind: "text", text: "two" },
     ] }, "$duplicate:example.com")).toThrow("消息内容格式无效");
-    expect(() => normalizeMessagePayload({ version: 2, message_id: "$many:example.com", parts: Array.from({ length: 11 }, (_, index) => ({ part_id: `part-${index}`, kind: "attachment", attachment: attachment(index) })) } as never, "$many:example.com")).toThrow("附件数量或总大小无效");
+    expect(() => normalizeMessagePayload({ version: 2, message_id: "$many12345:example.com", parts: Array.from({ length: 11 }, (_, index) => ({ part_id: `part-${index}`, kind: "attachment", attachment: attachment(index) })) } as never, "$many12345:example.com")).toThrow("附件数量或总大小无效");
     expect(() => normalizeMessagePayload({ version: 2, message_id: "$duplicateattachment:example.com", parts: [
       { part_id: "first", kind: "attachment", attachment: attachment(1) }, { part_id: "second", kind: "attachment", attachment: attachment(1) },
     ] } as never, "$duplicateattachment:example.com")).toThrow("附件引用重复");
@@ -148,5 +148,28 @@ describe("unified attachment presentation", () => {
     expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_ids: ["attachment_one", "attachment_one"] })).toThrow("格式无效");
     expect(() => assertMessageAttachmentReferences(payload, "message.file", { attachment_id: "attachment_one", attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("格式冲突");
     expect(() => assertMessageAttachmentReferences(payload, "message.text", { attachment_ids: ["attachment_one", "attachment_two"] })).toThrow("不一致");
+  });
+
+  it("binds the logical message ID, relation room, and visible event shape", () => {
+    const room = "!0123456789abcdef:example.com";
+    const eventId = "$event1234:example.com";
+    const text = createMessagePayload(eventId, "hello");
+    expect(() => assertMessageEnvelope(text, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).not.toThrow();
+    expect(() => normalizeMessagePayload({ ...text, message_id: "$forged123:example.com" }, eventId)).toThrow("不一致");
+    expect(() => assertMessageEnvelope({ ...text, relation: { type: "reply", target: { kind: "message", message_id: "$target123:example.com", room_id: "!fedcba9876543210:example.com" } } }, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("跨越");
+    const contact = createContactMessagePayload(eventId, { user_id: "@alice:example.com", display_name: "Alice" });
+    expect(() => assertMessageEnvelope(contact, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("文字消息");
+    expect(() => assertMessageEnvelope(contact, { event_id: eventId, room_id: room, type: "message.contact", metadata: {} })).not.toThrow();
+  });
+
+  it("accepts only capability-bound Bot provenance", () => {
+    const eventId = "$botmsg123:example.com"; const room = "!0123456789abcdef:example.com";
+    const botId = "bot_0123456789abcdef";
+    const payload = normalizeMessagePayload({ version: 2, message_id: eventId, origin: { kind: "bot", bot_id: botId, display_name: " Alerts " }, parts: [{ part_id: "text", kind: "text", text: "build done" }] }, eventId);
+    expect(payload.origin?.display_name).toBe("Alerts");
+    expect(() => assertMessageEnvelope(payload, { event_id: eventId, room_id: room, type: "message.text", metadata: { sender_kind: "bot", bot_id: botId } })).not.toThrow();
+    expect(() => assertMessageEnvelope(payload, { event_id: eventId, room_id: room, type: "message.text", metadata: {} })).toThrow("Bot 来源");
+    expect(() => assertMessageEnvelope(createMessagePayload(eventId, "human"), { event_id: eventId, room_id: room, type: "message.text", metadata: { sender_kind: "bot", bot_id: botId } })).toThrow("未认证");
+    expect(() => normalizeMessagePayload({ ...payload, origin: { ...payload.origin!, display_name: "bad\u202ename" } }, eventId)).toThrow("消息来源格式无效");
   });
 });

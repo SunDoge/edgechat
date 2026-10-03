@@ -4,10 +4,10 @@ import { createContactMessagePayload, createMessagePayload } from "../media";
 import { forwardSelectionSummary } from "./ForwardDialog";
 
 function message(id: string, attachment = false): LocalMessage {
-  const messageId = `$${id}:example.com` as const;
+  const messageId = `$message-${id}:example.com` as const;
   const payload = createMessagePayload(messageId, attachment ? "" : id, attachment ? { id: `${id}-file`, name: `${id}.jpg`, type: "image/jpeg", size: 4, key: "key", nonce: "nonce" } : undefined);
   return {
-    event_id: id, message_id: messageId, room_id: "!0123456789abcdef:example.com", seq: 1,
+    event_id: messageId, message_id: messageId, room_id: "!0123456789abcdef:example.com", seq: 1,
     sender: "@alice:example.com", device_id: "device", event_type: attachment ? "message.file" : "message.text",
     created_at: 1, ciphertext: "ciphertext", plaintext: attachment ? "" : id,
     payload: payload as unknown as Record<string, unknown>, deleted_at: null, deleted_by: null,
@@ -27,7 +27,7 @@ describe("forward selection summary", () => {
   it("describes an encrypted contact card without exposing its identity in the forwarding dialog", () => {
     const card = message("contact");
     card.plaintext = "";
-    card.payload = createContactMessagePayload("$contact:example.com", { user_id: "@alice:example.com", display_name: "Alice" }) as unknown as Record<string, unknown>;
+    card.payload = createContactMessagePayload(card.message_id as `$${string}:${string}`, { user_id: "@alice:example.com", display_name: "Alice" }) as unknown as Record<string, unknown>;
     expect(forwardSelectionSummary([card])).toBe("联系人名片");
   });
 });

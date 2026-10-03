@@ -1912,9 +1912,16 @@ function requireBotRoom(auth: AuthContext, roomId: string): void {
 }
 
 async function consumeBotMessageCapability(env: Env, auth: AuthContext, event: ClientEvent): Promise<void> {
-  if (auth.actor !== "bot") return;
+  const senderKind = event.metadata.sender_kind; const metadataBotId = event.metadata.bot_id;
+  if (auth.actor !== "bot") {
+    if (senderKind !== undefined || metadataBotId !== undefined) throw new HttpError(403, "Bot provenance requires a bot capability", "bot_provenance_forbidden");
+    return;
+  }
   if (!auth.botId || auth.botScope !== "message:create" || !auth.botRoomId || event.room_id !== auth.botRoomId || event.type !== "message.text") {
     throw new HttpError(403, "Bot capability only permits text messages in its notification room", "bot_capability_scope");
+  }
+  if (senderKind !== "bot" || metadataBotId !== auth.botId) {
+    throw new HttpError(403, "Bot provenance does not match this capability", "bot_provenance_mismatch");
   }
   const db = createDatabase(env.DB);
   const duplicate = await db.selectFrom("room_events").select("event_id")

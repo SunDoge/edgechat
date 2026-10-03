@@ -49,7 +49,7 @@ describe("conversation transcript export", () => {
   });
 
   it("attributes personal integration messages to their encrypted Bot origin", () => {
-    const formatted = formatConversationMessage(message(3, { payload: { version: 2, message_id: "$message-3:example.com", origin: { kind: "bot", bot_id: "weather", display_name: "Weather" }, parts: [{ part_id: "text", kind: "text", text: "rain" }] } }), () => "Alice");
+    const formatted = formatConversationMessage(message(3, { payload: { version: 2, message_id: "$message-3:example.com", origin: { kind: "bot", bot_id: "bot_0123456789abcdef", display_name: "Weather" }, parts: [{ part_id: "text", kind: "text", text: "rain" }] } }), () => "Alice");
     expect(formatted).toContain("Weather (Bot · @alice:example.com)");
   });
 });

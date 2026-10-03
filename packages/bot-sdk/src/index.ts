@@ -121,7 +121,7 @@ export class PersonalBotClient {
     const payload = { version: 2, message_id: eventId, origin: { kind: "bot", bot_id: this.state.bot_id, display_name: this.state.display_name }, parts: [{ part_id: crypto.randomUUID(), kind: "text", text: content }] };
     const ciphertext = b64url(this.mls.encryptMessage(this.state.room_id, encoder.encode(JSON.stringify(payload))));
     this.state.mls_state = b64url(this.mls.exportState());
-    const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId, room_id: this.state.room_id, sender: this.state.user_id, device_id: this.state.device_id, type: "message.text", created_at: Date.now(), ciphertext, metadata: { mls_epoch: this.mls.epoch(this.state.room_id) } };
+    const unsigned: Omit<ClientEvent, "signature"> = { event_id: eventId, room_id: this.state.room_id, sender: this.state.user_id, device_id: this.state.device_id, type: "message.text", created_at: Date.now(), ciphertext, metadata: { mls_epoch: this.mls.epoch(this.state.room_id), sender_kind: "bot", bot_id: this.state.bot_id } };
     const signature = b64url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, this.signingKey, canonicalEventBytes(unsigned)));
     (this.state.outbox ??= []).push({ ...unsigned, signature });
     // Persist the advanced MLS state and exact signed envelope before any ambiguous network operation.
