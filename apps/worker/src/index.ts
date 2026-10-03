@@ -4300,7 +4300,40 @@ async function uploadRoomPeerRecovery(request: Request, env: Env, auth: AuthCont
   }
 }
 
-async function downloadRoomPeerRecovery(env: Env, auth: AuthContext, recoveryId: string): Promise<Response> {
+async function restartRoomPeerRecovery(env: Env, row: {
+  recovery_id: string; room_id: string; user_id: string; target_device_id: string; object_key: string;
+  ciphertext_bytes: number; ciphertext_sha256: string;
+}, deleteInvalidObject: boolean): Promise<boolean> {
+  if (deleteInvalidObject) {
+    try { await objectStore(env).delete(row.object_key); }
+    catch { return false; }
+  }
+  const now = Date.now(); const retryId = randomId(18);
+  const results = await env.DB.batch([
+    env.DB.prepare(`UPDATE user_storage_usage
+      SET archive_bytes = max(0, archive_bytes - ?), archive_objects = max(0, archive_objects - 1), updated_at = ?
+      WHERE user_id = ? AND EXISTS (
+        SELECT 1 FROM room_peer_recoveries WHERE recovery_id = ? AND status = 'ready'
+          AND object_key = ? AND ciphertext_sha256 = ?
+      )`).bind(row.ciphertext_bytes, now, row.user_id, row.recovery_id, row.object_key, row.ciphertext_sha256),
+    env.DB.prepare(`UPDATE room_peer_recoveries
+      SET status = 'pending', source_device_id = NULL, lease_token_hash = NULL, lease_expires_at = NULL,
+        object_key = NULL, ciphertext_bytes = NULL, ciphertext_sha256 = NULL, updated_at = ?
+      WHERE recovery_id = ? AND status = 'ready' AND object_key = ? AND ciphertext_sha256 = ?`)
+      .bind(now, row.recovery_id, row.object_key, row.ciphertext_sha256),
+    env.DB.prepare(`INSERT OR IGNORE INTO sync_log
+      (recipient_user_id, kind, room_id, seq, event_id, payload, created_at)
+      SELECT ?, 'device.event', ?, NULL, ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM room_peer_recoveries WHERE recovery_id = ? AND status = 'pending'
+          AND object_key IS NULL AND updated_at = ?
+      )`).bind(row.user_id, row.room_id, `peer-recovery-retry:${retryId}`,
+        JSON.stringify({ type: "room.peer_recovery.requested", recovery_id: row.recovery_id, room_id: row.room_id }),
+        now, row.recovery_id, now),
+  ]);
+  return Number(results[1]?.meta.changes ?? 0) === 1;
+}
+
+async function downloadRoomPeerRecovery(env: Env, auth: AuthContext, recoveryId: string, ctx: ExecutionContext): Promise<Response> {
   requireUser(auth);
   const row = await createDatabase(env.DB).selectFrom("room_peer_recoveries").selectAll().where("recovery_id", "=", recoveryId)
     .where("user_id", "=", auth.userId).where("target_device_id", "=", auth.deviceId).where("status", "=", "ready").executeTakeFirst();
@@ -4308,7 +4341,13 @@ async function downloadRoomPeerRecovery(env: Env, auth: AuthContext, recoveryId:
   const object = await objectStore(env).get(row.object_key);
   if (!object || object.size !== row.ciphertext_bytes || object.metadata.sha256 !== row.ciphertext_sha256) {
     await object?.body.cancel().catch(() => undefined);
-    throw new HttpError(503, "Peer recovery bundle is temporarily unavailable", "peer_recovery_unavailable");
+    const restarted = await restartRoomPeerRecovery(env, {
+      recovery_id: recoveryId, room_id: row.room_id, user_id: row.user_id, target_device_id: row.target_device_id,
+      object_key: row.object_key, ciphertext_bytes: row.ciphertext_bytes, ciphertext_sha256: row.ciphertext_sha256,
+    }, Boolean(object));
+    if (restarted) ctx.waitUntil(notifyAccountDevices(env, row.user_id, row.target_device_id));
+    throw new HttpError(503, restarted ? "Peer recovery bundle is being regenerated" : "Peer recovery bundle is temporarily unavailable",
+      restarted ? "peer_recovery_restarted" : "peer_recovery_unavailable", { "retry-after": "30" });
   }
   return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(object.size), "cache-control": "no-store" } });
 }
@@ -5617,7 +5656,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (peerRecoveryBundle) {
     const recoveryId = decodeURIComponent(peerRecoveryBundle[1]);
     if (request.method === "PUT") return uploadRoomPeerRecovery(request, env, auth, recoveryId, ctx);
-    if (request.method === "GET") return downloadRoomPeerRecovery(env, auth, recoveryId);
+    if (request.method === "GET") return downloadRoomPeerRecovery(env, auth, recoveryId, ctx);
     if (request.method === "DELETE") return acknowledgeRoomPeerRecovery(env, auth, recoveryId);
   }
   if (path === "/api/v1/privacy" && (request.method === "GET" || request.method === "PUT")) return invitationPolicy(request, env, auth);

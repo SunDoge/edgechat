@@ -265,6 +265,16 @@ intent performs one HEAD and cancels the retry body when size, digest, link,
 transfer, target and shard index match. A missing object falls through to PUT.
 This recovery performs no GET/LIST and cannot overwrite a conflicting shard.
 
+Room peer recovery uses one temporary object per at-most-500-event encrypted
+batch. The first target GET that finds a missing object or invalid provider
+metadata atomically returns its quota and moves the D1 recovery row back to
+`pending`. Invalid bytes are deleted by their exact recorded key; an absent
+object is not deleted again. A fresh content-free device event wakes eligible
+source endpoints, and a new lease produces one replacement conditional PUT
+under a new opaque key. Until then target status polling is D1-only, so the bad
+key receives at most one failed GET per repair episode. This path uses no LIST
+or discovery HEAD.
+
 If the page crashes after recording `uploading`, or the immediate resolution
 request is also offline and records `upload_unknown`, startup and later durable
 sync activity retry that bounded queue from the exact OPFS ciphertext. A new

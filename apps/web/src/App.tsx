@@ -1130,6 +1130,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           const needed = peerRecoveryNeeds.get(roomId);
           if (needed) queueMicrotask(() => { void requestPeerRecovery(roomId, needed.processedThrough, needed.requiredThrough).catch(() => undefined); });
         } catch (cause) {
+          if (cause instanceof ApiError && cause.code === "peer_recovery_restarted") {
+            tracked.resetRequired = false;
+            setHistoryRecoveryState(roomId, { phase: "waiting" });
+            continue;
+          }
           const sequence = await db.roomSequenceState(roomId).catch(() => null);
           const transient = !navigator.onLine || (cause instanceof ApiError && (cause.status === 408 || cause.status === 425 || cause.status === 429 || cause.status >= 500));
           tracked.resetRequired = !transient && (sequence?.processed_through_seq ?? tracked.afterSeq) < tracked.throughSeq;
@@ -1301,6 +1306,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (detail?.type === "device.link.history.repair" || detail?.type === "device.link.claimed") {
         const activeMls = mlsRef;
         if (activeMls) void resumeDeviceLinks(activeMls).catch(() => undefined);
+      }
+      if (detail?.type === "room.peer_recovery.requested" || detail?.type === "room.peer_recovery.ready") {
+        void processPeerRecoveries().catch(() => undefined);
       }
     };
     const realtime = (received: Event) => { const connected = Boolean((received as CustomEvent<{ connected: boolean }>).detail.connected); setConnectionState(connected ? "online" : navigator.onLine ? "syncing" : "offline"); };

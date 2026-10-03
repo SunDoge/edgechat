@@ -1634,8 +1634,43 @@ describe("single-server durable delivery", () => {
     await env.ARCHIVE.put(recoveryObjectKey, opaque, { customMetadata: { sha256: b64url(new Uint8Array(32).buffer) } });
     const corrupted = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, { headers: { authorization: `Bearer ${target.access_token}` } });
     expect(corrupted.status).toBe(503);
-    expect(await corrupted.json()).toMatchObject({ code: "peer_recovery_unavailable" });
-    await env.ARCHIVE.put(recoveryObjectKey, opaque, { customMetadata: { sha256: opaqueDigest } });
+    expect(await corrupted.json()).toMatchObject({ code: "peer_recovery_restarted" });
+    expect(await env.ARCHIVE.get(recoveryObjectKey)).toBeNull();
+    expect(await env.DB.prepare("SELECT status,source_device_id,object_key,ciphertext_bytes,ciphertext_sha256 FROM room_peer_recoveries WHERE recovery_id = ?")
+      .bind(recoveryId).first()).toEqual({ status: "pending", source_device_id: null, object_key: null, ciphertext_bytes: null, ciphertext_sha256: null });
+    expect(await env.DB.prepare("SELECT archive_bytes,archive_objects FROM user_storage_usage WHERE user_id = ?").bind(target.user_id).first())
+      .toMatchObject({ archive_bytes: 0, archive_objects: 0 });
+    expect(await env.DB.prepare("SELECT payload FROM sync_log WHERE event_id LIKE 'peer-recovery-retry:%' AND recipient_user_id = ?")
+      .bind(target.user_id).first()).toEqual({
+      payload: JSON.stringify({ type: "room.peer_recovery.requested", recovery_id: recoveryId, room_id: roomId }),
+    });
+    const repairQueue = await SELF.fetch("https://edgechat.test/api/v1/peer-recoveries", { headers: { authorization: `Bearer ${source.access_token}` } });
+    expect(await repairQueue.json()).toMatchObject({ recoveries: [{ recovery_id: recoveryId, status: "pending" }] });
+    const repairLease = await (await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/claim`, {
+      method: "POST", headers: sourceHeaders,
+    })).json() as { token: string };
+    const repairedUpload = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, {
+      method: "PUT", headers: { authorization: `Bearer ${source.access_token}`, "x-peer-recovery-token": repairLease.token,
+        "x-content-sha256": opaqueDigest, "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(opaque.length) }, body: opaque,
+    });
+    expect(repairedUpload.status, await repairedUpload.clone().text()).toBe(201);
+    const repairedObjectKey = (await env.ARCHIVE.list({ prefix: `room-recovery/${recoveryId}/` })).objects[0]!.key;
+    await env.ARCHIVE.delete(repairedObjectKey);
+    const missing = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, { headers: { authorization: `Bearer ${target.access_token}` } });
+    expect(missing.status).toBe(503);
+    expect(await missing.json()).toMatchObject({ code: "peer_recovery_restarted" });
+    const circuitOpen = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, { headers: { authorization: `Bearer ${target.access_token}` } });
+    expect(circuitOpen.status).toBe(404);
+    expect(await env.DB.prepare("SELECT archive_bytes,archive_objects FROM user_storage_usage WHERE user_id = ?").bind(target.user_id).first())
+      .toMatchObject({ archive_bytes: 0, archive_objects: 0 });
+    const missingLease = await (await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/claim`, {
+      method: "POST", headers: sourceHeaders,
+    })).json() as { token: string };
+    const missingRepair = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, {
+      method: "PUT", headers: { authorization: `Bearer ${source.access_token}`, "x-peer-recovery-token": missingLease.token,
+        "x-content-sha256": opaqueDigest, "content-type": "application/vnd.edgechat.room-recovery", "content-length": String(opaque.length) }, body: opaque,
+    });
+    expect(missingRepair.status, await missingRepair.clone().text()).toBe(201);
     const downloaded = await SELF.fetch(`https://edgechat.test/api/v1/peer-recoveries/${recoveryId}/bundle`, { headers: { authorization: `Bearer ${target.access_token}` } });
     expect(downloaded.status).toBe(200);
     expect(Array.from(new Uint8Array(await downloaded.arrayBuffer()))).toEqual(Array.from(opaque));
