@@ -9,7 +9,7 @@ import { acquireTabLease, awaitTabHandoff, TAB_CHANNEL, type LockProvider, type 
 import { ensureActiveLocalProfile, listLocalProfiles, localProfileToken } from "./local-profiles";
 import { setActivePushProfile } from "./push-subscription";
 import { resumePendingLocalDatabaseDestructions } from "@edgechat/db";
-import { I18nProvider } from "./i18n";
+import { I18nProvider, useI18n } from "./i18n";
 import "./styles.css";
 
 initializePwaInstall();
@@ -29,30 +29,31 @@ function replaceView(view: () => JSX.Element): void {
 }
 
 function SecondaryTab() {
+  const { t } = useI18n();
   const requestFocus = () => channel?.postMessage({ type: "focus-primary", from: tabId } satisfies TabMessage);
   const requestHandoff = () => {
     if (!channel) { setStandbyStatus("no-channel"); return; }
     setStandbyStatus("requesting");
     channel.postMessage({ type: "request-handoff", from: tabId } satisfies TabMessage);
   };
-  const title = () => standbyStatus() === "incompatible" ? "此浏览器无法安全打开 EdgeChat" : standbyStatus() === "error" ? "暂时无法打开 EdgeChat" : "EdgeChat 已在另一页面打开";
+  const title = () => standbyStatus() === "incompatible" ? t("secondaryTab.title.incompatible") : standbyStatus() === "error" ? t("secondaryTab.title.error") : t("secondaryTab.title.waiting");
   const description = () => standbyStatus() === "incompatible"
-    ? "请更新浏览器后重试。为保护消息加密状态，此页面不会在缺少必要安全能力时启动。"
+    ? t("secondaryTab.description.incompatible")
     : standbyStatus() === "error"
-      ? "浏览器暂时无法取得本机消息状态。你可以重新检测，已有数据不会被修改。"
+      ? t("secondaryTab.description.error")
       : standbyStatus() === "denied"
-        ? "原页面正在发送、录音或执行账户操作。请先在那里完成或取消，再重试。"
+        ? t("secondaryTab.description.denied")
         : standbyStatus() === "no-channel"
-          ? "请先关闭原页面；关闭后这里会自动继续。"
-          : "为保护消息加密状态，同一台设备一次只运行一个页面。原页面关闭后，这里会自动继续。";
+          ? t("secondaryTab.description.noChannel")
+          : t("secondaryTab.description.waiting");
   return <main class="grid h-dvh place-items-center bg-chat px-6 py-10 antialiased">
     <section class="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-message ring-1 ring-black/5" aria-labelledby="secondary-tab-title">
       <div class="mx-auto grid size-11 place-items-center rounded-full bg-brand-soft"><IconDeviceDesktop class="size-5 stroke-brand"/></div>
       <h1 id="secondary-tab-title" class="mt-4 text-lg font-semibold tracking-tight text-ink">{title()}</h1>
       <p class="mt-2 text-sm/6 text-muted">{description()}</p>
-      <Show when={standbyStatus() !== "incompatible" && standbyStatus() !== "error"} fallback={<button type="button" class="mt-5 min-h-11 w-full rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => location.reload()}>重新检测</button>}><div class="mt-5 grid gap-2">
-        <button type="button" class="min-h-11 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={requestFocus}>切换到已打开页面</button>
-        <button type="button" disabled={standbyStatus() === "requesting"} class="flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium text-ink hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:text-muted" onClick={requestHandoff}><Show when={standbyStatus() === "requesting"}><IconRefresh class="size-4 animate-spin stroke-muted"/></Show>{standbyStatus() === "requesting" ? "正在安全接管…" : "在此页面继续"}</button>
+      <Show when={standbyStatus() !== "incompatible" && standbyStatus() !== "error"} fallback={<button type="button" class="mt-5 min-h-11 w-full rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => location.reload()}>{t("secondaryTab.retry")}</button>}><div class="mt-5 grid gap-2">
+        <button type="button" class="min-h-11 rounded-lg bg-brand px-4 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={requestFocus}>{t("secondaryTab.focus")}</button>
+        <button type="button" disabled={standbyStatus() === "requesting"} class="flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium text-ink hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:text-muted" onClick={requestHandoff}><Show when={standbyStatus() === "requesting"}><IconRefresh class="size-4 animate-spin stroke-muted"/></Show>{standbyStatus() === "requesting" ? t("secondaryTab.requesting") : t("secondaryTab.continue")}</button>
       </div></Show>
     </section>
   </main>;

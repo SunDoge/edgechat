@@ -20,6 +20,8 @@ describe("local message catalog", () => {
     expect(translate("workspace.composer.voiceFile", { seconds: 12 })).toBe("语音 · 12 秒");
     expect(translate("workspace.selection.selected", { count: 3 })).toBe("已选择 3 条");
     expect(translate("workspace.roomPreview.group", { count: 5 })).toBe("5 人群聊");
+    expect(translate("workspace.historyRecovery.waiting.title")).toBe("等待另一台设备");
+    expect(translate("secondaryTab.description.denied")).toContain("完成或取消");
     expect(translate("newRoom.createGroup", { count: 4 })).toBe("创建 4 人群聊");
     expect(translate("roomList.actions", { title: "家人" })).toBe("家人的对话操作");
     expect(translate("search.similarity", { score: 87 })).toBe("相似度 87%");
