@@ -202,8 +202,22 @@ export class ApiClient {
   createDeviceLinkHistoryTransfer(linkId: string, manifest: { transfer_id: string; plaintext_bytes: number; shard_plaintext_bytes: number; shard_count: number }) {
     return this.request<{ transfer: DeviceHistoryTransfer }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/manifest`, { method: "PUT", body: JSON.stringify(manifest) });
   }
-  uploadDeviceLinkHistoryShard(linkId: string, index: number, shard: Blob) {
-    return this.request<{ ready: true; index: number; bytes: number; status: "ready" | "acked" }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history-shard" }, body: shard }, API_TRANSFER_TIMEOUT_MS);
+  async uploadDeviceLinkHistoryShard(linkId: string, index: number, shard: Blob) {
+    const bytes = await shard.arrayBuffer();
+    const digest = base64Url(await crypto.subtle.digest("SHA-256", bytes));
+    const upload = async () => {
+      const result = await this.request<{ ready: true; index: number; bytes: number; status: "ready" | "acked" }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, {
+        method: "PUT", headers: { "content-type": "application/vnd.edgechat.device-history-shard", "x-content-sha256": digest }, body: bytes,
+      }, API_TRANSFER_TIMEOUT_MS);
+      if (result.index !== index || result.bytes !== bytes.byteLength) throw new ApiError("服务器返回了不匹配的设备历史分片", 502, "invalid_device_history_response");
+      return result;
+    };
+    try { return await upload(); }
+    catch (error) {
+      if (!(error instanceof ApiTimeoutError) && !(error instanceof TypeError)
+        && !(error instanceof ApiError && error.status >= 500 && error.code !== "server_upgrade_required")) throw error;
+      return upload();
+    }
   }
   async downloadDeviceLinkHistoryShard(linkId: string, secret: string, index: number): Promise<Blob> {
     return this.withResponse(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { headers: { "x-device-link-secret": secret } }, API_TRANSFER_TIMEOUT_MS, (response) => response.blob());

@@ -198,6 +198,7 @@ export interface DeviceKeyPackages {
 export interface DeviceLinkHistoryShards {
   acked_at: number | null;
   ciphertext_bytes: number;
+  ciphertext_sha256: Generated<string | null>;
   link_id: string;
   object_key: string;
   shard_index: number;

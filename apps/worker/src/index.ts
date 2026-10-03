@@ -2195,13 +2195,15 @@ async function createDeviceLinkHistoryTransfer(request: Request, env: Env, auth:
 async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: AuthContext, linkId: string, shardIndex: number): Promise<Response> {
   requireUser(auth);
   const declaredSize = Number(request.headers.get("content-length"));
+  const suppliedDigest = requestContentSha256(request, "invalid_device_history_digest");
   if (!request.body || !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > DEVICE_LINK_HISTORY_SHARD_MAX_BYTES) {
     throw new HttpError(413, "Device history shard is too large", "device_history_too_large");
   }
+  if (!suppliedDigest) throw new HttpError(400, "Ciphertext SHA-256 required for device history shards", "device_history_digest_required");
   const db = createDatabase(env.DB);
   const transfer = await db.selectFrom("device_link_history_transfers as transfer")
     .innerJoin("device_links as link", "link.link_id", "transfer.link_id")
-    .selectAll("transfer").select(["link.status as link_status", "link.expires_at as link_expires_at"])
+    .selectAll("transfer").select(["link.status as link_status", "link.expires_at as link_expires_at", "link.device_id as target_device_id"])
     .where("transfer.link_id", "=", linkId).executeTakeFirst();
   if (!transfer || transfer.user_id !== auth.userId || transfer.source_device_id !== auth.deviceId || !Number.isSafeInteger(shardIndex) || shardIndex < 0 || shardIndex >= transfer.shard_count) {
     throw new HttpError(404, "Device history transfer not found", "not_found");
@@ -2212,23 +2214,90 @@ async function uploadDeviceLinkHistoryShard(request: Request, env: Env, auth: Au
     throw new HttpError(410, "Device link expired", "device_link_expired");
   }
   const existing = await db.selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
-  if (existing) return json({ ready: true, index: shardIndex, bytes: existing.ciphertext_bytes, status: existing.status });
+  const matchesCommitted = (row: { ciphertext_bytes: number; ciphertext_sha256: string | null }): boolean => (
+    row.ciphertext_bytes === declaredSize && row.ciphertext_sha256 === suppliedDigest.text
+  );
+  if (existing) {
+    await request.body.cancel().catch(() => undefined);
+    if (!matchesCommitted(existing)) throw new HttpError(409, "Device history shard index is already in use", "device_history_shard_conflict");
+    return json({ ready: true, index: shardIndex, bytes: existing.ciphertext_bytes, status: existing.status });
+  }
   const objectKey = `device-links/${linkId}/${transfer.transfer_id}/${String(shardIndex).padStart(4, "0")}.bin`;
-  const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize };
-  await stageR2Write(env, pending);
+  const pending = { object_key: objectKey, owner_user_id: auth.userId, kind: "archive" as const, expected_bytes: declaredSize, content_sha256: suppliedDigest.text };
+  let reservationCreated: boolean;
+  try { reservationCreated = await stageIdempotentR2Write(env, pending); }
+  catch (error) { await request.body.cancel().catch(() => undefined); throw error; }
+  let releaseReservation = false;
+  const metadata = { link_id: linkId, transfer_id: transfer.transfer_id, target_device_id: transfer.target_device_id,
+    shard_index: String(shardIndex), sha256: suppliedDigest.text };
+  const matchesStored = (object: ObjectStoreObject): boolean => object.size === declaredSize
+    && object.metadata.link_id === metadata.link_id && object.metadata.transfer_id === metadata.transfer_id
+    && object.metadata.target_device_id === metadata.target_device_id && object.metadata.shard_index === metadata.shard_index
+    && object.metadata.sha256 === suppliedDigest.text;
   try {
-    const object = await objectStore(env).put(objectKey, request.body, { expectedSize: declaredSize, contentType: "application/vnd.edgechat.device-history-shard",
-      metadata: { link_id: linkId, transfer_id: transfer.transfer_id, target_device_id: (await db.selectFrom("device_links").select("device_id").where("link_id", "=", linkId).executeTakeFirstOrThrow()).device_id, shard_index: String(shardIndex) } });
-    if (!object || object.size !== declaredSize) throw new Error("Device history shard length mismatch");
+    let object: ObjectStoreObject | null = null;
+    if (!reservationCreated) {
+      try { object = await objectStore(env).head(objectKey); }
+      catch (error) { await request.body.cancel(error).catch(() => undefined); throw error; }
+      if (object && !matchesStored(object)) {
+        await request.body.cancel("device history shard conflict").catch(() => undefined);
+        throw new HttpError(409, "Device history shard index is already in use", "device_history_shard_conflict");
+      }
+      if (object) await request.body.cancel("device history shard already uploaded").catch(() => undefined);
+    }
+    if (!object) {
+      const limited = exactLengthUploadStream(request.body, declaredSize);
+      try {
+        object = (await Promise.all([
+          objectStore(env).put(objectKey, limited.body, { ifAbsent: true, expectedSize: declaredSize,
+            checksumSha256: suppliedDigest.bytes, contentType: "application/vnd.edgechat.device-history-shard", metadata }),
+          limited.completed,
+        ]))[0];
+      } catch (error) {
+        if (error instanceof ObjectStoreChecksumMismatchError) { releaseReservation = true; throw new HttpError(400, "Device history shard digest mismatch", "invalid_device_history_digest"); }
+        if (isFixedLengthMismatch(error)) { releaseReservation = true; throw new HttpError(400, "Device history shard length mismatch", "invalid_device_history_length"); }
+        throw error;
+      }
+      if (!object || !matchesStored(object)) {
+        if (object) { releaseReservation = true; throw new HttpError(400, "Device history shard length or digest mismatch", "invalid_device_history_digest"); }
+        const recovered = await objectStore(env).head(objectKey);
+        if (!recovered || !matchesStored(recovered)) {
+          releaseReservation = true;
+          throw new HttpError(409, "Device history shard index is already in use", "device_history_shard_conflict");
+        }
+        object = recovered;
+      }
+    }
+    const liveClaim = await db.selectFrom("pending_r2_writes").select(["object_key", "owner_user_id", "kind", "expected_bytes", "room_id", "content_sha256", "cancelled_at"])
+      .where("object_key", "=", objectKey).executeTakeFirst();
+    if (!liveClaim) {
+      const landed = await db.selectFrom("device_link_history_shards").select(["ciphertext_bytes", "ciphertext_sha256", "status"])
+        .where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+      if (landed && matchesCommitted(landed)) return json({ ready: true, index: shardIndex, bytes: landed.ciphertext_bytes, status: landed.status });
+      await objectStore(env).delete(objectKey);
+      throw new HttpError(409, "Device history shard upload was cancelled", "device_history_upload_cancelled");
+    }
+    if (liveClaim.cancelled_at !== null) {
+      await objectStore(env).delete(objectKey);
+      await finalizePendingR2Cleanup(env, [liveClaim as PendingR2Write]);
+      throw new HttpError(409, "Device history shard upload was cancelled", "device_history_upload_cancelled");
+    }
     const now = Date.now();
     await batch(env.DB, [
       db.insertInto("device_link_history_shards").values({ link_id: linkId, shard_index: shardIndex, object_key: objectKey,
-        ciphertext_bytes: object.size, status: "ready", uploaded_at: now, acked_at: null }),
+        ciphertext_bytes: object.size, ciphertext_sha256: suppliedDigest.text, status: "ready", uploaded_at: now, acked_at: null })
+        .onConflict((conflict) => conflict.columns(["link_id", "shard_index"]).doNothing()),
       db.updateTable("device_link_history_transfers").set({ updated_at: now }).where("link_id", "=", linkId),
-      db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey),
+      db.deleteFrom("pending_r2_writes").where("object_key", "=", objectKey).where("content_sha256", "=", suppliedDigest.text).where("cancelled_at", "is", null),
     ]);
+    const committed = await db.selectFrom("device_link_history_shards").select(["ciphertext_bytes", "ciphertext_sha256"])
+      .where("link_id", "=", linkId).where("shard_index", "=", shardIndex).executeTakeFirst();
+    if (!committed || !matchesCommitted(committed)) throw new HttpError(409, "Device history shard index is already in use", "device_history_shard_conflict");
     return json({ ready: true, index: shardIndex, bytes: object.size, status: "ready" }, 201);
-  } catch (error) { await abandonPendingR2Write(env, pending); throw error; }
+  } catch (error) {
+    if (reservationCreated && releaseReservation) await finalizePendingR2Cleanup(env, [pending]);
+    throw error;
+  }
 }
 
 async function downloadDeviceLinkHistoryShard(request: Request, env: Env, linkId: string, shardIndex: number): Promise<Response> {
@@ -2237,7 +2306,10 @@ async function downloadDeviceLinkHistoryShard(request: Request, env: Env, linkId
   const shard = await createDatabase(env.DB).selectFrom("device_link_history_shards").selectAll().where("link_id", "=", linkId).where("shard_index", "=", shardIndex).where("status", "=", "ready").executeTakeFirst();
   if (!shard) throw new HttpError(404, "Device history shard not found", "not_found");
   const object = await objectStore(env).get(shard.object_key);
-  if (!object || object.size !== shard.ciphertext_bytes) throw new HttpError(503, "Device history shard is temporarily unavailable", "history_transfer_unavailable");
+  if (!object || object.size !== shard.ciphertext_bytes || !shard.ciphertext_sha256 || object.metadata.sha256 !== shard.ciphertext_sha256) {
+    await object?.body.cancel().catch(() => undefined);
+    throw new HttpError(503, "Device history shard is temporarily unavailable", "history_transfer_unavailable");
+  }
   return new Response(object.body, { headers: { "content-type": "application/vnd.edgechat.device-history-shard", "content-length": String(object.size), "cache-control": "no-store" } });
 }
 

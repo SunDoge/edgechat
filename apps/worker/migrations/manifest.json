@@ -200,6 +200,10 @@
     {
       "file": "0050_authentication_expiry_indexes.sql",
       "sha256": "06136f14f56a482147d2adffc2e7951c551d0645cbf1fe1ef66446c9bafd5b52"
+    },
+    {
+      "file": "0051_device_history_shard_digests.sql",
+      "sha256": "4374ef9ddf75b2f21f93671b8906448584e02aab3c3ecdbe9d55158cacf32a50"
     }
   ]
 }

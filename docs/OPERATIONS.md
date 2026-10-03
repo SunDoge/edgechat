@@ -237,6 +237,14 @@ in-flight claim is marked cancelled before one exact DELETE. The uploader checks
 that marker and revalidates its lease after PUT, immediately before the D1
 commit, and removes a late object itself.
 
+Linked-device history uses temporary 16 MiB ciphertext shards. Each shard upload
+pins its SHA-256 in D1 and provider metadata and uses a conditional,
+provider-checksummed PUT. A lost response is retried once with the same in-memory
+bytes: a committed shard returns from D1 with no object request; an exact pending
+intent performs one HEAD and cancels the retry body when size, digest, link,
+transfer, target and shard index match. A missing object falls through to PUT.
+This recovery performs no GET/LIST and cannot overwrite a conflicting shard.
+
 If the page crashes after recording `uploading`, or the immediate resolution
 request is also offline and records `upload_unknown`, startup and later durable
 sync activity retry that bounded queue from the exact OPFS ciphertext. A new

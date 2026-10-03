@@ -2446,11 +2446,54 @@ describe("single-server durable delivery", () => {
       headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" }, body: JSON.stringify(manifest) });
     expect(created.status, await created.clone().text()).toBe(201);
     const shards = [new Uint8Array([1, 2, 3, 4, 5]), new Uint8Array([6, 7, 8])];
-    for (const [index, shard] of shards.entries()) {
-      const uploaded = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/${index}`, { method: "PUT",
-        headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard" }, body: shard });
-      expect(uploaded.status, await uploaded.clone().text()).toBe(201);
-    }
+    const wrongDigest = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+        "x-content-sha256": b64url(new Uint8Array(32).buffer) }, body: shards[0] });
+    expect(wrongDigest.status).toBe(400);
+    expect(await wrongDigest.json()).toMatchObject({ code: "invalid_device_history_digest" });
+    expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key LIKE ?").bind(`device-links/${link.link_id}/%`).first()).toBeNull();
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+    const firstDigest = await ciphertextDigest(shards[0]);
+    const firstUpload = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/0`, { method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard", "x-content-sha256": firstDigest }, body: shards[0] });
+    expect(firstUpload.status, await firstUpload.clone().text()).toBe(201);
+
+    const secondDigest = await ciphertextDigest(shards[1]);
+    const secondObjectKey = `device-links/${link.link_id}/${manifest.transfer_id}/0001.bin`;
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO pending_r2_writes
+        (object_key, owner_user_id, kind, expected_bytes, content_sha256, created_at, attempts, last_error)
+        VALUES (?, ?, 'archive', ?, ?, ?, 0, NULL)`)
+        .bind(secondObjectKey, account.user_id, shards[1].byteLength, secondDigest, Date.now()),
+      env.DB.prepare("UPDATE user_storage_usage SET archive_bytes = archive_bytes + ?, archive_objects = archive_objects + 1, updated_at = ? WHERE user_id = ?")
+        .bind(shards[1].byteLength, Date.now(), account.user_id),
+    ]);
+    await env.ARCHIVE.put(secondObjectKey, shards[1], { customMetadata: {
+      link_id: link.link_id, transfer_id: manifest.transfer_id, target_device_id: target.id, shard_index: "1", sha256: secondDigest,
+    } });
+    let retryBodyCancelled = false;
+    const retryBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) { controller.enqueue(new Uint8Array([9])); },
+      cancel() { retryBodyCancelled = true; },
+    });
+    const retryContext = createExecutionContext();
+    const retryRequest = new Request(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, { method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+        "content-length": String(shards[1].byteLength), "x-content-sha256": secondDigest }, body: retryBody }) as Parameters<typeof worker.fetch>[0];
+    const recoveredUpload = await worker.fetch(retryRequest, env as unknown as Env, retryContext);
+    await waitOnExecutionContext(retryContext);
+    expect(recoveredUpload.status, await recoveredUpload.clone().text()).toBe(201);
+    expect(retryBodyCancelled).toBe(true);
+    expect(new Uint8Array(await (await env.ARCHIVE.get(secondObjectKey))!.arrayBuffer())).toEqual(shards[1]);
+    expect(await env.DB.prepare("SELECT ciphertext_sha256 FROM device_link_history_shards WHERE link_id = ? AND shard_index = 1")
+      .bind(link.link_id).first()).toEqual({ ciphertext_sha256: secondDigest });
+    expect(await env.DB.prepare("SELECT object_key FROM pending_r2_writes WHERE object_key = ?").bind(secondObjectKey).first()).toBeNull();
+
+    const conflictingRetry = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/history/shards/1`, { method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "application/vnd.edgechat.device-history-shard",
+        "x-content-sha256": await ciphertextDigest(new Uint8Array([9, 9, 9])) }, body: new Uint8Array([9, 9, 9]) });
+    expect(conflictingRetry.status).toBe(409);
+    expect(await conflictingRetry.json()).toMatchObject({ code: "device_history_shard_conflict" });
     const status = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}/status`, { headers: { "x-device-link-secret": link.secret } });
     expect(await status.json()).toMatchObject({ history_transfer_ready: true, history_transfer_bytes: 8,
       history_transfer: { transfer_id: manifest.transfer_id, ready_shards: [0, 1], acked_shards: [], shard_count: 2 } });

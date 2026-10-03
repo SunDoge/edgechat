@@ -1021,7 +1021,23 @@ describe("ApiClient request deadlines", () => {
   });
 });
 
-describe("ApiClient attachment uploads", () => {
+describe("ApiClient ciphertext uploads", () => {
+  it("retries a device-history shard with the same checksum and fixed bytes after an ambiguous response", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("connection reset after upload"))
+      .mockResolvedValueOnce(Response.json({ ready: true, index: 3, bytes: 4, status: "ready" }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await new ApiClient("https://edgechat.test", "token").uploadDeviceLinkHistoryShard("link-1", 3, new Blob([new Uint8Array([11, 22, 33, 44])]));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const first = fetchMock.mock.calls[0]![1]!; const second = fetchMock.mock.calls[1]![1]!;
+      expect(new Headers(first.headers).get("x-content-sha256")).toBe("vb3OMS9XYlcfqhfz9HgCNe0sVPlmwPYNrOHN3SY09PM");
+      expect(new Headers(second.headers).get("x-content-sha256")).toBe(new Headers(first.headers).get("x-content-sha256"));
+      expect(second.body).toBe(first.body);
+      expect(first.body).toBeInstanceOf(ArrayBuffer);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("sends the client-computed ciphertext checksum with the fixed-length body", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => Response.json({ attachment_id: new Headers(init?.headers).get("x-attachment-id") }));
     vi.stubGlobal("fetch", fetchMock);
