@@ -1,10 +1,16 @@
 import { createReadStream, existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { chromium } from "playwright";
 
 const distRoot = resolve("dist");
+const builtServiceWorker = await readFile(resolve(distRoot, "sw.js"), "utf8");
+const activeBuildMatch = builtServiceWorker.match(/const CACHE = "edgechat-shell-([a-f0-9]{12})"/);
+invariant(activeBuildMatch, "Built Service Worker does not contain a versioned shell cache");
+const replacementBuildId = activeBuildMatch[1] === "ffffffffffff" ? "eeeeeeeeeeee" : "ffffffffffff";
+const replacementServiceWorker = `${builtServiceWorker.replace(activeBuildMatch[0], `const CACHE = "edgechat-shell-${replacementBuildId}"`)}\n// pwa-gate replacement ${replacementBuildId}\n`;
+let servedServiceWorker = builtServiceWorker;
 const configuredChrome = process.env.EDGECHAT_CHROME_PATH;
 const executablePath = configuredChrome || [
   "/usr/bin/google-chrome",
@@ -34,9 +40,21 @@ function probePage(response) {
 }
 
 let apiRequests = 0;
+let serviceWorkerRequests = 0;
 async function serveStatic(request, response) {
   const url = new URL(request.url ?? "/", "http://localhost");
   if (url.pathname === "/__edgechat_pwa_probe__") { probePage(response); return; }
+  if (url.pathname === "/sw.js") {
+    serviceWorkerRequests += 1;
+    response.writeHead(200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "content-length": String(Buffer.byteLength(servedServiceWorker)),
+      "cache-control": "no-cache",
+      "service-worker-allowed": "/",
+    });
+    if (request.method === "HEAD") response.end(); else response.end(servedServiceWorker);
+    return;
+  }
   if (url.pathname.startsWith("/api/")) {
     apiRequests += 1;
     response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
@@ -88,15 +106,67 @@ try {
   await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
   await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
 
+  const initial = await page.evaluate(async () => {
+    const allNames = await caches.keys();
+    const names = allNames.filter((name) => name.startsWith("edgechat-shell-"));
+    const registration = await navigator.serviceWorker.getRegistration();
+    return { allNames, names, controlledByActive: registration?.active === navigator.serviceWorker.controller };
+  });
+  invariant(initial.names.length === 1, `Expected one active shell cache, found ${initial.names.length}`);
+  invariant(initial.controlledByActive, "Initial Service Worker did not control the probe page");
+  invariant(!initial.allNames.includes("edgechat-shell-stale-build"), "Activated Service Worker retained a stale EdgeChat shell");
+  invariant(initial.allNames.includes("unrelated-origin-cache"), "Activated Service Worker deleted an unrelated origin cache");
+
+  servedServiceWorker = replacementServiceWorker;
+  await page.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update(); });
+  await page.waitForFunction(async () => (await navigator.serviceWorker.getRegistration())?.waiting?.state === "installed");
+  const waiting = await page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const names = (await caches.keys()).filter((name) => name.startsWith("edgechat-shell-"));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    return {
+      names,
+      waitingState: registration?.waiting?.state ?? null,
+      activeStillControls: registration?.active === navigator.serviceWorker.controller,
+    };
+  });
+  invariant(waiting.waitingState === "installed", "Replacement Service Worker did not remain waiting for confirmation");
+  invariant(waiting.activeStillControls, "Replacement Service Worker took control before confirmation");
+  invariant(waiting.names.length === 2, `Expected active and waiting shell caches, found ${waiting.names.length}`);
+
+  await page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const worker = registration?.waiting;
+    if (!worker) throw new Error("Replacement Service Worker is not waiting");
+    await new Promise((resolvePromise, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Timed out waiting for confirmed Service Worker activation")), 10_000);
+      navigator.serviceWorker.addEventListener("controllerchange", () => { clearTimeout(timeout); resolvePromise(); }, { once: true });
+      worker.postMessage({ type: "SKIP_WAITING" });
+    });
+  });
+  await page.waitForFunction(async () => {
+    const registration = await navigator.serviceWorker.getRegistration();
+    return !registration?.waiting && registration?.active === navigator.serviceWorker.controller;
+  });
+  await page.evaluate(async (previousCache) => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (!(await caches.keys()).includes(previousCache)) return;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    }
+    throw new Error(`Previous shell cache was not reclaimed: ${previousCache}`);
+  }, initial.names[0]);
+
   const cached = await page.evaluate(async () => {
     const allNames = await caches.keys();
     const names = allNames.filter((name) => name.startsWith("edgechat-shell-"));
     const entries = names.length === 1 ? await (await caches.open(names[0])).keys() : [];
-    return { allNames, names, paths: entries.map((request) => new URL(request.url).pathname) };
+    const contents = Object.fromEntries(await Promise.all(names.map(async (name) => [name, (await (await caches.open(name)).keys()).map((request) => new URL(request.url).pathname)])));
+    return { allNames, names, paths: entries.map((request) => new URL(request.url).pathname), contents };
   });
-  invariant(cached.names.length === 1, `Expected one versioned shell cache, found ${cached.names.length}`);
-  invariant(!cached.allNames.includes("edgechat-shell-stale-build"), "Activated Service Worker retained a stale EdgeChat shell");
-  invariant(cached.allNames.includes("unrelated-origin-cache"), "Activated Service Worker deleted an unrelated origin cache");
+  invariant(cached.names.length === 1, `Expected one confirmed replacement shell cache, found ${JSON.stringify(cached.contents)}`);
+  invariant(cached.names[0] === `edgechat-shell-${replacementBuildId}`, "Confirmed replacement cache did not become authoritative");
+  invariant(!cached.allNames.includes(initial.names[0]), "Confirmed Service Worker retained the previous shell cache");
+  invariant(cached.allNames.includes("unrelated-origin-cache"), "Replacement Service Worker deleted an unrelated origin cache");
   invariant(cached.paths.includes("/"), "Application shell was not precached");
   invariant(cached.paths.includes("/manifest.webmanifest"), "PWA manifest was not precached");
   invariant(cached.paths.some((path) => path.endsWith(".js")), "JavaScript bundle was not precached");
@@ -130,9 +200,10 @@ try {
   invariant(!offlineResults.missingBinary.resolved, "Service Worker substituted content for a missing binary asset");
   invariant(!offlineResults.range.resolved, "Service Worker returned a full cached object for an offline Range request");
   invariant(apiRequests === 0, `PWA gate unexpectedly reached the API ${apiRequests} time(s)`);
+  invariant(serviceWorkerRequests >= 2, `Expected initial and update Service Worker requests, saw ${serviceWorkerRequests}`);
 
   await context.close();
-  console.log(`PWA offline shell passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
+  console.log(`PWA install/update/offline gate passed (${cached.paths.length} cached resources, zero API/R2 requests)`);
 } finally {
   await browser?.close();
   await new Promise((resolvePromise) => server.close(resolvePromise));
