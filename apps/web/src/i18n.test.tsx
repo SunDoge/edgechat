@@ -23,6 +23,11 @@ describe("local message catalog", () => {
     expect(translate("workspace.historyRecovery.waiting.title")).toBe("等待另一台设备");
     expect(translate("startupRecovery.interrupted.title")).toBe("本机恢复尚未完成");
     expect(translate("workspace.feedback.expiredMessagesPurged", { count: 3 })).toBe("已从这台设备清理 3 条到期消息");
+    expect(translate("workspace.feedback.notificationsMutedUntil", { date: "2026/10/4 08:00" })).toBe("已静音至 2026/10/4 08:00");
+    expect(translate("workspace.feedback.retentionSet", { days: 30 })).toBe("已设置在这台设备上保留 30 天");
+    expect(translate("workspace.feedback.retentionSetAndPurged", { days: 30, count: 7 })).toBe("已设置保留 30 天，并清理 7 条到期消息");
+    expect(translate("workspace.feedback.localHistoryCleared", { count: 12 })).toBe("已从这台设备清空 12 条消息");
+    expect(translate("workspace.feedback.conversationExportComplete", { count: 42 })).toBe("已导出 42 条本机消息；附件内容未下载");
     expect(translate("secondaryTab.description.denied")).toContain("完成或取消");
     expect(translate("newRoom.createGroup", { count: 4 })).toBe("创建 4 人群聊");
     expect(translate("roomList.actions", { title: "家人" })).toBe("家人的对话操作");

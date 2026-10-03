@@ -111,7 +111,7 @@ type ExportWritable = { write(data: string | ArrayBuffer | Blob): Promise<void>;
 type ExportPickerWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<{ createWritable(): Promise<ExportWritable> }> };
 
 export function App(props: { localProfile: LocalProfile; localProfiles: LocalProfile[]; accessToken: string | null }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const profileId = props.localProfile.profile_id;
   const restoreUserKey = profileSessionKey(profileId, "restore-user-id");
   const restoreCheckpointKey = profileSessionKey(profileId, "restore-checkpoint");
@@ -1885,7 +1885,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await api.setRoomNotificationPreference(roomId, next.muted_until);
       await db.saveRoomPreference(next);
       setRoomPreferences((value) => ({ ...value, [roomId]: next }));
-      setNotice(next.muted_until === null ? "已恢复这段对话的通知" : next.muted_until === Number.MAX_SAFE_INTEGER ? "已一直静音这段对话" : `已静音至 ${new Date(next.muted_until).toLocaleString("zh-CN")}`);
+      setNotice(next.muted_until === null
+        ? t("workspace.feedback.notificationsRestored")
+        : next.muted_until === Number.MAX_SAFE_INTEGER
+          ? t("workspace.feedback.notificationsMutedIndefinitely")
+          : t("workspace.feedback.notificationsMutedUntil", { date: new Date(next.muted_until).toLocaleString(locale()) }));
     } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.muteError"), t)); }
   }
 
@@ -1893,7 +1897,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const currentSession = session(); if (!currentSession) return;
     try {
       if (markedUnread) {
-        if (await db.latestIncomingVisibleMessageSeq(roomId, currentSession.user_id) < 1) { setNotice("这段对话还没有可标记的收到消息"); return; }
+        if (await db.latestIncomingVisibleMessageSeq(roomId, currentSession.user_id) < 1) { setNotice(t("workspace.feedback.readNoIncoming")); return; }
         await db.setRoomMarkedUnread(roomId, true);
       } else {
         const latestSeq = await db.latestVisibleMessageSeq(roomId);
@@ -1903,7 +1907,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setRoomPreferences((value) => ({ ...value, [roomId]: { ...(value[roomId] ?? defaultRoomPreference(roomId)), manually_unread: markedUnread, updated_at: now } }));
       await refreshUnreadCounts();
       if (!markedUnread) void sendReadReceipt(roomId, true).catch(() => undefined);
-      setNotice(markedUnread ? "已标为未读" : "已标为已读");
+      setNotice(markedUnread ? t("workspace.feedback.markedUnread") : t("workspace.feedback.markedRead"));
     } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.readStateError"), t)); }
   }
 
@@ -1914,7 +1918,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     await refreshUnreadCounts();
     const coverage = await db.coverage(roomId); setCoverageComplete(coverage.history_complete);
     if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-    setNotice(days === null ? "这台设备会永久保留此对话" : deleted ? `已设置保留 ${days} 天，并清理 ${deleted} 条到期消息` : `已设置在这台设备上保留 ${days} 天`);
+    setNotice(days === null
+      ? t("workspace.feedback.retentionForever")
+      : deleted
+        ? t("workspace.feedback.retentionSetAndPurged", { days, count: deleted })
+        : t("workspace.feedback.retentionSet", { days }));
     return deleted;
   }
 
@@ -1936,8 +1944,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       await Promise.all([refreshUnreadCounts(), refreshRoomPreferences(), refreshRoomListActivities()]);
       if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-      const cacheWarning = cacheCleanup.some((item) => item.status === "rejected") ? "；部分本机加密文件缓存未能释放" : "";
-      setNotice(`已从这台设备清空 ${result.deleted} 条消息${cacheWarning}`);
+      setNotice(cacheCleanup.some((item) => item.status === "rejected")
+        ? t("workspace.feedback.localHistoryClearedWithCacheWarning", { count: result.deleted })
+        : t("workspace.feedback.localHistoryCleared", { count: result.deleted }));
     } finally { setHistoryClearBusy(false); }
   }
 
@@ -1956,7 +1965,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         roomId, type: "control.message-expiry", createdAt: updatedAt, payload: payload as unknown as Record<string, unknown> });
     });
     await db.outbox(roomId).then(setPendingMessages).catch(() => undefined);
-    setNotice(seconds === null ? "关闭设置已加入发送队列" : "自动消失设置已加入发送队列，仅影响之后的新消息");
+    setNotice(seconds === null ? t("workspace.feedback.expiryDisabledQueued") : t("workspace.feedback.expiryEnabledQueued"));
   }
 
   async function updateRoomProfile(roomId: RoomId, name: string, announce = true, allowUnlistedRoom = false, avatarOverride?: RoomProfileAvatar | null): Promise<void> {
@@ -1980,7 +1989,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         metadata: { room_profile_avatar_id: avatar?.attachment_id ?? null, room_profile_previous_avatar_id: currentAvatar?.attachment_id ?? null } });
     });
     await db.outbox(roomId).then(setPendingMessages).catch(() => undefined);
-    if (announce) setNotice("群聊资料已加入发送队列");
+    if (announce) setNotice(t("workspace.feedback.roomProfileQueued"));
   }
 
   async function updateRoomProfileWithAvatar(roomId: RoomId, name: string, change: RoomProfileAvatarChange): Promise<void> {
@@ -2034,7 +2043,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (selectedRef === roomId) await refreshRoomProjection(roomId, true);
       await refreshUnreadCounts();
       if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-      setNotice(hidden ? "已隐藏该成员的消息，可随时重新显示" : "已重新显示该成员的消息");
+      setNotice(hidden ? t("workspace.feedback.memberHidden") : t("workspace.feedback.memberShown"));
     } catch (cause) {
       throw new UserFacingError(operationErrorMessage(cause, t("workspace.feedback.memberVisibilityError"), t));
     }
@@ -2044,17 +2053,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const currentUserId = session()?.user_id;
     const peer = room.kind === "direct" ? room.members.find((member) => member.user_id !== currentUserId)?.user_id : undefined;
     if (!peer) return;
-    if (!room.blocked_by_me && !confirm("屏蔽后，双方不能新建直聊或继续在这段直聊中发送消息。已有历史不会从对方设备删除。继续吗？")) return;
+    if (!room.blocked_by_me && !confirm(t("workspace.feedback.blockConfirm"))) return;
     try {
       if (room.blocked_by_me) await api.unblockUser(peer);
       else { syncRef?.disconnectRoom(room.room_id); await api.blockUser(peer); }
       await loadRooms(mlsRef);
       if (room.blocked_by_me) {
         void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-        setNotice("已取消屏蔽");
+        setNotice(t("workspace.feedback.blockRemoved"));
       } else {
         if (selectedRef === room.room_id) setSelectedId(null);
-        setNotice("已屏蔽此用户；已有历史仍保留在本机");
+        setNotice(t("workspace.feedback.blockApplied"));
       }
     } catch (cause) {
       if (!room.blocked_by_me) void syncRef?.connectRoom(room.room_id).catch(() => undefined);
@@ -2068,7 +2077,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await loadRooms(mlsRef);
       if (selectedRef === room.room_id) await refreshRoomProjection(room.room_id, true);
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-      setNotice("已接受消息请求");
+      setNotice(t("workspace.feedback.requestAccepted"));
     } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.acceptRequestError"), t)); }
   }
 
@@ -2078,7 +2087,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await api.rejectMessageRequest(room.room_id);
       if (selectedRef === room.room_id) setSelectedId(null);
       await loadRooms(mlsRef);
-      setNotice("已拒绝消息请求");
+      setNotice(t("workspace.feedback.requestRejected"));
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
       setNotice(operationErrorMessage(cause, t("workspace.feedback.rejectRequestError"), t));
@@ -2086,14 +2095,14 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function reportMessageRequest(room: ServerRoom): Promise<void> {
-    if (!confirm("举报会同时拒绝请求并屏蔽此用户。服务器只能收到举报类型和事件 ID，无法读取消息内容。继续吗？")) return;
+    if (!confirm(t("workspace.feedback.reportConfirm"))) return;
     try {
       syncRef?.disconnectRoom(room.room_id);
       const latest = messages().at(-1)?.event_id;
       await api.reportMessageRequest(room.room_id, "spam", latest);
       if (selectedRef === room.room_id) setSelectedId(null);
       await loadRooms(mlsRef);
-      setNotice("已举报并屏蔽此用户");
+      setNotice(t("workspace.feedback.requestReported"));
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
       setNotice(operationErrorMessage(cause, t("workspace.feedback.reportRequestError"), t));
@@ -2216,17 +2225,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendEdit() {
     const target = editingMessage(); const room = selected();
     if (!target || !room || sendBusy()) return;
-    if (historyRecoveryRooms().has(room.room_id)) return setNotice("请先从另一台设备或备份恢复此对话");
-    if (target.sender !== session()?.user_id || target.deleted_at) { setEditingMessage(null); return setNotice("只能编辑自己尚未撤回的消息"); }
+    if (historyRecoveryRooms().has(room.room_id)) return setNotice(t("send.historyRecovery"));
+    if (target.sender !== session()?.user_id || target.deleted_at) { setEditingMessage(null); return setNotice(t("workspace.feedback.editOwnOnly")); }
     const text = compose().trim();
-    if (text.length > 16_000) return setNotice("编辑内容不能超过 16,000 个字符");
+    if (text.length > 16_000) return setNotice(t("workspace.feedback.editTooLong"));
     if (text === (target.plaintext ?? "").trim()) { composerRevision += 1; setEditingMessage(null); setCompose(""); clearComposerDraft(room.room_id); return; }
     setSendBusy(true);
     try {
       const editedAt = Date.now();
       const payload: MessageEditPayload = { version: 1, kind: "message.edit", target: { kind: "message", message_id: target.message_id as MessageId, room_id: room.room_id }, text, edited_at: editedAt };
       await enqueueRelationEvent("message.edit", target, payload);
-      stopTyping(room.room_id); composerRevision += 1; setEditingMessage(null); setCompose(""); clearComposerDraft(room.room_id); setNotice("编辑已加入发送队列");
+      stopTyping(room.room_id); composerRevision += 1; setEditingMessage(null); setCompose(""); clearComposerDraft(room.room_id); setNotice(t("workspace.feedback.editQueued"));
     } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.editMessageError"), t)); }
     finally { setSendBusy(false); }
   }
@@ -2249,7 +2258,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   function beginQuote(message: LocalMessage, selectedText?: string) {
     const payload = normalizeMessagePayload((message.payload ?? {}) as MessagePayload, message.event_id);
     const text = quoteTextForMessage(messageText(payload) || message.plaintext || "", selectedText);
-    if (!text) return setNotice("这条消息没有可引用的文字");
+    if (!text) return setNotice(t("workspace.feedback.quoteNoText"));
     const displayName = payload.origin?.kind === "bot" ? payload.origin.display_name : selected() ? memberName(selected()!, message.sender) : userName(message.sender);
     composerRevision += 1;
     setEditingMessage(null); setReplyingTo(null); setCompose(""); setFiles([]); setQuoting({ message, text, displayName });
@@ -2269,8 +2278,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   function jumpToMessage(messageId: string) {
-    if (!messages().some((message) => message.message_id === messageId)) return setNotice("这条引用消息尚未下载到本机");
-    if (!timelineRef?.scrollToKey(`message:${messageId}`, "center")) return setNotice("暂时无法定位这条消息");
+    if (!messages().some((message) => message.message_id === messageId)) return setNotice(t("workspace.feedback.referenceNotLocal"));
+    if (!timelineRef?.scrollToKey(`message:${messageId}`, "center")) return setNotice(t("workspace.feedback.referenceLocateUnavailable"));
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"]`)?.animate(
         [{ outline: "2px solid rgb(31 107 92 / 0.7)" }, { outline: "2px solid transparent" }],
@@ -2302,8 +2311,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function retractMessage(message: LocalMessage) {
     const room = selected(); const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
     if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || message.deleted_at || message.sender !== currentSession.user_id) return;
-    if (room.blocked_by_me) return setNotice("请先取消屏蔽再撤回消息");
-    if (!confirm("撤回后，这条消息会在其他设备同步后隐藏，附件会从服务器删除。无法保证收件人没有提前保存副本。继续吗？")) return;
+    if (room.blocked_by_me) return setNotice(t("workspace.feedback.retractBlocked"));
+    if (!confirm(t("workspace.feedback.retractConfirm"))) return;
     try {
       await mutateMls(async () => {
         const eventId = `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId;
@@ -2382,7 +2391,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (searchQuery().trim()) void runSearch(searchQuery());
     } catch {
       setSemanticStatus("error");
-      setNotice("无法保存图片语义搜索设置，请检查浏览器存储权限");
+      setNotice(t("workspace.feedback.semanticPreferenceError"));
     }
   }
   async function disableSemanticSearch(): Promise<void> {
@@ -2397,9 +2406,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setSearchResults((current) => current.filter((result) => result.kind === "text"));
       await db.clearImageEmbeddings();
       if (searchQuery().trim()) await runSearch(searchQuery());
-      setNotice("已关闭图片语义搜索并清除本机图片向量；浏览器缓存的模型文件可在站点数据中删除");
+      setNotice(t("workspace.feedback.semanticDisabled"));
     } catch {
-      setNotice("图片语义搜索已关闭，但本机索引未能完全清除；清除浏览器站点数据可删除所有本机副本");
+      setNotice(t("workspace.feedback.semanticCleanupIncomplete"));
     }
   }
   function openSearchResult(roomId: RoomId, messageId: string) {
@@ -2410,7 +2419,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const target = await db.message(roomId, messageId);
         if (!canApplyHistoryNavigation(revision, timelineNavigationRevision, roomId, selectedRef)) return;
         if (!target) {
-          setHistoryFocus(null); setNotice("这条消息已不在本机历史中"); return;
+          setHistoryFocus(null); setNotice(t("workspace.feedback.historyMessageMissing")); return;
         }
         if (messages().some((message) => message.room_id === roomId && message.message_id === messageId)) {
           jumpToMessage(messageId); return;
@@ -2419,7 +2428,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         const page = await db.messageWindow(roomId, Number(target.seq));
         if (!canApplyHistoryNavigation(revision, timelineNavigationRevision, roomId, selectedRef)) return;
         if (!page.messages.some((message) => message.message_id === messageId)) {
-          setHistoryFocus(null); setNotice("无法打开这条本机消息"); return;
+          setHistoryFocus(null); setNotice(t("workspace.feedback.historyMessageOpenError")); return;
         }
         setMessages(page.messages);
         setOlderMessagesState(page.hasOlder ? "idle" : "end");
@@ -2435,7 +2444,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   function openMessageReference(reference: MessageReference) {
     if (!rooms().some((room) => room.room_id === reference.room_id)) {
-      setNotice("原对话已不可用，保存的副本仍会保留"); return;
+      setNotice(t("workspace.feedback.referenceSourceUnavailable")); return;
     }
     openSearchResult(reference.room_id, reference.message_id);
   }
@@ -2466,7 +2475,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function changeAccountPassword(currentPassword: string, newPassword: string, logoutOtherDevices: boolean): Promise<void> {
     try {
       const result = await api.changePassword(currentPassword, newPassword, logoutOtherDevices);
-      setNotice(result.other_sessions_revoked ? "登录密码已修改，其他设备已退出服务器" : "登录密码已修改，其他设备仍保持登录");
+      setNotice(result.other_sessions_revoked
+        ? t("workspace.feedback.passwordChangedSessionsRevoked")
+        : t("workspace.feedback.passwordChangedSessionsKept"));
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === "invalid_credentials") throw new UserFacingError(t("workspace.feedback.currentPasswordIncorrect"));
       if (cause instanceof ApiError && cause.code === "authentication_rate_limited") throw new UserFacingError(t("workspace.feedback.passwordRateLimited"));
@@ -2511,7 +2522,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const filename = `edgechat-account-${new Date().toISOString().slice(0, 10)}.ndjson`;
       const pickerWindow = window as ExportPickerWindow;
       if (pickerWindow.showSaveFilePicker) {
-        const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: "EdgeChat NDJSON export", accept: { "application/x-ndjson": [".ndjson"] } }] });
+        const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: t("workspace.feedback.accountExportPicker"), accept: { "application/x-ndjson": [".ndjson"] } }] });
         writable = await handle.createWritable();
       }
       let memory = writable ? null : createBoundedAccountExportBuffer();
@@ -2555,7 +2566,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         window.setTimeout(() => { URL.revokeObjectURL(url); if (cleanup) void cleanup().catch(() => undefined); }, 5 * 60_000);
         stagedCleanup = null;
       }
-      setNotice("账户数据清单已导出；消息和附件内容仍是端到端加密密文");
+      setNotice(t("workspace.feedback.accountExportComplete"));
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined); writable = null;
       await staging?.abort(cause).catch(() => undefined); staging = null;
@@ -2580,7 +2591,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const exportedAt = Date.now(); const title = roomTitle(room, session()?.user_id ?? ""); const filename = conversationExportFilename(title, exportedAt);
       const pickerWindow = window as ExportPickerWindow;
       if (pickerWindow.showSaveFilePicker) {
-        const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: "EdgeChat 聊天记录", accept: { "text/plain": [".txt"] } }] });
+        const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: t("workspace.feedback.conversationExportPicker"), accept: { "text/plain": [".txt"] } }] });
         writable = await handle.createWritable();
       }
       let memory = writable ? null : createBoundedConversationExportBuffer();
@@ -2611,7 +2622,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         window.setTimeout(() => { URL.revokeObjectURL(url); if (cleanup) void cleanup().catch(() => undefined); }, 5 * 60_000);
         stagedCleanup = null;
       }
-      setNotice(`已导出 ${count} 条本机消息；附件内容未下载`);
+      setNotice(t("workspace.feedback.conversationExportComplete", { count }));
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined); writable = null;
       await staging?.abort(cause).catch(() => undefined); staging = null;
@@ -2651,7 +2662,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     let delivery: LocalBackupExport["delivery"] = "download_started";
     try {
       if (pickerWindow.showSaveFilePicker) {
-        const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: "EdgeChat encrypted backup", accept: { "application/vnd.edgechat.backup": [".edgechat-backup"] } }] });
+        const handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename, types: [{ description: t("workspace.feedback.backupPicker"), accept: { "application/vnd.edgechat.backup": [".edgechat-backup"] } }] });
         writable = await handle.createWritable();
         await writePortableBackup(input, async (bytes) => writable!.write(bytes.slice().buffer as ArrayBuffer));
         await writable.close(); writable = null;
@@ -2684,7 +2695,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       } catch (cause) {
         console.warn(JSON.stringify({ message: "local backup health record failed", error: cause instanceof Error ? cause.message : String(cause) }));
       }
-      setNotice(delivery === "confirmed_file" ? "加密备份已保存；它没有占用服务器或 R2 存储" : "加密备份下载已开始；请确认文件保存在下载目录");
+      setNotice(delivery === "confirmed_file" ? t("workspace.feedback.backupSaved") : t("workspace.feedback.backupDownloadStarted"));
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined);
       await stagedCleanup?.().catch(() => undefined);
