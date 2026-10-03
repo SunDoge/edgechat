@@ -39,7 +39,8 @@ describe("DeviceLinkApprovalDialog", () => {
     const confirmation = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     confirmation.checked = true; confirmation.dispatchEvent(new Event("change", { bubbles: true }));
     [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "核对后批准")!.click();
-    await vi.waitFor(() => expect(document.body.textContent).toContain("加入过程中断"));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("设备链接没有完成，可再次尝试"));
+    expect(document.body.textContent).not.toContain("加入过程中断");
 
     [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "撤销这次链接")!.click();
     await vi.waitFor(() => expect(onCancelLink).toHaveBeenCalledWith(linkId));

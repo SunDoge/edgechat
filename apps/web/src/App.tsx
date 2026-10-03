@@ -2627,7 +2627,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function exportPortableBackup(password: string): Promise<void> {
     const prepared = await mutateMls(async () => {
       const currentSession = session(); const currentMls = mlsRef; const currentIdentity = identityRef;
-      if (!currentSession || !currentIdentity || !currentMls) throw new Error("设备加密状态尚未就绪");
+      if (!currentSession || !currentIdentity || !currentMls) throw new UserFacingError(t("workspace.feedback.deviceCryptoNotReady"));
       // Drain any already-admitted event before recording the server-side
       // anti-rollback count. New MLS sends cannot overtake this critical section.
       await outboxRef?.kick();
@@ -2665,11 +2665,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             backup = staged.file; stagedCleanup = staged.cleanup;
           } catch (cause) {
             if (!isPortableBackupStorageError(cause)) throw cause;
-            if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new Error("本机可用空间不足，无法安全保存这个大型备份。请释放一些设备空间后重试");
+            if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new UserFacingError(t("backup.error.saveStorage"));
             backup = await createPortableBackupBlob(input);
           }
         } else {
-          if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new Error("这个备份较大，当前浏览器无法安全保存。请更新当前浏览器，或改用新版桌面浏览器重试");
+          if (!canCreateMemoryPortableBackup(databaseSnapshot.size)) throw new UserFacingError(t("backup.error.saveBrowser"));
           backup = await createPortableBackupBlob(input);
         }
         const url = URL.createObjectURL(backup); const anchor = document.createElement("a");
@@ -2688,7 +2688,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined);
       await stagedCleanup?.().catch(() => undefined);
-      if (cause instanceof DOMException && cause.name === "AbortError") throw new Error("已取消保存备份");
+      if (cause instanceof DOMException && cause.name === "AbortError") throw new UserFacingError(t("backup.error.saveCancelled"));
       throw cause;
     }
   }
@@ -2700,16 +2700,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       try { stagedBackup = await stagePortableBackupRestore(profileId, file, password, location.origin); }
       catch (cause) {
         if (!isPortableBackupStorageError(cause)) throw cause;
-        if (!canCreateMemoryPortableBackup(file.size)) throw new Error("本机可用空间不足，无法安全恢复这个大型备份。请释放一些设备空间后重试");
+        if (!canCreateMemoryPortableBackup(file.size)) throw new UserFacingError(t("backup.error.restoreStorage"));
       }
     }
-    if (!stagedBackup && !canCreateMemoryPortableBackup(file.size)) throw new Error("这个备份较大，当前浏览器无法安全恢复。请更新当前浏览器，或改用新版桌面浏览器重试");
+    if (!stagedBackup && !canCreateMemoryPortableBackup(file.size)) throw new UserFacingError(t("backup.error.restoreBrowser"));
     const contents = stagedBackup ?? await readPortableBackup(file, password, location.origin);
     try {
       const restoredIdentity = await core.importPortableIdentity(contents.identity);
       let validation: OpenMlsMessagingCore | null = null;
       try { validation = await OpenMlsMessagingCore.create(restoredIdentity.deviceId, restoredIdentity.mlsState); }
-      catch { throw new Error("备份中的群聊加密状态无效"); }
+      catch { throw new UserFacingError(t("backup.error.invalidMls")); }
       finally { validation?.destroy(); }
       const publicKeys = await core.exportPublicIdentity(restoredIdentity);
       await api.checkBackupRestore({

@@ -6,6 +6,7 @@ import { parseDeviceLinkInput } from "../device-linking";
 import { useI18n } from "../i18n";
 import { DeviceFingerprint } from "./DeviceFingerprint";
 import { Dialog } from "./primitives";
+import { operationErrorMessage, UserFacingError } from "../operation-errors";
 
 type BarcodeDetectorLike = { detect(source: ImageBitmapSource): Promise<Array<{ rawValue: string }>> };
 type BarcodeDetectorConstructor = new (options: { formats: string[] }) => BarcodeDetectorLike;
@@ -29,9 +30,9 @@ export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (li
     try {
       const linkId = parseDeviceLinkInput(value);
       const next = await props.api.deviceLinkPreview(linkId);
-      if (next.status === "complete" || next.status === "claimed" || next.status === "cancelled") throw new Error(t("deviceLinkApproval.error.ended"));
+      if (next.status === "complete" || next.status === "claimed" || next.status === "cancelled") throw new UserFacingError(t("deviceLinkApproval.error.ended"));
       setPreview(next); setFingerprint(await deviceFingerprint(next.signing_key, next.encryption_key)); stopCamera();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("deviceLinkApproval.error.read")); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("deviceLinkApproval.error.read"), t)); }
     finally { setBusy(false); }
   }
 
@@ -67,14 +68,14 @@ export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (li
     const item = preview(); if (!item || !confirmed() || busy()) return;
     setBusy(true); setError(""); setApprovalStarted(true);
     try { await props.onApprove(item.link_id); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("deviceLinkApproval.error.approve")); setBusy(false); }
+    catch (cause) { setError(operationErrorMessage(cause, t("deviceLinkApproval.error.approve"), t)); setBusy(false); }
   }
 
   async function cancelApproved() {
     const item = preview(); if (!item || busy()) return;
     setBusy(true); setError("");
     try { await props.onCancelLink(item.link_id); props.onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("deviceLinkApproval.error.cancel")); setBusy(false); }
+    catch (cause) { setError(operationErrorMessage(cause, t("deviceLinkApproval.error.cancel"), t)); setBusy(false); }
   }
 
   onCleanup(stopCamera);

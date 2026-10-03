@@ -1,5 +1,6 @@
 import { decodeBase64Url, encodeBase64Url } from "@edgechat/messaging-core";
 import { assertLocalProfileId } from "./local-profiles";
+import { UserFacingError } from "./user-facing-error";
 
 const PENDING_DEVICE_LINK_KEY = "edgechat.pending-device-link.v1";
 
@@ -29,7 +30,7 @@ export function parseDeviceLinkInput(value: string): string {
     const linkId = new URLSearchParams(fragment).get("link_id") ?? "";
     if (/^[A-Za-z0-9_-]{16,96}$/.test(linkId)) return linkId;
   } catch { /* translated below */ }
-  throw new Error("这不是有效的设备链接码");
+  throw new UserFacingError("这不是有效的设备链接码");
 }
 
 function pendingDeviceLinkKey(profileId: string): string {

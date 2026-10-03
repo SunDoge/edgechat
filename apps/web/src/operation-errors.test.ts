@@ -13,6 +13,8 @@ describe("operation error presentation", () => {
     expect(operationErrorMessage(new ApiError("limit internals", 429, "account_rate_limited"), "发送失败")).toBe("操作过于频繁，请稍后再试");
     expect(operationErrorMessage(new ApiTimeoutError(30_000), "发送失败")).toContain("检查网络");
     expect(operationErrorMessage(new ApiError("schema internals", 503, "server_upgrade_required"), "发送失败")).toContain("服务器版本过旧");
+    expect(operationErrorMessage(new ApiError("checkpoint table trace", 409, "backup_stale"), "无法恢复备份")).toContain("避免加密密钥回滚");
+    expect(operationErrorMessage(new ApiError("room mutation trace", 409, "room_membership_busy"), "无法批准设备")).toContain("群成员更新正在进行");
   });
 
   it("uses the operation-specific fallback for unknown internal failures", () => {

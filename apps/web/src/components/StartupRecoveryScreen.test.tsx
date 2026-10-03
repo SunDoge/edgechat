@@ -53,6 +53,21 @@ describe("StartupRecoveryScreen", () => {
     expect(restore.mock.calls[0]?.slice(1)).toEqual(["backup password"]);
   });
 
+  it("does not expose an unexpected restore diagnostic", async () => {
+    const restore = vi.fn(async () => { throw new Error("private OPFS path and crypto trace"); });
+    const root = document.createElement("div"); document.body.append(root);
+    dispose = render(() => <BackupRestoreForm onRestore={restore} onCancel={vi.fn()}/>, root);
+    const fileInput = root.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(fileInput, "files", { configurable: true, value: [new File(["encrypted"], "backup.edgechat-backup")] });
+    fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+    const password = root.querySelector("#restore-password") as HTMLInputElement;
+    password.value = "backup password"; password.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    (root.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    root.querySelector("form")!.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(root.textContent).toContain("无法恢复备份"));
+    expect(root.textContent).not.toContain("private OPFS");
+  });
+
   it("opens backup selection instead of looping reload after an interrupted restore", () => {
     const retry = vi.fn();
     const root = document.createElement("div"); document.body.append(root);

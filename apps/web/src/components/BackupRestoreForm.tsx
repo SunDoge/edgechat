@@ -1,6 +1,7 @@
 import { Show, createSignal } from "solid-js";
 import { Input } from "./primitives";
 import { useI18n } from "../i18n";
+import { operationErrorMessage } from "../operation-errors";
 
 export function BackupRestoreForm(props: {
   onRestore: (file: File, password: string) => Promise<void>;
@@ -21,7 +22,7 @@ export function BackupRestoreForm(props: {
     if (!backup || !password() || !confirmed() || busy()) return;
     setBusy(true); setError("");
     try { await props.onRestore(backup, password()); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("backup.restore.error")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("backup.restore.error"), t)); }
     finally { setBusy(false); }
   }
 

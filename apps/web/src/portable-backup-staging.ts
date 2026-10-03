@@ -1,4 +1,5 @@
 import { streamPortableBackupDatabase, writePortableBackup, type PortableBackupContents } from "./portable-backup";
+import { UserFacingError } from "./user-facing-error";
 
 const EXPORT_DIRECTORY_NAME = "edgechat-portable-backup-staging-v1";
 const RESTORE_DIRECTORY_NAME = "edgechat-portable-backup-restore-v1";
@@ -22,7 +23,7 @@ export type StagedPortableBackupRestore = PortableBackupContents & { cleanup(): 
 
 function defaultRootProvider(): Promise<FileSystemDirectoryHandle> {
   const storage = navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
-  if (!storage?.getDirectory) throw new Error("当前浏览器不能安全暂存大型备份");
+  if (!storage?.getDirectory) throw new UserFacingError("当前浏览器不能安全暂存大型备份");
   return storage.getDirectory();
 }
 
@@ -113,7 +114,7 @@ export async function stagePortableBackupRestore(
     );
     await writable.close(); closed = true;
     const databaseSnapshot = await handle.getFile();
-    if (databaseSnapshot.size !== contents.databaseBytes) throw new Error("备份内容无效");
+    if (databaseSnapshot.size !== contents.databaseBytes) throw new UserFacingError("备份内容无效");
     const { databaseBytes: _, ...metadata } = contents;
     return { ...metadata, databaseSnapshot, cleanup: () => removeExact(directory, filename) };
   } catch (cause) {

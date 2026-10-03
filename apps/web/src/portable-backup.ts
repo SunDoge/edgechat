@@ -1,4 +1,5 @@
 import { decodeBase64Url, encodeBase64Url, type PortableDeviceIdentity } from "@edgechat/messaging-core";
+import { UserFacingError } from "./user-facing-error";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -54,7 +55,7 @@ function u32(value: number): Uint8Array {
 }
 
 function readU32(bytes: Uint8Array): number {
-  if (bytes.byteLength !== 4) throw new Error("Backup record is truncated");
+  if (bytes.byteLength !== 4) throw new UserFacingError("无法识别这个备份文件");
   return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, false);
 }
 
@@ -70,7 +71,7 @@ async function deriveKey(password: string, salt: Uint8Array, iterations: number)
 }
 
 function validateHeader(value: unknown): BackupHeader {
-  if (!value || typeof value !== "object") throw new Error("无法识别这个备份文件");
+  if (!value || typeof value !== "object") throw new UserFacingError("无法识别这个备份文件");
   const header = value as Partial<BackupHeader>;
   if (header.format !== "edgechat-portable-backup" || header.version !== 1 || header.cipher !== "AES-256-GCM-chunks"
     || header.kdf?.name !== "PBKDF2-SHA-256" || typeof header.kdf.salt !== "string"
@@ -78,12 +79,12 @@ function validateHeader(value: unknown): BackupHeader {
     || !Number.isSafeInteger(header.chunk_bytes) || Number(header.chunk_bytes) < 64 * 1024 || Number(header.chunk_bytes) > 2 * 1024 * 1024
     || !Number.isSafeInteger(header.chunk_count) || Number(header.chunk_count) < 1 || Number(header.chunk_count) > 32_768
     || !Number.isSafeInteger(header.plaintext_bytes) || Number(header.plaintext_bytes) < 5 || Number(header.plaintext_bytes) > MAX_BACKUP_BYTES
-    || !Number.isFinite(header.created_at)) throw new Error("无法识别这个备份文件");
+    || !Number.isFinite(header.created_at)) throw new UserFacingError("无法识别这个备份文件");
   return header as BackupHeader;
 }
 
 function validateMetadata(value: unknown, expectedOrigin?: string): BackupMetadata {
-  if (!value || typeof value !== "object") throw new Error("备份内容无效");
+  if (!value || typeof value !== "object") throw new UserFacingError("备份内容无效");
   const metadata = value as Partial<BackupMetadata>;
   const portableIdentity = metadata.identity as Partial<PortableDeviceIdentity> | undefined;
   if (metadata.version !== 1 || metadata.database_format !== "pglite-datadir-gzip-v1"
@@ -93,8 +94,8 @@ function validateMetadata(value: unknown, expectedOrigin?: string): BackupMetada
     || typeof portableIdentity.device_id !== "string" || portableIdentity.device_id.length === 0
     || portableIdentity.version !== 2 || typeof portableIdentity.signing_private_key !== "object"
     || typeof portableIdentity.encryption_private_key !== "object" || typeof portableIdentity.mls_state !== "string"
-    || typeof portableIdentity.account_credential !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(portableIdentity.account_credential)) throw new Error("备份内容无效");
-  if (expectedOrigin && metadata.server_origin !== expectedOrigin) throw new Error("这个备份属于另一台 EdgeChat 服务器");
+    || typeof portableIdentity.account_credential !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(portableIdentity.account_credential)) throw new UserFacingError("备份内容无效");
+  if (expectedOrigin && metadata.server_origin !== expectedOrigin) throw new UserFacingError("这个备份属于另一台 EdgeChat 服务器");
   return metadata as BackupMetadata;
 }
 
@@ -105,8 +106,8 @@ export async function writePortableBackup(
 ): Promise<{ createdAt: number; bytes: number }> {
   const chunkBytes = options.chunkBytes ?? DEFAULT_CHUNK_BYTES;
   const iterations = options.iterations ?? DEFAULT_PBKDF2_ITERATIONS;
-  if (input.password.length < 12) throw new Error("备份密码至少需要 12 个字符");
-  if (input.databaseSnapshot.size === 0 || input.databaseSnapshot.size > MAX_BACKUP_BYTES) throw new Error("本机数据库为空或过大，无法创建浏览器备份");
+  if (input.password.length < 12) throw new UserFacingError("备份密码至少需要 12 个字符");
+  if (input.databaseSnapshot.size === 0 || input.databaseSnapshot.size > MAX_BACKUP_BYTES) throw new UserFacingError("本机数据库为空或过大，无法创建浏览器备份");
   if (chunkBytes < 64 * 1024 || chunkBytes > 2 * 1024 * 1024 || iterations < 100_000 || iterations > 2_000_000) throw new Error("Invalid backup parameters");
 
   const metadata = encoder.encode(JSON.stringify({
@@ -119,7 +120,7 @@ export async function writePortableBackup(
     identity: input.identity,
   } satisfies BackupMetadata));
   const payload = new Blob([ownedBuffer(u32(metadata.length)), ownedBuffer(metadata), input.databaseSnapshot]);
-  if (payload.size > MAX_BACKUP_BYTES) throw new Error("本机数据库过大，无法创建浏览器备份");
+  if (payload.size > MAX_BACKUP_BYTES) throw new UserFacingError("本机数据库过大，无法创建浏览器备份");
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const createdAt = Date.now();
   const header: BackupHeader = {
@@ -157,17 +158,17 @@ export async function streamPortableBackupDatabase(
   write: ByteWriter,
   expectedOrigin?: string,
 ): Promise<PortableBackupDatabaseContents> {
-  if (file.size < MAGIC.length + 4 || file.size > MAX_BACKUP_BYTES + 2 * 1024 * 1024) throw new Error("无法识别这个备份文件");
+  if (file.size < MAGIC.length + 4 || file.size > MAX_BACKUP_BYTES + 2 * 1024 * 1024) throw new UserFacingError("无法识别这个备份文件");
   const prefix = new Uint8Array(await file.slice(0, MAGIC.length + 4).arrayBuffer());
-  if (!MAGIC.every((byte, index) => prefix[index] === byte)) throw new Error("无法识别这个备份文件");
+  if (!MAGIC.every((byte, index) => prefix[index] === byte)) throw new UserFacingError("无法识别这个备份文件");
   const headerLength = readU32(prefix.subarray(MAGIC.length));
-  if (headerLength < 32 || headerLength > MAX_HEADER_BYTES || MAGIC.length + 4 + headerLength > file.size) throw new Error("无法识别这个备份文件");
+  if (headerLength < 32 || headerLength > MAX_HEADER_BYTES || MAGIC.length + 4 + headerLength > file.size) throw new UserFacingError("无法识别这个备份文件");
   const headerBytes = new Uint8Array(await file.slice(MAGIC.length + 4, MAGIC.length + 4 + headerLength).arrayBuffer());
   let parsedHeader: unknown;
-  try { parsedHeader = JSON.parse(decoder.decode(headerBytes)); } catch { throw new Error("无法识别这个备份文件"); }
+  try { parsedHeader = JSON.parse(decoder.decode(headerBytes)); } catch { throw new UserFacingError("无法识别这个备份文件"); }
   const header = validateHeader(parsedHeader);
   const salt = decodeBase64Url(header.kdf.salt);
-  if (salt.length !== 16) throw new Error("无法识别这个备份文件");
+  if (salt.length !== 16) throw new UserFacingError("无法识别这个备份文件");
   const key = await deriveKey(password, salt, header.kdf.iterations);
   let offset = MAGIC.length + 4 + headerLength;
   let plaintextBytes = 0;
@@ -177,16 +178,16 @@ export async function streamPortableBackupDatabase(
   let metadata: BackupMetadata | null = null;
   let databaseBytes = 0;
   for (let index = 0; index < header.chunk_count; index += 1) {
-    if (offset + 16 > file.size) throw new Error("备份密码错误，或文件已经损坏");
+    if (offset + 16 > file.size) throw new UserFacingError("备份密码错误，或文件已经损坏");
     const record = new Uint8Array(await file.slice(offset, offset + 16).arrayBuffer());
     const ciphertextLength = readU32(record.subarray(0, 4));
-    if (ciphertextLength < 17 || ciphertextLength > header.chunk_bytes + 16 || offset + 16 + ciphertextLength > file.size) throw new Error("备份密码错误，或文件已经损坏");
+    if (ciphertextLength < 17 || ciphertextLength > header.chunk_bytes + 16 || offset + 16 + ciphertextLength > file.size) throw new UserFacingError("备份密码错误，或文件已经损坏");
     const nonce = record.subarray(4, 16);
     const ciphertext = await file.slice(offset + 16, offset + 16 + ciphertextLength).arrayBuffer();
     let plaintext: Uint8Array;
     try {
       plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: ownedBuffer(nonce), additionalData: ownedBuffer(aad(headerBytes, index)) }, key, ciphertext));
-    } catch { throw new Error("备份密码错误，或文件已经损坏"); }
+    } catch { throw new UserFacingError("备份密码错误，或文件已经损坏"); }
     plaintextBytes += plaintext.byteLength; offset += 16 + ciphertextLength;
     if (!metadata) {
       metadataParts.push(plaintext); bufferedMetadataBytes += plaintext.byteLength;
@@ -198,14 +199,14 @@ export async function streamPortableBackupDatabase(
           if (lengthOffset === 4) break;
         }
         metadataLength = readU32(lengthBytes);
-        if (metadataLength < 32 || metadataLength > Math.min(16 * 1024 * 1024, header.plaintext_bytes - 4)) throw new Error("备份内容无效");
+        if (metadataLength < 32 || metadataLength > Math.min(16 * 1024 * 1024, header.plaintext_bytes - 4)) throw new UserFacingError("备份内容无效");
       }
       if (metadataLength !== null && bufferedMetadataBytes >= 4 + metadataLength) {
         const metadataBytes = new Uint8Array(bufferedMetadataBytes); let bufferedOffset = 0;
         for (const part of metadataParts) { metadataBytes.set(part, bufferedOffset); bufferedOffset += part.byteLength; }
         let parsed: unknown;
         try { parsed = JSON.parse(decoder.decode(metadataBytes.subarray(4, 4 + metadataLength))); }
-        catch { throw new Error("备份内容无效"); }
+        catch { throw new UserFacingError("备份内容无效"); }
         metadata = validateMetadata(parsed, expectedOrigin);
         const databaseStart = 4 + metadataLength;
         if (metadataBytes.byteLength > databaseStart) {
@@ -218,8 +219,8 @@ export async function streamPortableBackupDatabase(
       await write(plaintext); databaseBytes += plaintext.byteLength;
     }
   }
-  if (offset !== file.size || plaintextBytes !== header.plaintext_bytes) throw new Error("备份文件不完整或包含多余数据");
-  if (!metadata || databaseBytes !== metadata.database_bytes) throw new Error("备份内容无效");
+  if (offset !== file.size || plaintextBytes !== header.plaintext_bytes) throw new UserFacingError("备份文件不完整或包含多余数据");
+  if (!metadata || databaseBytes !== metadata.database_bytes) throw new UserFacingError("备份内容无效");
   return { userId: metadata.user_id, serverOrigin: metadata.server_origin, identity: metadata.identity, databaseBytes, createdAt: header.created_at, backupCheckpoint: metadata.backup_checkpoint };
 }
 

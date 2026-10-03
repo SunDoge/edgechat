@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import { createPortableBackupBlob, readPortableBackup } from "./portable-backup";
+import { UserFacingError } from "./user-facing-error";
 
 describe("portable encrypted backup", () => {
   it("round-trips multiple authenticated chunks and rejects a changed tag", async () => {
@@ -22,5 +23,10 @@ describe("portable encrypted backup", () => {
     tampered[tampered.length - 1] ^= 1;
     await expect(readPortableBackup(new Blob([tampered]), "correct horse battery staple")).rejects.toThrow("密码错误");
     await expect(readPortableBackup(backup, "wrong password that is long enough")).rejects.toThrow("密码错误");
+  });
+
+  it("marks expected file validation failures as safe recovery copy", async () => {
+    await expect(readPortableBackup(new Blob(["not-an-edgechat-backup"]), "correct horse battery staple"))
+      .rejects.toBeInstanceOf(UserFacingError);
   });
 });
