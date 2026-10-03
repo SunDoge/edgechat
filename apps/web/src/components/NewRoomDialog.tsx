@@ -6,8 +6,10 @@ import type { ApiClient } from "@edgechat/sync";
 import { avatarColor, initials } from "../presenters";
 import { Avatar, Dialog, Input } from "./primitives";
 import type { ContactIdentity } from "../media";
+import { useI18n } from "../i18n";
 
 export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: RoomId, keyPackages: string[]) => Promise<MlsCreateGroupResult>; queueInitialProfile: (roomId: RoomId, name: string) => Promise<void>; serverName: string; initialContact?: ContactIdentity | null; creationBlocked?: boolean; onCreated: (id: RoomId, encryptedName: string | null, profileQueued: boolean) => void; onClose: () => void }) {
+  const { t } = useI18n();
   type Person = { user_id: string; display_name: string; avatar_url?: string | null };
   const [query, setQuery] = createSignal("");
   const [results, setResults] = createSignal<Person[]>([]);
@@ -43,18 +45,18 @@ export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: Roo
         catch { profileQueued = false; }
       }
       props.onCreated(result.room_id, encryptedName, profileQueued);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "无法创建对话"); setBusy(false); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : t("newRoom.error.create")); setBusy(false); }
   }
 
-  return <Dialog id="new-room" title="新建对话" description="选择一位或多位同服用户" onClose={props.onClose}>
+  return <Dialog id="new-room" title={t("newRoom.title")} description={t("newRoom.description")} onClose={props.onClose}>
     <div class="grid gap-4 p-5">
-      <Show when={chosen().length > 1}><div><Input label="群聊名称" id="room-name" name="room_name" inputClass="h-10" value={name()} onInput={(event) => setName(event.currentTarget.value)} placeholder="例如：周末计划"/><p class="mt-2 text-xs/5 text-muted">名称会在房间建立后端到端加密同步，服务器不会收到名称明文。</p></div></Show>
+      <Show when={chosen().length > 1}><div><Input label={t("newRoom.groupName")} id="room-name" name="room_name" inputClass="h-10" value={name()} onInput={(event) => setName(event.currentTarget.value)} placeholder={t("newRoom.groupNamePlaceholder")}/><p class="mt-2 text-xs/5 text-muted">{t("newRoom.groupNamePrivacy")}</p></div></Show>
       <Show when={chosen().length}><div class="flex flex-wrap gap-2"><For each={chosen()}>{(person) => <button type="button" class="rounded-full bg-brand-soft px-3 py-1.5 text-sm font-medium text-brand" onClick={() => toggle(person)}>{person.display_name} ×</button>}</For></div></Show>
-      <label class="relative" for="people-search"><span class="sr-only">搜索用户</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="people-search" name="people_search" class="h-10 w-full rounded-lg pl-9 pr-3 ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} placeholder="搜索用户" autofocus/></label>
-      <div class="divide-y divide-black/5"><For each={results()}>{(person) => { const active = () => chosen().some((item) => item.user_id === person.user_id); return <button type="button" class="flex min-h-14 w-full items-center gap-3 px-1 text-left hover:bg-neutral-50 disabled:opacity-40" disabled={busy() || (!active() && chosen().length >= 31)} onClick={() => toggle(person)}><Avatar src={person.avatar_url} label={initials(person.display_name)} color={avatarColor(person.user_id)}/><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{person.display_name}</strong><small class="block truncate text-sm text-muted">{person.user_id}</small></span><span class="text-sm font-semibold text-brand">{active() ? "已选择" : "添加"}</span></button>; }}</For><Show when={query().length >= 2 && !results().length}><p class="py-8 text-center text-sm text-muted">没有找到匹配的用户</p></Show></div>
+      <label class="relative" for="people-search"><span class="sr-only">{t("newRoom.searchLabel")}</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="people-search" name="people_search" class="h-10 w-full rounded-lg pl-9 pr-3 ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} placeholder={t("newRoom.searchLabel")} autofocus/></label>
+      <div class="divide-y divide-black/5"><For each={results()}>{(person) => { const active = () => chosen().some((item) => item.user_id === person.user_id); return <button type="button" class="flex min-h-14 w-full items-center gap-3 px-1 text-left hover:bg-neutral-50 disabled:opacity-40" disabled={busy() || (!active() && chosen().length >= 31)} onClick={() => toggle(person)}><Avatar src={person.avatar_url} label={initials(person.display_name)} color={avatarColor(person.user_id)}/><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{person.display_name}</strong><small class="block truncate text-sm text-muted">{person.user_id}</small></span><span class="text-sm font-semibold text-brand">{active() ? t("newRoom.selected") : t("newRoom.add")}</span></button>; }}</For><Show when={query().length >= 2 && !results().length}><p class="py-8 text-center text-sm text-muted">{t("newRoom.noResults")}</p></Show></div>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm text-red-700">{error()}</div></Show>
-      <Show when={props.creationBlocked}><p class="rounded-lg bg-amber-50 px-3 py-2.5 text-sm/5 text-amber-800" role="status">本机记录恢复完成后才能建立新的加密对话。</p></Show>
-      <button type="button" class="h-10 rounded-lg bg-brand px-3 text-sm font-semibold text-white disabled:bg-neutral-300" disabled={props.creationBlocked || busy() || !chosen().length} onClick={() => void create()}>{busy() ? "正在建立 MLS 群组…" : chosen().length > 1 ? `创建 ${chosen().length + 1} 人群聊` : "开始对话"}</button>
+      <Show when={props.creationBlocked}><p class="rounded-lg bg-amber-50 px-3 py-2.5 text-sm/5 text-amber-800" role="status">{t("newRoom.recoveryBlocked")}</p></Show>
+      <button type="button" class="h-10 rounded-lg bg-brand px-3 text-sm font-semibold text-white disabled:bg-neutral-300" disabled={props.creationBlocked || busy() || !chosen().length} onClick={() => void create()}>{busy() ? t("newRoom.creating") : chosen().length > 1 ? t("newRoom.createGroup", { count: chosen().length + 1 }) : t("newRoom.start")}</button>
     </div>
   </Dialog>;
 }

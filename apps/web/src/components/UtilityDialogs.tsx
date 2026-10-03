@@ -14,6 +14,7 @@ import { BackupHealthPanel } from "./BackupHealthPanel";
 import { DeviceFingerprint } from "./DeviceFingerprint";
 import { LocalStoragePanel } from "./LocalStoragePanel";
 import { PwaCapabilityPanel } from "./PwaCapabilityPanel";
+import { useI18n } from "../i18n";
 
 export type DeviceRow = { device_id: string; display_name: string; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
 export type DeviceRevocationProgress = { status: "working" | "failed"; completed: number; total: number; error?: string };
@@ -28,6 +29,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function SearchDialog(props: { query: string; results: LocalSearchResult[]; coverageComplete: boolean; semanticEnabled: boolean; semanticStatus: "idle" | "loading" | "ready" | "error"; onEnableSemantic: () => void; onDisableSemantic: () => Promise<void>; onQuery: (value: string) => void; onSelect: (roomId: RoomId, messageId: string) => void; onClose: () => void }) {
+  const { t } = useI18n();
   const [semanticDisableBusy, setSemanticDisableBusy] = createSignal(false);
   async function disableSemantic(): Promise<void> {
     if (semanticDisableBusy()) return;
@@ -35,14 +37,14 @@ export function SearchDialog(props: { query: string; results: LocalSearchResult[
     try { await props.onDisableSemantic(); }
     finally { setSemanticDisableBusy(false); }
   }
-  return <Dialog id="message-search" title="搜索消息" description={props.semanticEnabled ? "文字与图片搜索都只在这台设备运行" : "默认只搜索本机已索引的文字"} onClose={props.onClose}>
-    <div class="p-5"><label class="relative" for="message-search-input"><span class="sr-only">消息关键词</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="message-search-input" name="message_search" class="h-10 w-full rounded-lg pl-9 pr-3 ring-1 ring-neutral-300 outline-none focus:ring-2 focus:ring-brand" value={props.query} onInput={(event) => props.onQuery(event.currentTarget.value)} placeholder={props.semanticEnabled ? "搜索文字，或描述一张图片" : "搜索文字"} autofocus/></label>
-      <Show when={props.semanticEnabled} fallback={<div class="mt-3 flex items-start justify-between gap-3 rounded-lg bg-neutral-50 p-3 ring-1 ring-black/5"><div class="min-w-0"><strong class="block text-sm font-medium text-ink">图片语义搜索未开启</strong><p class="mt-1 text-xs/5 text-muted">只有手动允许后，首次使用时浏览器才会下载约 150 MB 的本地 AI 模型；本地文字搜索不受影响。</p></div><button type="button" class="min-h-10 shrink-0 rounded-lg bg-white px-3 text-sm font-semibold text-brand ring-1 ring-brand/25 hover:bg-brand-soft" onClick={props.onEnableSemantic}>允许下载并开启</button></div>}>
-        <div class="mt-3 flex items-start justify-between gap-3"><p class="min-w-0 text-xs/5 text-muted">{props.semanticStatus === "loading" ? "正在下载或准备本地图片模型…" : props.semanticStatus === "error" ? "图片语义索引暂不可用，文字搜索仍可使用" : props.coverageComplete ? "已搜索全部本地历史" : "更早的历史消息尚未建立索引"}</p><button type="button" disabled={semanticDisableBusy()} class="shrink-0 text-xs font-semibold text-muted underline-offset-2 hover:text-ink hover:underline disabled:opacity-50" onClick={() => void disableSemantic()}>{semanticDisableBusy() ? "正在清除…" : "关闭并清除索引"}</button></div>
-        <p class="mt-1 text-[11px]/4 text-muted">图片向量会从本机消息库删除；已下载的模型文件由浏览器站点数据管理。</p>
+  return <Dialog id="message-search" title={t("search.title")} description={props.semanticEnabled ? t("search.description.semantic") : t("search.description.text")} onClose={props.onClose}>
+    <div class="p-5"><label class="relative" for="message-search-input"><span class="sr-only">{t("search.keyword")}</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 stroke-muted"/><input id="message-search-input" name="message_search" class="h-10 w-full rounded-lg pl-9 pr-3 ring-1 ring-neutral-300 outline-none focus:ring-2 focus:ring-brand" value={props.query} onInput={(event) => props.onQuery(event.currentTarget.value)} placeholder={props.semanticEnabled ? t("search.placeholder.semantic") : t("search.placeholder.text")} autofocus/></label>
+      <Show when={props.semanticEnabled} fallback={<div class="mt-3 flex items-start justify-between gap-3 rounded-lg bg-neutral-50 p-3 ring-1 ring-black/5"><div class="min-w-0"><strong class="block text-sm font-medium text-ink">{t("search.semantic.offTitle")}</strong><p class="mt-1 text-xs/5 text-muted">{t("search.semantic.offDescription")}</p></div><button type="button" class="min-h-10 shrink-0 rounded-lg bg-white px-3 text-sm font-semibold text-brand ring-1 ring-brand/25 hover:bg-brand-soft" onClick={props.onEnableSemantic}>{t("search.semantic.enable")}</button></div>}>
+        <div class="mt-3 flex items-start justify-between gap-3"><p class="min-w-0 text-xs/5 text-muted">{props.semanticStatus === "loading" ? t("search.semantic.loading") : props.semanticStatus === "error" ? t("search.semantic.error") : props.coverageComplete ? t("search.coverage.complete") : t("search.coverage.incomplete")}</p><button type="button" disabled={semanticDisableBusy()} class="shrink-0 text-xs font-semibold text-muted underline-offset-2 hover:text-ink hover:underline disabled:opacity-50" onClick={() => void disableSemantic()}>{semanticDisableBusy() ? t("search.semantic.clearing") : t("search.semantic.disable")}</button></div>
+        <p class="mt-1 text-[11px]/4 text-muted">{t("search.semantic.storageNotice")}</p>
       </Show>
-      <Show when={!props.semanticEnabled}><p class="mt-3 text-xs text-muted">{props.coverageComplete ? "已搜索全部本地文字历史" : "更早的文字历史尚未建立索引"}</p></Show>
-      <div class="mt-4 divide-y divide-black/5"><For each={props.results}>{(result) => <button type="button" class="w-full py-3 text-left" onClick={() => props.onSelect(result.room_id, result.message_id)}><Show when={result.kind === "image"} fallback={<p class="line-clamp-2 text-sm/5 text-ink">{(result as SearchResult).plaintext}</p>}><p class="flex items-center gap-2 text-sm/5 font-medium text-ink"><IconPhoto class="size-4 stroke-muted"/>{(result as ImageSearchResult).name}<span class="text-xs font-normal text-muted">相似度 {Math.round((result as ImageSearchResult).score * 100)}%</span></p></Show><small class="mt-1 block text-xs text-muted">{userName(result.sender)} · #{result.seq}</small></button>}</For></div></div>
+      <Show when={!props.semanticEnabled}><p class="mt-3 text-xs text-muted">{props.coverageComplete ? t("search.textCoverage.complete") : t("search.textCoverage.incomplete")}</p></Show>
+      <div class="mt-4 divide-y divide-black/5"><For each={props.results}>{(result) => <button type="button" class="w-full py-3 text-left" onClick={() => props.onSelect(result.room_id, result.message_id)}><Show when={result.kind === "image"} fallback={<p class="line-clamp-2 text-sm/5 text-ink">{(result as SearchResult).plaintext}</p>}><p class="flex items-center gap-2 text-sm/5 font-medium text-ink"><IconPhoto class="size-4 stroke-muted"/>{(result as ImageSearchResult).name}<span class="text-xs font-normal text-muted">{t("search.similarity", { score: Math.round((result as ImageSearchResult).score * 100) })}</span></p></Show><small class="mt-1 block text-xs text-muted">{userName(result.sender)} · #{result.seq}</small></button>}</For></div></div>
   </Dialog>;
 }
 

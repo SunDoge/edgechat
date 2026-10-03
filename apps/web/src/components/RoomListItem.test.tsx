@@ -18,7 +18,7 @@ function mount(unread = 0) {
 }
 
 function openMenu() {
-  (document.querySelector('button[aria-label="Alice 的对话操作"]') as HTMLButtonElement).click();
+  (document.querySelector('button[aria-label="Alice的对话操作"]') as HTMLButtonElement).click();
 }
 
 describe("RoomListItem organization actions", () => {
