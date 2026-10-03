@@ -1,5 +1,5 @@
 import { For, Show, createEffect, createSignal, createUniqueId, onCleanup } from "solid-js";
-import { IconArrowBackUp, IconArrowForwardUp, IconArrowRight, IconBookmark, IconChecks, IconCircleCheck, IconCircleCheckFilled, IconCopy, IconDotsVertical, IconEdit, IconMoodSmile, IconPaperclip, IconQuote, IconTrash } from "@tabler/icons-solidjs";
+import { IconArrowBackUp, IconArrowForwardUp, IconArrowRight, IconBookmark, IconChecks, IconCircleCheck, IconCircleCheckFilled, IconCopy, IconDotsVertical, IconEdit, IconInfoCircle, IconMoodSmile, IconPaperclip, IconQuote, IconTrash } from "@tabler/icons-solidjs";
 import type { LocalMessage, LocalReactionSummary } from "@edgechat/db";
 import type { MessageReference } from "@edgechat/protocol";
 import { EncryptedImage } from "./EncryptedImage";
@@ -44,6 +44,7 @@ export function MessageBubble(props: {
   jumpToMessage: (messageId: string) => void;
   openMessageReference: (reference: MessageReference) => void;
   openContact: (contact: ContactIdentity) => void;
+  showInfo?: (message: LocalMessage) => void;
   relationPreview?: { sender: string; text: string | null; deleted: boolean };
   reactions: LocalReactionSummary[];
   readBy: number;
@@ -142,6 +143,7 @@ export function MessageBubble(props: {
               <Show when={messageText(payload()).trim()}><button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.quote(props.message, quoteSelection() || undefined); setMenuOpen(false); }}><IconQuote class="size-4 stroke-muted"/>{quoteSelection() ? t("message.action.quoteSelection") : t("message.action.quote")}</button></Show>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.forward(props.message); setMenuOpen(false); }}><IconArrowForwardUp class="size-4 stroke-muted"/>{t("message.action.forward")}</button>
               <button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.select(props.message); setMenuOpen(false); }}><IconChecks class="size-4 stroke-muted"/>{t("message.action.select")}</button>
+              <Show when={mine() && props.showInfo}><button role="menuitem" type="button" class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => { props.showInfo?.(props.message); setMenuOpen(false); }}><IconInfoCircle class="size-4 stroke-muted"/>{t("message.action.info")}</button></Show>
               <Show when={props.canSave}><button role="menuitem" type="button" disabled={props.saving} class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100 disabled:opacity-50" onClick={() => { props.save(props.message); setMenuOpen(false); }}><IconBookmark class="size-4 stroke-muted"/>{props.saving ? t("message.action.saving") : t("message.action.save")}</button></Show>
               <button role="menuitem" type="button" aria-expanded={emojiOpen()} aria-controls={emojiOpen() ? emojiMenuId : undefined} class="flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 hover:bg-neutral-100" onClick={() => setEmojiOpen((value) => !value)}><IconMoodSmile class="size-4 stroke-muted"/>{t("message.action.react")}</button>
               <Show when={emojiOpen()}><div id={emojiMenuId} role="group" aria-label={t("message.action.chooseReaction")} class="flex gap-0.5 border-y border-black/5 px-1 py-1"><For each={["👍", "❤️", "😂", "😮", "😢"]}>{(emoji) => <button role="menuitem" type="button" aria-label={t("message.action.reaction", { emoji })} class="grid size-10 place-items-center rounded-md text-base hover:bg-neutral-100" onClick={() => { props.react(props.message, emoji); setMenuOpen(false); setEmojiOpen(false); }}>{emoji}</button>}</For></div></Show>
