@@ -379,7 +379,20 @@ export class ApiClient {
   }
   async uploadSegment(roomId: RoomId, segmentId: string, leaseToken: string, startSeq: number, endSeq: number, bytes: ArrayBuffer): Promise<{ segment_id: string }> {
     const digest = base64Url(await crypto.subtle.digest("SHA-256", bytes));
-    return this.request(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, { method: "POST", headers: { "x-segment-id": segmentId, "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq), "x-content-sha256": digest }, body: bytes }, API_TRANSFER_TIMEOUT_MS);
+    const upload = async () => {
+      const result = await this.request<{ segment_id: string }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, { method: "POST", headers: { "x-segment-id": segmentId, "x-compaction-token": leaseToken, "x-start-seq": String(startSeq), "x-end-seq": String(endSeq), "x-content-sha256": digest }, body: bytes }, API_TRANSFER_TIMEOUT_MS);
+      if (result.segment_id !== segmentId) throw new ApiError("服务器返回了不匹配的归档分段 ID", 502, "invalid_segment_response");
+      return result;
+    };
+    try { return await upload(); }
+    catch (error) {
+      // The Worker may have committed D1 and released the lease before its
+      // response is lost. One byte-identical retry lets that committed row
+      // answer without another object-store operation.
+      if (!(error instanceof ApiTimeoutError) && !(error instanceof TypeError)
+        && !(error instanceof ApiError && error.status >= 500 && error.code !== "server_upgrade_required")) throw error;
+      return upload();
+    }
   }
   async segmentRange(roomId: RoomId, segmentId: string, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>> {
     const maximumRangeBytes = 16 * 1024 * 1024;

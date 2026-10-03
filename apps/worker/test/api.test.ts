@@ -1748,11 +1748,27 @@ describe("single-server durable delivery", () => {
     expect(await wrongDigest.json()).toMatchObject({ code: "invalid_archive_digest" });
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
     expect((await env.DB.prepare("SELECT count(*) AS count FROM pending_r2_writes").first<{ count: number }>())?.count).toBe(0);
+    const archiveDigest = await ciphertextDigest(ciphertext);
+    const uploadHeaders = { authorization: `Bearer ${account.access_token}`, "x-segment-id": segmentId, "x-compaction-token": leaseToken,
+      "x-start-seq": "1", "x-end-seq": "1", "content-length": String(ciphertext.byteLength), "x-content-sha256": archiveDigest };
     const upload = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
-      method: "POST", headers: { authorization: `Bearer ${account.access_token}`, "x-segment-id": segmentId, "x-compaction-token": leaseToken,
-        "x-start-seq": "1", "x-end-seq": "1", "content-length": String(ciphertext.byteLength), "x-content-sha256": await ciphertextDigest(ciphertext) }, body: ciphertext,
+      method: "POST", headers: uploadHeaders, body: ciphertext,
     });
     expect(upload.status, await upload.clone().text()).toBe(201);
+    const usageAfterUpload = await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first();
+    const idempotentRetry = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
+      method: "POST", headers: uploadHeaders, body: ciphertext,
+    });
+    expect(idempotentRetry.status, await idempotentRetry.clone().text()).toBe(200);
+    expect(await idempotentRetry.json()).toMatchObject({ segment_id: segmentId, byte_size: ciphertext.byteLength });
+    expect(await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageAfterUpload);
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
+    const conflictingRetry = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments`, {
+      method: "POST", headers: { ...uploadHeaders, "x-content-sha256": b64url(new Uint8Array(32).buffer) }, body: ciphertext,
+    });
+    expect(conflictingRetry.status).toBe(409);
+    expect(await conflictingRetry.json()).toMatchObject({ code: "segment_conflict" });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(1);
     expect((await SELF.fetch(`https://edgechat.test/api/v1/archive-segments/${segmentId}/retention-ack`, { method: "POST", headers })).status).toBe(200);
     const segment = await env.DB.prepare("SELECT object_key, ciphertext_sha256 FROM archive_segments WHERE segment_id = ?").bind(segmentId).first<{ object_key: string; ciphertext_sha256: string }>();
     expect(segment?.ciphertext_sha256).toMatch(/^[A-Za-z0-9_-]{43}$/);

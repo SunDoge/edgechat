@@ -1028,6 +1028,32 @@ describe("ApiClient attachment uploads", () => {
       expect(init.body).toBe(ciphertext);
     } finally { vi.unstubAllGlobals(); }
   });
+
+  it("retries an archive segment with identical bytes and identity after an ambiguous response", async () => {
+    const segmentId = "segment-idempotent-1";
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("connection reset after upload"))
+      .mockResolvedValueOnce(Response.json({ segment_id: segmentId }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const ciphertext = new Uint8Array([11, 22, 33, 44]).buffer;
+      await new ApiClient("https://edgechat.test", "token").uploadSegment("!room-000000000001:example.com", segmentId, "lease-1", 1, 4, ciphertext);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const first = fetchMock.mock.calls[0]![1]!; const second = fetchMock.mock.calls[1]![1]!;
+      expect(new Headers(second.headers).get("x-segment-id")).toBe(new Headers(first.headers).get("x-segment-id"));
+      expect(new Headers(second.headers).get("x-content-sha256")).toBe(new Headers(first.headers).get("x-content-sha256"));
+      expect(second.body).toBe(first.body);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("rejects a server response that substitutes a different archive segment ID", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ segment_id: "substituted-segment" })));
+    try {
+      await expect(new ApiClient("https://edgechat.test", "token").uploadSegment(
+        "!room-000000000001:example.com", "expected-segment", "lease-1", 1, 4, new Uint8Array([1]).buffer,
+      )).rejects.toMatchObject({ code: "invalid_segment_response" });
+    } finally { vi.unstubAllGlobals(); }
+  });
 });
 
 describe("ApiClient archive ranges", () => {

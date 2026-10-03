@@ -179,6 +179,13 @@ uses one exact-key DELETE; a concurrently finishing PUT rechecks that marker and
 deletes the same key itself. It performs no discovery HEAD/LIST and returns the
 quota reservation exactly once.
 
+Archive compaction likewise retries at most once with the lease's preallocated
+segment ID and byte-identical ciphertext. The Worker binds an already committed
+ID to its room, sequence range, size and digest; a lost-response retry is served
+from D1 before object-store access, while conflicting reuse is rejected. This
+preserves the device's OPFS repair copy without paying for a second PUT, HEAD or
+LIST after a successful commit.
+
 EdgeChat does not make a second R2/S3 copy by default, does not store plaintext backups, and does not
 enable lifecycle deletion on committed `attachments/` or `rooms/` prefixes.
 Routine readiness uses the D1 ledger; periodic integrity audits may list the

@@ -4673,9 +4673,12 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
     throw new HttpError(400, "Invalid archive segment v3 envelope", "invalid_segment_envelope");
   }
   const db = createDatabase(env.DB);
-  const existing = await db.selectFrom("archive_segments").select(["segment_id", "start_seq", "end_seq", "byte_size"]).where("segment_id", "=", id).where("room_id", "=", roomId).executeTakeFirst();
+  const existing = await db.selectFrom("archive_segments").select(["segment_id", "start_seq", "end_seq", "byte_size", "ciphertext_sha256"]).where("segment_id", "=", id).where("room_id", "=", roomId).executeTakeFirst();
   if (existing) {
-    if (existing.start_seq !== start || existing.end_seq !== end) throw new HttpError(409, "Segment ID was already used for another range", "segment_conflict");
+    if (existing.start_seq !== start || existing.end_seq !== end || existing.byte_size !== declaredSize
+      || existing.ciphertext_sha256 !== suppliedDigest.text) {
+      throw new HttpError(409, "Segment ID was already used for different ciphertext", "segment_conflict");
+    }
     await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
     return json(existing);
   }
