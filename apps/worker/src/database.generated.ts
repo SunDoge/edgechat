@@ -387,6 +387,32 @@ export interface OperatorReportActions {
   resolution: string;
 }
 
+export interface PasskeyChallenges {
+  challenge_hash: string;
+  challenge_id: string;
+  created_at: number;
+  device_id: string | null;
+  display_name: string | null;
+  expires_at: number;
+  origin: string;
+  purpose: string;
+  rp_id: string;
+  user_id: string;
+}
+
+export interface Passkeys {
+  backed_up: number;
+  counter: number;
+  created_at: number;
+  credential_id: string;
+  device_type: string;
+  display_name: string;
+  last_used_at: number | null;
+  public_key: Buffer;
+  transports: string;
+  user_id: string;
+}
+
 export interface PendingR2Writes {
   attempts: Generated<number>;
   created_at: number;
@@ -585,6 +611,7 @@ export interface Users {
   password_hash: string;
   password_salt: string;
   user_id: string;
+  webauthn_user_id: string | null;
 }
 
 export interface UserStorageLimits {
@@ -649,6 +676,8 @@ export interface DB {
   operator_appeal_actions: OperatorAppealActions;
   operator_login_unlock_actions: OperatorLoginUnlockActions;
   operator_report_actions: OperatorReportActions;
+  passkey_challenges: PasskeyChallenges;
+  passkeys: Passkeys;
   pending_r2_writes: PendingR2Writes;
   profile_avatar_deletions: ProfileAvatarDeletions;
   push_subscriptions: PushSubscriptions;

@@ -11,6 +11,7 @@ import { eventReceiptKeyStatus, repairReceiptsEnabled, verifyAcceptanceReceipt }
 import { cleanupLoginFailureState, clearLoginFailures, limitAuthenticatedRequest, limitUnauthenticatedIpRequest, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "./abuse";
 import { logSecurityEvent } from "./security-events";
 import { ObjectStoreChecksumMismatchError, objectStore, type ObjectStoreObject } from "./object-store";
+import { authenticatePasskey, cleanupExpiredPasskeyChallenges, deletePasskey, listPasskeys, passkeyAuthenticationOptions, passkeyRegistrationOptions, registerPasskey } from "./passkeys";
 export { RoomDurableObject } from "./room-do";
 
 // The browser limit is 25 MiB of plaintext; AES-GCM appends a 16-byte tag.
@@ -1239,6 +1240,7 @@ async function changePassword(request: Request, env: Env, auth: AuthContext): Pr
   await batch(env.DB, [
     db.updateTable("users").set({ password_hash: credential.hash, password_salt: credential.salt }).where("user_id", "=", auth.userId),
     db.deleteFrom("login_failure_state").where("user_id", "=", auth.userId),
+    db.deleteFrom("passkey_challenges").where("user_id", "=", auth.userId),
     ...(logoutOtherDevices ? [
       db.deleteFrom("sessions").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId),
       db.deleteFrom("ws_tickets").where("user_id", "=", auth.userId).where("device_id", "!=", auth.deviceId),
@@ -1359,7 +1361,12 @@ async function login(request: Request, env: Env): Promise<Response> {
     throw new HttpError(401, "Invalid user ID or password", "invalid_credentials");
   }
   const device = body.device as Record<string, unknown> | undefined;
-  if (!device || typeof device !== "object") throw new HttpError(400, "Device is required", "invalid_device");
+  if (!device || typeof device !== "object" || Array.isArray(device)) throw new HttpError(400, "Device is required", "invalid_device");
+  return establishDeviceSession(env, userId, user, device, true, true);
+}
+
+async function establishDeviceSession(env: Env, userId: UserId, user: { display_name: string; avatar_id: string | null }, device: Record<string, unknown>, allowBackupRestore: boolean, allowNewDevice: boolean): Promise<Response> {
+  const db = createDatabase(env.DB);
   const deviceId = stringField(device, "device_id", 96);
   const deviceName = stringField(device, "display_name", 60);
   const signingKey = stringField(device, "signing_key", 2_000);
@@ -1368,7 +1375,9 @@ async function login(request: Request, env: Env): Promise<Response> {
   const deviceCredential = typeof device.device_credential === "string" && /^[A-Za-z0-9_-]{32,128}$/.test(device.device_credential) ? device.device_credential : null;
   const packages = mlsKeyPackages(device);
   await validatePublicKeys(signingKey, encryptionKey);
+  if (backupCheckpoint && !allowBackupRestore) throw new HttpError(403, "Backup restore requires the account password", "backup_restore_requires_password");
   const existing = await db.selectFrom("devices").select(["user_id", "revoked_at", "signing_key", "encryption_key", "device_credential_hash"]).where("device_id", "=", deviceId).executeTakeFirst();
+  if (!existing && !allowNewDevice) throw new HttpError(403, "A new device must be linked from an existing device or restored from backup", "device_link_required");
   if (existing && (existing.user_id !== userId || existing.revoked_at !== null)) throw new HttpError(403, "Device cannot be used", "device_rejected");
   if (existing && (!samePublicKey(existing.signing_key, signingKey) || !samePublicKey(existing.encryption_key, encryptionKey))) {
     throw new HttpError(403, "Device public keys do not match the registered identity", "device_key_mismatch");
@@ -1415,6 +1424,20 @@ async function login(request: Request, env: Env): Promise<Response> {
   const token = await createSession(env, userId, deviceId);
   await clearLoginFailures(env, userId);
   return json({ access_token: token, user_id: userId, device_id: deviceId, display_name: user.display_name, avatar_url: avatarUrl(user.avatar_id), server_name: env.SERVER_NAME, ...sessionCapabilities(env), ...(issuedDeviceCredential ? { device_credential: issuedDeviceCredential } : {}) });
+}
+
+async function issuePasskeyAuthenticationOptions(request: Request, env: Env): Promise<Response> {
+  const preview = await readJson(request.clone() as unknown as Request, 2_048);
+  await limitUnauthenticatedRequest(request, env, "passkey", typeof preview.user_id === "string" ? preview.user_id : "missing");
+  return passkeyAuthenticationOptions(request, env);
+}
+
+async function loginWithPasskey(request: Request, env: Env): Promise<Response> {
+  const preview = await readJson(request.clone() as unknown as Request, 256_000);
+  await limitUnauthenticatedRequest(request, env, "passkey", typeof preview.user_id === "string" ? preview.user_id : "missing");
+  const result = await authenticatePasskey(request, env);
+  await clearLoginFailures(env, result.user_id);
+  return establishDeviceSession(env, result.user_id as UserId, result, result.device, false, false);
 }
 
 async function issueDeviceSessionChallenge(request: Request, env: Env): Promise<Response> {
@@ -4553,6 +4576,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (path === "/api/v1/login" && request.method === "POST") return login(request, env);
   if (path === "/api/v1/device-sessions/challenge" && request.method === "POST") return issueDeviceSessionChallenge(request, env);
   if (path === "/api/v1/device-sessions" && request.method === "POST") return claimDeviceSession(request, env);
+  if (path === "/api/v1/passkeys/authentication/options" && request.method === "POST") return issuePasskeyAuthenticationOptions(request, env);
+  if (path === "/api/v1/passkeys/authentication" && request.method === "POST") return loginWithPasskey(request, env);
   if (path === "/api/v1/appeals" && request.method === "POST") return createAccountAppeal(request, env);
   const publicAppeal = path.match(/^\/api\/v1\/appeals\/([^/]+)$/);
   if (publicAppeal && request.method === "GET") return accountAppealStatus(request, env, decodeURIComponent(publicAppeal[1]));
@@ -4635,6 +4660,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (auth.accountDeletionRequested) throw new HttpError(409, "Account deletion is in progress", "account_deletion_pending");
   if (path === "/api/v1/account-removals" && request.method === "GET") return accountRemovalTasks(env, auth);
   if (path === "/api/v1/account/password" && request.method === "PUT") return changePassword(request, env, auth);
+  if (path === "/api/v1/passkeys" && request.method === "GET") { requireUser(auth); return listPasskeys(env, auth); }
+  if (path === "/api/v1/passkeys/registration/options" && request.method === "POST") { requireUser(auth); return passkeyRegistrationOptions(request, env, auth); }
+  if (path === "/api/v1/passkeys" && request.method === "POST") { requireUser(auth); return registerPasskey(request, env, auth); }
+  const passkeyDelete = path.match(/^\/api\/v1\/passkeys\/([^/]+)$/);
+  if (passkeyDelete && request.method === "DELETE") { requireUser(auth); return deletePasskey(request, env, auth, decodeURIComponent(passkeyDelete[1])); }
   const accountRemovalCommit = path.match(/^\/api\/v1\/account-removals\/([^/]+)\/rooms\/([^/]+)$/);
   if (accountRemovalCommit && request.method === "POST") {
     const roomId = decodeURIComponent(accountRemovalCommit[2]);
@@ -4923,6 +4953,9 @@ export default {
       }),
       cleanupExpiredDeviceSessionChallenges(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "cleaned expired device session challenges", count }));
+      }),
+      cleanupExpiredPasskeyChallenges(env).then((count) => {
+        if (count) console.log(JSON.stringify({ message: "cleaned expired passkey challenges", count }));
       }),
       cleanupExpiredRoomPeerRecoveries(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "cleaned expired peer recoveries", count }));

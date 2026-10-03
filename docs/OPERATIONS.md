@@ -41,6 +41,11 @@ after five minutes, and issuing or claiming one never reads or writes object
 storage. Password logout of other devices removes their outstanding challenges
 and invalidates their hashed device credentials immediately.
 
+Passkey registration/authentication challenges use the same five-minute
+scheduled-cleanup model in D1. Each account has at most one pending challenge
+per purpose. Passkey public keys and counters are D1 metadata; routine passkey
+login, enrollment, listing, removal, and cleanup must not access R2/S3.
+
 ## Structured security events
 
 Workers Observability is enabled in `wrangler.jsonc`. Security events are logged

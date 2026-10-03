@@ -33,6 +33,7 @@ Known production caveats remain explicit: no independent cryptographic audit, no
 
 - [x] QR/camera device linking, paste fallback, human-verifiable fingerprints, explicit approval, proof-of-key claim, spare-KeyPackage lifecycle, and resumable PGlite approval outbox.
 - [x] Device-bound session recovery after bearer expiry through a five-minute one-time D1 challenge, P-256 possession proof and a separately hashed device credential; password logout and authenticated backup restore invalidate or rotate the credential, replay is rejected, and the path creates no R2/S3 traffic.
+- [x] Optional WebAuthn passkeys for server-account login with user verification, resident ES256 credentials, password-authorized enrollment/removal, indistinguishable unknown-account options, one-time D1 challenges, and a hard existing-device requirement so passkeys never impersonate MLS/device recovery or create R2/S3 traffic.
 - [x] Current MLS state recovery through per-device Welcome plus ECDH-encrypted transfer of indexed plaintext history/archive keys, without exporting plaintext or MLS private state through the server.
 - [x] Progressive/resumable linked-device history handoff with one versioned local database-and-attachment bundle, D1 manifest, independently authenticated shards, durable target staging, and per-shard R2 acknowledgement/deletion.
 - [x] Persist-before-publish KeyPackage replenishment, low-water monitoring, claim-context idempotency and expired-claim cleanup.

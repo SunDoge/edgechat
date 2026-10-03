@@ -172,6 +172,10 @@
     {
       "file": "0043_device_sessions.sql",
       "sha256": "6e8f3235f4b857fe3291f0ed0b9d7e0b51f5904aecff4298db2b5947e4762d5f"
+    },
+    {
+      "file": "0044_passkeys.sql",
+      "sha256": "4d278f8397f05896e60b59b91b243c295afddf03c14da7d13efc33cbb78c8abc"
     }
   ]
 }

@@ -36,9 +36,9 @@ describe("account safety dialogs", () => {
       devices={[]} revocations={{}} profile={null}
       storage={{ attachment_bytes: 1024, archive_bytes: 2048, avatar_bytes: 512, attachment_objects: 1, archive_objects: 1, avatar_objects: 1, used_bytes: 3584, quota_bytes: 1_048_576, remaining_bytes: 1_044_992, used_objects: 3, object_limit: 100, remaining_objects: 97, quota_source: "default", updated_at: 1 }}
       localStorageHealth={null} backup={null} invitationPolicy="everyone" installState={{ status: "unavailable", platform: "browser" }}
-      currentDeviceId="device" pushAvailable={false} pushStatus="off" voiceRecordingAvailable passwordChangeSupported linkPreviews={false} presenceSharing={false} exportBusy={false}
+      currentDeviceId="device" pushAvailable={false} pushStatus="off" voiceRecordingAvailable passwordChangeSupported passkeysSupported linkPreviews={false} presenceSharing={false} exportBusy={false}
       onEditProfile={noop} onInvitationPolicy={asyncNoop} onLinkPreviews={asyncNoop} onPresenceSharing={asyncNoop} onRequestPersistence={vi.fn(async () => ({ outcome: "unsupported" as const, health: { persistence: "unsupported" as const, canRequestPersistence: false, usage: null, quota: null } }))}
-      onInstall={noop} onLinkDevice={noop} onEnablePush={noop} onDisablePush={noop} onBackup={noop} onChangePassword={noop} onExport={noop} onDeleteAccount={noop} onRevoke={noop} onLogout={noop} onClose={noop}/>, root());
+      onInstall={noop} onLinkDevice={noop} onEnablePush={noop} onDisablePush={noop} onBackup={noop} onChangePassword={noop} onManagePasskeys={noop} onExport={noop} onDeleteAccount={noop} onRevoke={noop} onLogout={noop} onClose={noop}/>, root());
     expect(document.body.textContent).toContain("云端加密存储");
     expect(document.body.textContent).toContain("附件 1.0 KB · 消息历史 2.0 KB · 头像 512 B");
   });

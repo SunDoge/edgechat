@@ -23,6 +23,8 @@ type SemanticTables = {
   history_repair_attempts: { outcome: "local_incomplete" | "local_unverified" };
   operator_report_actions: { resolution: "confirmed" | "dismissed" };
   operator_appeal_actions: { resolution: "approved" | "denied"; login_unlocked: Generated<0 | 1> };
+  passkey_challenges: { purpose: "register" | "authenticate" };
+  passkeys: { backed_up: 0 | 1; device_type: "singleDevice" | "multiDevice" };
   pending_r2_writes: { kind: "attachment" | "archive" };
   retention_object_deletions: { object_type: "attachment" | "archive" };
   room_members: { role: "owner" | "member" };

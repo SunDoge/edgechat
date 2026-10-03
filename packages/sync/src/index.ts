@@ -129,6 +129,10 @@ export type AccountAppealCategory = "login_locked" | "device_lost" | "account_ac
 export type AccountAppealStatus = "pending" | "approved" | "denied" | "expired";
 export type AccountAppealReceipt = { receipt: string; status: "pending"; expires_at: number };
 export type AccountAppealState = { status: AccountAppealStatus; expires_at: number; resolved_at: number | null };
+export type PasskeySummary = {
+  credential_id: string; display_name: string; device_type: "singleDevice" | "multiDevice";
+  backed_up: boolean; created_at: number; last_used_at: number | null;
+};
 
 export class ApiClient {
   constructor(public readonly baseUrl = "", private token: string | null = null) {}
@@ -146,6 +150,26 @@ export class ApiClient {
     return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/device-sessions", {
       method: "POST", body: JSON.stringify({ ...challenge, device_credential: deviceCredential, signature }),
     });
+  }
+  passkeyAuthenticationOptions(userId: string) {
+    return this.request<{ challenge_id: string; challenge: string; options: Record<string, unknown> }>("/api/v1/passkeys/authentication/options", {
+      method: "POST", body: JSON.stringify({ user_id: userId }),
+    });
+  }
+  loginWithPasskey(payload: Record<string, unknown>) {
+    return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/passkeys/authentication", { method: "POST", body: JSON.stringify(payload) });
+  }
+  passkeys() { return this.request<{ passkeys: PasskeySummary[] }>("/api/v1/passkeys"); }
+  passkeyRegistrationOptions(currentPassword: string, displayName: string) {
+    return this.request<{ challenge_id: string; options: Record<string, unknown> }>("/api/v1/passkeys/registration/options", {
+      method: "POST", body: JSON.stringify({ current_password: currentPassword, display_name: displayName }),
+    });
+  }
+  registerPasskey(payload: Record<string, unknown>) {
+    return this.request<{ credential_id: string; display_name: string; created_at: number }>("/api/v1/passkeys", { method: "POST", body: JSON.stringify(payload) });
+  }
+  deletePasskey(credentialId: string, currentPassword: string) {
+    return this.request<void>(`/api/v1/passkeys/${encodeURIComponent(credentialId)}`, { method: "DELETE", body: JSON.stringify({ current_password: currentPassword }) });
   }
   createAccountAppeal(userId: string, password: string, category: AccountAppealCategory) {
     return this.request<AccountAppealReceipt>("/api/v1/appeals", { method: "POST", body: JSON.stringify({ user_id: userId, password, category }) });

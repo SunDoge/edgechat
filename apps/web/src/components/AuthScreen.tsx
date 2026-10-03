@@ -2,6 +2,7 @@ import { Show, createSignal, onMount } from "solid-js";
 import { IconQrcode, IconShieldLock, IconSwitchHorizontal, IconUpload } from "@tabler/icons-solidjs";
 import { OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import { deviceSessionProofBytes } from "@edgechat/protocol";
+import { browserSupportsWebAuthn, startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import type { AccountAppealCategory, AccountAppealStatus, ApiClient, SessionIdentity } from "@edgechat/sync";
 import type { LocalDatabase } from "@edgechat/db";
 import { loadIdentity, saveIdentity } from "../vault";
@@ -27,6 +28,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [deviceBusy, setDeviceBusy] = createSignal(false);
+  const [passkeyBusy, setPasskeyBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [restoreOpen, setRestoreOpen] = createSignal(false);
   const [appealOpen, setAppealOpen] = createSignal(false);
@@ -36,10 +38,16 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   const [appealBusy, setAppealBusy] = createSignal(false);
   const [appealError, setAppealError] = createSignal("");
   const [deviceContinueAvailable, setDeviceContinueAvailable] = createSignal(false);
+  const [localIdentityAvailable, setLocalIdentityAvailable] = createSignal(false);
+  const [passkeysSupported, setPasskeysSupported] = createSignal(false);
 
   onMount(() => {
+    setPasskeysSupported(browserSupportsWebAuthn());
     if (!restoredUserHint) return;
-    void loadIdentity(props.profileId).then((identity) => setDeviceContinueAvailable(Boolean(identity?.deviceCredential))).catch(() => undefined);
+    void loadIdentity(props.profileId).then((identity) => {
+      setLocalIdentityAvailable(Boolean(identity));
+      setDeviceContinueAvailable(Boolean(identity?.deviceCredential));
+    }).catch(() => undefined);
   });
 
   async function continueWithDevice() {
@@ -61,21 +69,49 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     } finally { setDeviceBusy(false); }
   }
 
+  async function prepareDevice(requireExisting = false) {
+    const existing = await loadIdentity(props.profileId);
+    if (requireExisting && !existing) throw new Error(t("auth.passkey.deviceLinkRequired"));
+    const identity = existing ?? await props.core.createIdentity();
+    const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
+    const publicKeys = await props.core.exportPublicIdentity(identity);
+    const stored = { ...identity, mlsState: mls.exportState() };
+    const device = {
+      device_id: identity.deviceId, display_name: navigator.userAgent.includes("Mobile") ? t("auth.device.mobile") : t("auth.device.desktop"),
+      ...publicKeys, mls_key_packages: mls.generateKeyPackages(12),
+      ...(restoreCheckpoint ? { backup_checkpoint: restoreCheckpoint } : {}),
+      ...(identity.deviceCredential ? { device_credential: identity.deviceCredential } : {}),
+    };
+    await saveIdentity(props.profileId, stored);
+    return { stored, mls, device };
+  }
+
+  async function continueWithPasskey() {
+    if (busy() || deviceBusy() || passkeyBusy() || !username()) return;
+    setPasskeyBusy(true); setError("");
+    try {
+      // Keep the options fetch directly inside the click turn for Safari's
+      // user-activation rules; device/MLS preparation happens after assertion.
+      const pending = await props.api.passkeyAuthenticationOptions(username());
+      const assertion = await startAuthentication({ optionsJSON: pending.options as unknown as PublicKeyCredentialRequestOptionsJSON });
+      const { stored, mls, device } = await prepareDevice(true);
+      if ("backup_checkpoint" in device) throw new Error(t("auth.passkey.backupPasswordRequired"));
+      const result = await props.api.loginWithPasskey({
+        user_id: username(), challenge_id: pending.challenge_id, challenge: pending.challenge,
+        response: assertion, device,
+      });
+      const authenticatedIdentity = result.device_credential ? { ...stored, deviceCredential: result.device_credential } : stored;
+      if (authenticatedIdentity !== stored) await saveIdentity(props.profileId, authenticatedIdentity);
+      props.onReady(result, authenticatedIdentity, result.access_token, mls);
+    } catch (cause) {
+      setError(cause instanceof Error && cause.name !== "NotAllowedError" ? authErrorMessage(cause, t) : t("auth.passkey.cancelled"));
+    } finally { setPasskeyBusy(false); }
+  }
+
   async function submit(event: SubmitEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      const existing = await loadIdentity(props.profileId);
-      const identity = existing ?? await props.core.createIdentity();
-      const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
-      const mlsKeyPackages = mls.generateKeyPackages(12);
-      const publicKeys = await props.core.exportPublicIdentity(identity);
-      const device = {
-        device_id: identity.deviceId, display_name: navigator.userAgent.includes("Mobile") ? t("auth.device.mobile") : t("auth.device.desktop"),
-        ...publicKeys, mls_key_packages: mlsKeyPackages,
-        ...(restoreCheckpoint ? { backup_checkpoint: restoreCheckpoint } : {}),
-        ...(identity.deviceCredential ? { device_credential: identity.deviceCredential } : {}),
-      };
-      const stored = { ...identity, mlsState: mls.exportState() }; await saveIdentity(props.profileId, stored);
+      const { stored, mls, device } = await prepareDevice();
       const result = mode() === "register"
         ? await props.api.register({ localpart: username(), password: password(), device })
         : await props.api.login({ user_id: username(), password: password(), device });
@@ -138,11 +174,16 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     <Show when={mode() === "login" && deviceContinueAvailable() && !finishingRestore}><div class="mb-5 grid gap-3">
       <button type="button" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy() || deviceBusy()} onClick={() => void continueWithDevice()}>{deviceBusy() ? t("auth.deviceContinue.loading") : t("auth.deviceContinue.action")}</button>
       <p class="text-xs/5 text-muted">{t("auth.deviceContinue.description")}</p>
+      <Show when={!passkeysSupported()}><div class="flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.deviceContinue.passwordFallback")}<span class="h-px flex-1 bg-black/10"/></div></Show>
+    </div></Show>
+    <Show when={mode() === "login" && passkeysSupported() && localIdentityAvailable() && !finishingRestore}><div class="mb-5 grid gap-3">
+      <button type="button" class={`${deviceContinueAvailable() ? "bg-white text-brand ring-1 ring-inset ring-brand/30 hover:bg-brand-soft" : "bg-brand text-white hover:bg-brand-strong"} h-11 rounded-lg px-3 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-100 disabled:text-neutral-400`} disabled={!username() || busy() || deviceBusy() || passkeyBusy()} onClick={() => void continueWithPasskey()}>{passkeyBusy() ? t("auth.passkey.loading") : t("auth.passkey.action")}</button>
+      <p class="text-xs/5 text-muted">{t("auth.passkey.description")}</p>
       <div class="flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.deviceContinue.passwordFallback")}<span class="h-px flex-1 bg-black/10"/></div>
     </div></Show>
     <form class="grid gap-5" onSubmit={submit}>
       <div class="grid gap-1.5">
-        <Input label={mode() === "register" ? t("auth.accountName") : t("auth.accountIdentifier")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "alice 或 @alice:example.com"} autocomplete="username" aria-describedby={mode() === "register" ? "account-name-help" : undefined} required autofocus={!restoredUserHint}/>
+        <Input label={mode() === "register" ? t("auth.accountName") : t("auth.accountIdentifier")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder={mode() === "register" ? "alice" : "alice 或 @alice:example.com"} autocomplete={mode() === "login" ? "username webauthn" : "username"} aria-describedby={mode() === "register" ? "account-name-help" : undefined} required autofocus={!restoredUserHint}/>
         <Show when={mode() === "register"}><p id="account-name-help" class="text-xs/5 text-muted">{t("auth.accountNameHint")}</p></Show>
       </div>
       <div class="grid gap-1.5">
@@ -150,7 +191,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
         <p id="login-password-help" class="text-xs/5 text-muted">{t("auth.loginPasswordHint")}</p>
       </div>
       <Show when={error()}><div role="alert" class="rounded-lg bg-red-50 px-3 py-2.5 text-sm/5 text-red-700">{error()}</div></Show>
-      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy() || deviceBusy()}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
+      <button type="submit" class="h-11 rounded-lg bg-brand px-3 text-sm font-semibold text-white hover:bg-brand-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-wait disabled:bg-neutral-300" disabled={busy() || deviceBusy() || passkeyBusy()}>{busy() ? t("auth.submit.loading") : mode() === "register" ? t("auth.register.action") : t("common.login")}</button>
       <Show when={mode() === "login" && !finishingRestore}><button type="button" class="text-sm font-medium text-brand" onClick={() => { setAppealOpen(true); if (appealReceipt()) void refreshAppealStatus(); }}>{t("auth.login.appealAction")}</button></Show>
     </form>
     <Show when={!finishingRestore}><div class="my-7 flex items-center gap-3 text-xs text-neutral-400"><span class="h-px flex-1 bg-black/10"/>{t("auth.alternative")}<span class="h-px flex-1 bg-black/10"/></div>

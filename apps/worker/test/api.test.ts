@@ -6,6 +6,7 @@ import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
 import type { Env } from "../src/env";
 import { HttpError } from "../src/http";
+import { cleanupExpiredPasskeyChallenges } from "../src/passkeys";
 
 function b64url(bytes: ArrayBuffer): string {
   let value = ""; for (const byte of new Uint8Array(bytes)) value += String.fromCharCode(byte);
@@ -44,7 +45,7 @@ it("advertises protocol capabilities and rejects impossible version ranges befor
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
   expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1"], limits: { max_attachments_per_message: 10 } } });
 
   const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
   expect(tooNew.status).toBe(426);
@@ -319,6 +320,62 @@ it("mints a one-time session only for the registered device key and possession c
   await env.DB.prepare("INSERT INTO device_session_challenges (challenge_id, device_id, challenge_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
     .bind("expired-challenge", currentDevice.id, "expired-hash", 1, 2).run();
   expect(await cleanupExpiredDeviceSessionChallenges(env as unknown as Env, 3)).toBe(1);
+  expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+});
+
+it("issues password-authorized passkey enrollment challenges without using object storage", async () => {
+  const currentDevice = await device(`passkey-device-${crypto.randomUUID()}`);
+  const account = await register(`passkey_${crypto.randomUUID().slice(0, 8)}`, currentDevice);
+  const headers = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
+
+  const denied = await SELF.fetch("https://edgechat.test/api/v1/passkeys/registration/options", {
+    method: "POST", headers, body: JSON.stringify({ current_password: "wrong-password", display_name: "Laptop" }),
+  });
+  expect(denied.status).toBe(401);
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM passkey_challenges WHERE user_id = ?").bind(account.user_id).first()).toEqual({ count: 0 });
+
+  const response = await SELF.fetch("https://edgechat.test/api/v1/passkeys/registration/options", {
+    method: "POST", headers, body: JSON.stringify({ current_password: "correct-horse-battery", display_name: "Laptop" }),
+  });
+  expect(response.status, await response.clone().text()).toBe(200);
+  const pending = await response.json() as { challenge_id: string; options: { challenge: string; rp: { id: string }; authenticatorSelection: Record<string, unknown>; pubKeyCredParams: { alg: number }[] } };
+  expect(pending.options).toMatchObject({
+    rp: { id: "edgechat.test" },
+    authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "required" },
+  });
+  expect(pending.options.pubKeyCredParams.map(({ alg }) => alg)).toEqual([-7]);
+  expect(await env.DB.prepare("SELECT challenge_id,display_name,rp_id,origin,purpose FROM passkey_challenges WHERE user_id = ?").bind(account.user_id).first()).toEqual({
+    challenge_id: pending.challenge_id, display_name: "Laptop", rp_id: "edgechat.test", origin: "https://edgechat.test", purpose: "register",
+  });
+
+  const tampered = await SELF.fetch("https://edgechat.test/api/v1/passkeys", {
+    method: "POST", headers, body: JSON.stringify({
+      challenge_id: pending.challenge_id, challenge: pending.options.challenge,
+      display_name: "Changed by client",
+      response: { id: "invalid", rawId: "invalid", response: {}, type: "public-key", clientExtensionResults: {} },
+    }),
+  });
+  expect(tampered.status).toBe(401);
+  expect(await env.DB.prepare("SELECT display_name FROM passkey_challenges WHERE challenge_id = ?").bind(pending.challenge_id).first()).toEqual({ display_name: "Laptop" });
+  expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+
+  await env.DB.prepare("UPDATE passkey_challenges SET created_at = 1, expires_at = 2 WHERE challenge_id = ?").bind(pending.challenge_id).run();
+  expect(await cleanupExpiredPasskeyChallenges(env as unknown as Env, 3)).toBe(1);
+});
+
+it("does not disclose whether an account has passkeys when requesting authentication", async () => {
+  const currentDevice = await device(`passkey-privacy-${crypto.randomUUID()}`);
+  const account = await register(`passkeyprivacy_${crypto.randomUUID().slice(0, 8)}`, currentDevice);
+  const requestOptions = (userId: string) => SELF.fetch("https://edgechat.test/api/v1/passkeys/authentication/options", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_id: userId }),
+  });
+  const [known, unknown] = await Promise.all([requestOptions(account.user_id), requestOptions("@missing:localhost")]);
+  expect(known.status).toBe(200); expect(unknown.status).toBe(200);
+  const knownBody = await known.json() as { challenge_id: string; challenge: string; options: Record<string, unknown> };
+  const unknownBody = await unknown.json() as { challenge_id: string; challenge: string; options: Record<string, unknown> };
+  expect(Object.keys(knownBody).sort()).toEqual(Object.keys(unknownBody).sort());
+  expect(Object.keys(knownBody.options).sort()).toEqual(Object.keys(unknownBody.options).sort());
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM passkey_challenges WHERE purpose = 'authenticate' AND user_id IN (?, ?)").bind(account.user_id, "@missing:localhost").first()).toEqual({ count: 0 });
   expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
 });
 
