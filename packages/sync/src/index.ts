@@ -8,6 +8,8 @@ export class ApiError extends Error {
 
 export const API_CONTROL_TIMEOUT_MS = 30_000;
 export const API_TRANSFER_TIMEOUT_MS = 10 * 60_000;
+export const OPAQUE_REGISTRATION_RETRY_DELAY_MS = 500;
+export const IDEMPOTENT_READ_RETRY_DELAY_MS = 250;
 
 export class ApiTimeoutError extends Error {
   readonly code = "request_timeout";
@@ -145,7 +147,18 @@ export class ApiClient {
   getToken(): string | null { return this.token; }
 
   register(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/register", { method: "POST", body: JSON.stringify(payload) }); }
-  registerOpaque(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string; account_credential: string; account_mode: "opaque" }>("/api/v1/register/opaque", { method: "POST", body: JSON.stringify(payload) }); }
+  async registerOpaque(payload: Record<string, unknown>) {
+    const init = { method: "POST", body: JSON.stringify(payload) } satisfies RequestInit;
+    try {
+      return await this.sessionRequest<SessionIdentity & { access_token: string; account_credential: string; account_mode: "opaque" }>("/api/v1/register/opaque", init);
+    } catch (error) {
+      const transient = error instanceof TypeError || error instanceof ApiTimeoutError
+        || (error instanceof ApiError && (error.status === 408 || error.status === 425 || error.status >= 500));
+      if (!transient) throw error;
+      await new Promise((resolve) => setTimeout(resolve, OPAQUE_REGISTRATION_RETRY_DELAY_MS));
+      return this.sessionRequest<SessionIdentity & { access_token: string; account_credential: string; account_mode: "opaque" }>("/api/v1/register/opaque", init);
+    }
+  }
   login(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/login", { method: "POST", body: JSON.stringify(payload) }); }
   deviceSessionChallenge(deviceId: string, deviceCredential: string) {
     return this.request<{ challenge: DeviceSessionChallenge }>("/api/v1/device-sessions/challenge", {
@@ -513,8 +526,19 @@ export class ApiClient {
     catch (error) { throw new ApiError(error instanceof Error ? error.message : "服务器协议不兼容", 426, "server_protocol_incompatible"); }
   }
 
-  private request<T>(path: string, init: RequestInit = {}, timeoutMs = API_CONTROL_TIMEOUT_MS): Promise<T> {
-    return this.withResponse(path, init, timeoutMs, (response) => response.status === 204 ? undefined as T : response.json() as Promise<T>);
+  private async request<T>(path: string, init: RequestInit = {}, timeoutMs = API_CONTROL_TIMEOUT_MS): Promise<T> {
+    const execute = () => this.withResponse(path, init, timeoutMs, (response) => response.status === 204 ? undefined as T : response.json() as Promise<T>);
+    try { return await execute(); }
+    catch (error) {
+      const method = (init.method ?? "GET").toUpperCase();
+      const transient = error instanceof TypeError
+        || (error instanceof ApiError && (error.status === 408 || error.status === 425 || error.status >= 500));
+      if (method !== "GET" || !transient) throw error;
+      // Binary attachment/history reads deliberately bypass this JSON helper;
+      // retrying here therefore cannot multiply an R2/S3 GET or Range request.
+      await new Promise((resolve) => setTimeout(resolve, IDEMPOTENT_READ_RETRY_DELAY_MS));
+      return execute();
+    }
   }
 }
 

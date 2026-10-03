@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
+import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -918,6 +918,63 @@ describe("ApiClient protocol negotiation", () => {
     try {
       const session = await new ApiClient("https://legacy.test").me();
       expect(session.protocol).toMatchObject({ version: 1, features: [], limits: { max_attachments_per_message: 1 } });
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+describe("ApiClient opaque registration replay", () => {
+  const session = {
+    user_id: "@opaque:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false,
+    access_token: "token", account_credential: "a".repeat(43), account_mode: "opaque" as const,
+  };
+
+  it("retries one transient gateway failure with the byte-identical payload", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ error: "Request failed", code: "request_failed" }, { status: 502 }))
+      .mockResolvedValueOnce(Response.json(session));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const payload = { display_name: "Alice", account_credential: "a".repeat(43), device: { device_id: "device" } };
+      const result = new ApiClient("https://edgechat.test").registerOpaque(payload);
+      await vi.advanceTimersByTimeAsync(OPAQUE_REGISTRATION_RETRY_DELAY_MS);
+      await expect(result).resolves.toMatchObject(session);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1][1]?.body).toBe(fetchMock.mock.calls[0][1]?.body);
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it("does not replay a deterministic client error", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ error: "Invalid device", code: "invalid_device" }, { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(new ApiClient("https://edgechat.test").registerOpaque({})).rejects.toMatchObject({ status: 400, code: "invalid_device" });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+describe("ApiClient idempotent JSON reads", () => {
+  it("retries one transient gateway response", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ error: "Bad gateway", code: "request_failed" }, { status: 502 }))
+      .mockResolvedValueOnce(Response.json({ rooms: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = new ApiClient("https://edgechat.test").rooms();
+      await vi.advanceTimersByTimeAsync(IDEMPOTENT_READ_RETRY_DELAY_MS);
+      await expect(result).resolves.toEqual({ rooms: [] });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it("does not retry a deterministic missing resource", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ error: "Missing", code: "not_found" }, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(new ApiClient("https://edgechat.test").room("!missing-room:example.com")).rejects.toMatchObject({ status: 404 });
+      expect(fetchMock).toHaveBeenCalledOnce();
     } finally { vi.unstubAllGlobals(); }
   });
 });
