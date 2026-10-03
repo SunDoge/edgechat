@@ -188,6 +188,10 @@
     {
       "file": "0047_cancellable_attachment_uploads.sql",
       "sha256": "390a2f999fdc7bb50cd1ea93aa69861b7e41707e902caaa61026f880272e3033"
+    },
+    {
+      "file": "0048_profile_avatar_cleanup_claims.sql",
+      "sha256": "6e41dae2c2c15abe03aaae14f55a7e52e5ba4a3956a5ee9a8e0bb69864db04dd"
     }
   ]
 }

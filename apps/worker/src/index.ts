@@ -29,6 +29,8 @@ const REPAIR_MAX_RANGE = 500;
 const REPAIR_MAX_UPLOAD_EVENTS = 20;
 const ATTACHMENT_REPAIR_LEASE_MS = 5 * 60 * 1_000;
 const ARCHIVE_REPAIR_LEASE_MS = 5 * 60 * 1_000;
+const PROFILE_AVATAR_WRITE_INTENT_GRACE_MS = 60 * 60 * 1_000;
+const PROFILE_AVATAR_DELETE_CLAIM_MS = 60 * 60 * 1_000;
 const BOT_TOKEN_MS = 365 * 24 * 60 * 60 * 1_000;
 const BOT_RATE_WINDOW_MS = 60_000;
 const BOT_DEFAULT_MESSAGES_PER_MINUTE = 60;
@@ -1072,28 +1074,78 @@ function isWebp(bytes: Uint8Array): boolean {
     && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
 }
 
-export async function processProfileAvatarDeletions(env: Env, objectKey?: string): Promise<number> {
+export async function processProfileAvatarDeletions(env: Env, objectKey?: string, now = Date.now()): Promise<number> {
   const db = createDatabase(env.DB);
   let query = db.selectFrom("profile_avatar_deletions").select(["object_key", "attempts"]).orderBy("requested_at").limit(objectKey ? 1 : 50);
   if (objectKey) query = query.where("object_key", "=", objectKey);
-  const pending = await query.execute();
+  else query = query.where((eb) => eb.or([
+    eb.and([eb("deleting_token", "is", null), eb("requested_at", "<=", now - PROFILE_AVATAR_WRITE_INTENT_GRACE_MS)]),
+    eb("deleting_expires_at", "<=", now),
+  ]));
+  const candidates = await query.execute();
+  if (!candidates.length) return 0;
+  // A deletion record is also the crash marker for the short PUT -> profile
+  // CAS window. Never let routine GC delete an object that D1 has since made
+  // authoritative, even when a response was lost or a prior batch was retried.
+  const activeKeys = new Set((await db.selectFrom("users").select("avatar_object_key")
+    .where("avatar_object_key", "in", candidates.map((item) => item.object_key)).execute())
+    .flatMap((item) => item.avatar_object_key ? [item.avatar_object_key] : []));
+  if (activeKeys.size) await db.deleteFrom("profile_avatar_deletions").where("object_key", "in", [...activeKeys]).execute();
+  const candidateKeys = candidates.filter((item) => !activeKeys.has(item.object_key)).map((item) => item.object_key);
+  if (!candidateKeys.length) return 0;
+  // Atomically convert write intents into leased deletion claims. Upload
+  // retry refreshes only an unclaimed intent, while a crashed cleaner's claim
+  // can be recovered after its bounded lease. The UPDATE repeats every safety
+  // predicate rather than trusting the earlier SELECT.
+  const claimToken = randomId(18);
+  let claim = db.updateTable("profile_avatar_deletions").set({ deleting_token: claimToken, deleting_expires_at: now + PROFILE_AVATAR_DELETE_CLAIM_MS })
+    .where("object_key", "in", candidateKeys)
+    .where((eb) => eb.or([eb("deleting_token", "is", null), eb("deleting_expires_at", "<=", now)]))
+    .where(sql<boolean>`NOT EXISTS (
+      SELECT 1 FROM users
+      WHERE users.avatar_object_key = profile_avatar_deletions.object_key
+    )`);
+  if (!objectKey) claim = claim.where((eb) => eb.or([
+    eb.and([eb("deleting_token", "is", null), eb("requested_at", "<=", now - PROFILE_AVATAR_WRITE_INTENT_GRACE_MS)]),
+    eb("deleting_expires_at", "<=", now),
+  ]));
+  const pending = await claim.returning(["object_key", "attempts"]).execute();
   if (!pending.length) return 0;
   try {
     await objectStore(env).delete(pending.map((item) => item.object_key));
-    await db.deleteFrom("profile_avatar_deletions").where("object_key", "in", pending.map((item) => item.object_key)).execute();
+    await db.deleteFrom("profile_avatar_deletions").where("object_key", "in", pending.map((item) => item.object_key))
+      .where("deleting_token", "=", claimToken).execute();
     return pending.length;
   } catch (error) {
     const message = (error instanceof Error ? error.message : "avatar deletion failed").slice(0, 500);
     await batch(env.DB, pending.map((item) => db.updateTable("profile_avatar_deletions")
-      .set({ attempts: item.attempts + 1, last_error: message }).where("object_key", "=", item.object_key)));
+      .set({ attempts: item.attempts + 1, last_error: message, requested_at: now, deleting_token: null, deleting_expires_at: null })
+      .where("object_key", "=", item.object_key).where("deleting_token", "=", claimToken)));
     return 0;
   }
 }
 
-async function stageAvatarDeletion(env: Env, userId: UserId, objectKey: string, bytes: number): Promise<void> {
-  await createDatabase(env.DB).insertInto("profile_avatar_deletions").values({
-    object_key: objectKey, owner_user_id: userId, byte_size: bytes, requested_at: Date.now(), attempts: 0, last_error: null,
-  }).onConflict((conflict) => conflict.column("object_key").doNothing()).execute();
+async function stageAvatarDeletion(env: Env, userId: UserId, objectKey: string, bytes: number): Promise<boolean> {
+  const now = Date.now();
+  const inserted = await env.DB.prepare(`INSERT INTO profile_avatar_deletions
+      (object_key, owner_user_id, byte_size, requested_at, attempts, last_error)
+    SELECT ?1, ?2, ?3, ?4, 0, NULL
+    WHERE NOT EXISTS (
+      SELECT 1 FROM profile_avatar_deletions
+      WHERE owner_user_id = ?2 AND object_key <> ?1
+    )
+    ON CONFLICT(object_key) DO NOTHING
+    RETURNING object_key`).bind(objectKey, userId, bytes, now).first<{ object_key: string }>();
+  if (inserted?.object_key === objectKey) return true;
+  const refreshed = await env.DB.prepare(`UPDATE profile_avatar_deletions
+      SET requested_at = ?4, attempts = 0, last_error = NULL
+    WHERE object_key = ?1 AND owner_user_id = ?2 AND byte_size = ?3 AND deleting_token IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM profile_avatar_deletions pending
+        WHERE pending.owner_user_id = ?2 AND pending.object_key <> ?1
+      )
+    RETURNING object_key`).bind(objectKey, userId, bytes, now).first<{ object_key: string }>();
+  return refreshed?.object_key === objectKey;
 }
 
 async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext): Promise<Response> {
@@ -1113,7 +1165,9 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
   const avatarId = randomId(18); const now = Date.now(); const limits = defaultStorageLimits(env);
   // This row doubles as a write intent. A crash after the R2 put but before
   // the profile CAS remains recoverable without listing the bucket.
-  await stageAvatarDeletion(env, auth.userId, objectKey, bytes.byteLength);
+  if (!(await stageAvatarDeletion(env, auth.userId, objectKey, bytes.byteLength))) {
+    throw new HttpError(409, "Another profile avatar upload or cleanup is still in progress", "avatar_upload_busy", { "retry-after": "30" });
+  }
   await objectStore(env).put(objectKey, buffer, {
     expectedSize: bytes.byteLength, contentType: "image/webp", cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
   });
@@ -1122,6 +1176,11 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
   const statements = [
     env.DB.prepare(`UPDATE users SET avatar_id = ?1, avatar_object_key = ?2, avatar_sha256 = ?3, avatar_bytes = ?4
       WHERE user_id = ?5 AND COALESCE(avatar_sha256, '') = ?6 AND deletion_requested_at IS NULL AND deleted_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM profile_avatar_deletions intent
+          WHERE intent.object_key = ?2 AND intent.owner_user_id = ?5 AND intent.byte_size = ?4
+            AND intent.deleting_token IS NULL
+        )
         AND COALESCE((SELECT attachment_bytes + archive_bytes FROM user_storage_usage WHERE user_id = ?5), 0) + ?4
           <= COALESCE((SELECT quota_bytes FROM user_storage_limits WHERE user_id = ?5), ?7)
         AND COALESCE((SELECT attachment_objects + archive_objects FROM user_storage_usage WHERE user_id = ?5), 0) + 1
@@ -1137,9 +1196,13 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
   ];
   const results = await env.DB.batch(statements);
   if (Number(results[0].meta.changes ?? 0) !== 1) {
-    const current = await db.selectFrom("users").select("avatar_object_key").where("user_id", "=", auth.userId).executeTakeFirst();
+    const [current, intent] = await Promise.all([
+      db.selectFrom("users").select("avatar_object_key").where("user_id", "=", auth.userId).executeTakeFirst(),
+      db.selectFrom("profile_avatar_deletions").select("deleting_token").where("object_key", "=", objectKey).executeTakeFirst(),
+    ]);
     if (current?.avatar_object_key !== objectKey) await processProfileAvatarDeletions(env, objectKey);
     if (current?.avatar_object_key !== before.avatar_object_key) throw new HttpError(409, "Profile changed on another device; try again", "profile_conflict");
+    if (intent?.deleting_token) throw new HttpError(409, "Profile avatar cleanup won the upload race; retry safely", "avatar_upload_busy", { "retry-after": "30" });
     throw new HttpError(413, "Storage quota or object limit exceeded", "storage_quota_exceeded");
   }
   if (before.avatar_object_key) await processProfileAvatarDeletions(env, before.avatar_object_key);

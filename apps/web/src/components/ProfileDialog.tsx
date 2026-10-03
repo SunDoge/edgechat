@@ -1,6 +1,7 @@
 import { Show, createSignal, onCleanup } from "solid-js";
 import { IconCamera, IconTrash } from "@tabler/icons-solidjs";
 import type { UserProfile } from "@edgechat/protocol";
+import { ApiError } from "@edgechat/sync";
 import { prepareProfileAvatar } from "../avatar-image";
 import { useI18n } from "../i18n";
 import { avatarColor, initials } from "../presenters";
@@ -37,7 +38,11 @@ export function ProfileDialog(props: {
       const avatar: ProfileAvatarChange = avatarBlob() ? { kind: "replace", blob: avatarBlob()! } : removeAvatar() ? { kind: "remove" } : { kind: "keep" };
       await props.onSave(displayName().trim(), bio(), avatar); props.onClose();
     }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("profile.error.save")); }
+    catch (cause) {
+      setError(cause instanceof ApiError && cause.code === "avatar_upload_busy"
+        ? t("profile.error.avatarBusy")
+        : cause instanceof Error ? cause.message : t("profile.error.save"));
+    }
     finally { setBusy(false); }
   }
 

@@ -189,6 +189,18 @@ objects/claims and then removes their local cache files. An offline cleanup keep
 the journal and ciphertext for retry. This recovery performs no LIST, HEAD, GET,
 or additional PUT and does not wait for the seven-day server backstop.
 
+Profile avatars use a separate exact-key D1 ledger because one short-lived row
+must cover both the PUT-to-profile-CAS crash window and later replacement
+deletion. Scheduled cleanup ignores fresh write intents, atomically leases an
+eligible deletion before calling the provider, and can recover an expired
+cleaner lease. It drops a ledger row without deleting whenever D1 identifies
+that key as the current avatar. While any different avatar key for that account
+is unresolved, a new upload is rejected before object storage; retrying the
+same content-addressed bytes refreshes the original intent. Thus the healthy
+replacement path remains one PUT and one exact DELETE, and a provider deletion
+outage cannot turn repeated avatar changes into unbounded objects. No avatar
+path uses LIST, discovery HEAD, or GET for cleanup.
+
 Archive compaction likewise retries at most once with the lease's preallocated
 segment ID and byte-identical ciphertext. The Worker binds an already committed
 ID to its room, sequence range, size and digest; a lost-response retry is served

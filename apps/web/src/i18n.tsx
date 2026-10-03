@@ -411,6 +411,7 @@ export const zhHansMessages = {
   "backupHealth.action": "创建新备份",
   "profile.error.save": "无法保存个人资料",
   "profile.error.avatar": "无法处理这张图片",
+  "profile.error.avatarBusy": "上一张头像仍在安全清理中，请稍后重试；不会重复占用云端空间。",
   "profile.title": "个人资料",
   "profile.description": "显示名称会出现在你参与的对话中",
   "profile.avatar.processing": "正在处理…",

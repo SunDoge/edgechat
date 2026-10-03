@@ -431,6 +431,8 @@ export interface PendingR2Writes {
 export interface ProfileAvatarDeletions {
   attempts: Generated<number>;
   byte_size: number;
+  deleting_expires_at: Generated<number | null>;
+  deleting_token: Generated<string | null>;
   last_error: string | null;
   object_key: string;
   owner_user_id: string;

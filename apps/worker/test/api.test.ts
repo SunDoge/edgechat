@@ -1,7 +1,7 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, deviceSessionProofBytes, type ClientEvent, type DeviceSessionChallenge, type DraftEnvelope, type EventId, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
-import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredDeviceSessionChallenges, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, isDatabaseSchemaMismatch, processPendingAttachmentDeletions, processPendingR2Writes, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
+import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredDeviceSessionChallenges, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, isDatabaseSchemaMismatch, processPendingAttachmentDeletions, processPendingR2Writes, processProfileAvatarDeletions, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
 import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push";
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
 import type { Env } from "../src/env";
@@ -891,6 +891,85 @@ describe("single-server durable delivery", () => {
     expect(await removed.json()).toMatchObject({ profile: { avatar_url: null } });
     expect((await env.ARCHIVE.list({ prefix: "profiles/avatars/" })).objects).toHaveLength(0);
     expect(await env.DB.prepare("SELECT count(*) AS count FROM profile_avatar_deletions").first()).toEqual({ count: 0 });
+  });
+
+  it("does not let routine avatar GC race a fresh write intent or delete the active avatar", async () => {
+    const account = await register("profile_avatar_gc", await device("profile-avatar-gc-device"));
+    const freshKey = `profiles/avatars/fresh-${crypto.randomUUID()}.webp`;
+    const bytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 3, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+    await env.ARCHIVE.put(freshKey, bytes);
+    await env.DB.prepare(`INSERT INTO profile_avatar_deletions
+      (object_key, owner_user_id, byte_size, requested_at, attempts, last_error)
+      VALUES (?1, ?2, ?3, ?4, 0, NULL)`).bind(freshKey, account.user_id, bytes.byteLength, Date.now()).run();
+
+    expect(await processProfileAvatarDeletions(env as unknown as Env)).toBe(0);
+    expect(await env.ARCHIVE.head(freshKey)).not.toBeNull();
+    expect(await env.DB.prepare("SELECT object_key FROM profile_avatar_deletions WHERE object_key = ?").bind(freshKey).first()).toEqual({ object_key: freshKey });
+    expect(await processProfileAvatarDeletions(env as unknown as Env, freshKey)).toBe(1);
+    expect(await env.ARCHIVE.head(freshKey)).toBeNull();
+
+    const claimedKey = `profiles/avatars/claimed-${crypto.randomUUID()}.webp`;
+    await env.ARCHIVE.put(claimedKey, bytes);
+    await env.DB.prepare(`INSERT INTO profile_avatar_deletions
+      (object_key, owner_user_id, byte_size, requested_at, attempts, last_error, deleting_token, deleting_expires_at)
+      VALUES (?1, ?2, ?3, 1, 0, NULL, 'crashed-cleaner', ?4)`).bind(claimedKey, account.user_id, bytes.byteLength, Date.now() + 60_000).run();
+    expect(await processProfileAvatarDeletions(env as unknown as Env)).toBe(0);
+    expect(await env.ARCHIVE.head(claimedKey)).not.toBeNull();
+    await env.DB.prepare("UPDATE profile_avatar_deletions SET deleting_expires_at = 1 WHERE object_key = ?").bind(claimedKey).run();
+    expect(await processProfileAvatarDeletions(env as unknown as Env)).toBe(1);
+    expect(await env.ARCHIVE.head(claimedKey)).toBeNull();
+
+    const headers = { authorization: `Bearer ${account.access_token}`, "content-type": "image/webp", "content-length": String(bytes.byteLength) };
+    const uploaded = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", { method: "PUT", headers, body: bytes });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(200);
+    const active = await env.DB.prepare("SELECT avatar_object_key, avatar_bytes FROM users WHERE user_id = ?").bind(account.user_id)
+      .first<{ avatar_object_key: string; avatar_bytes: number }>();
+    expect(active?.avatar_object_key).toBeTruthy();
+    await env.DB.prepare(`INSERT INTO profile_avatar_deletions
+      (object_key, owner_user_id, byte_size, requested_at, attempts, last_error)
+      VALUES (?1, ?2, ?3, ?4, 0, NULL)`).bind(active!.avatar_object_key, account.user_id, active!.avatar_bytes, 1).run();
+    expect(await processProfileAvatarDeletions(env as unknown as Env, active!.avatar_object_key)).toBe(0);
+    expect(await env.ARCHIVE.head(active!.avatar_object_key)).not.toBeNull();
+    expect(await env.DB.prepare("SELECT object_key FROM profile_avatar_deletions WHERE object_key = ?").bind(active!.avatar_object_key).first()).toBeNull();
+  });
+
+  it("blocks a second avatar object while the same user's prior cleanup is unresolved", async () => {
+    const account = await register("profile_avatar_busy", await device("profile-avatar-busy-device"));
+    const pendingKey = `profiles/avatars/pending-${crypto.randomUUID()}.webp`;
+    await env.DB.prepare(`INSERT INTO profile_avatar_deletions
+      (object_key, owner_user_id, byte_size, requested_at, attempts, last_error)
+      VALUES (?1, ?2, 12, ?3, 0, 'delete unavailable')`).bind(pendingKey, account.user_id, Date.now()).run();
+    const before = (await env.ARCHIVE.list({ prefix: "profiles/avatars/" })).objects.length;
+    const bytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 4, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+    const response = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", {
+      method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "image/webp", "content-length": "12" },
+      body: bytes,
+    });
+    expect(response.status).toBe(409);
+    expect(response.headers.get("retry-after")).toBe("30");
+    expect(await response.json()).toMatchObject({ code: "avatar_upload_busy" });
+    expect((await env.ARCHIVE.list({ prefix: "profiles/avatars/" })).objects).toHaveLength(before);
+  });
+
+  it("refreshes and reuses the same content-addressed avatar intent after an interrupted upload", async () => {
+    const account = await register("profile_avatar_retry", await device("profile-avatar-retry-device"));
+    const bytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 5, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+    const ownerHash = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(account.user_id)));
+    const digest = await ciphertextDigest(bytes);
+    const objectKey = `profiles/avatars/${ownerHash}/${digest}.webp`;
+    await env.DB.prepare(`INSERT INTO profile_avatar_deletions
+      (object_key, owner_user_id, byte_size, requested_at, attempts, last_error)
+      VALUES (?1, ?2, ?3, 1, 2, 'response lost')`).bind(objectKey, account.user_id, bytes.byteLength).run();
+
+    const response = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", {
+      method: "PUT",
+      headers: { authorization: `Bearer ${account.access_token}`, "content-type": "image/webp", "content-length": "12" },
+      body: bytes,
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await env.ARCHIVE.head(objectKey)).not.toBeNull();
+    expect(await env.DB.prepare("SELECT object_key FROM profile_avatar_deletions WHERE object_key = ?").bind(objectKey).first()).toBeNull();
   });
 
   it("stores signed per-device draft ciphertext in D1 without creating R2 objects", async () => {
