@@ -7,6 +7,7 @@ import { avatarColor, initials } from "../presenters";
 import { Avatar, Dialog, Input } from "./primitives";
 import type { ContactIdentity } from "../media";
 import { useI18n } from "../i18n";
+import { operationErrorMessage } from "../operation-errors";
 
 export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: RoomId, keyPackages: string[]) => Promise<MlsCreateGroupResult>; queueInitialProfile: (roomId: RoomId, name: string) => Promise<void>; serverName: string; initialContact?: ContactIdentity | null; creationBlocked?: boolean; onCreated: (id: RoomId, encryptedName: string | null, profileQueued: boolean) => void; onClose: () => void }) {
   const { t } = useI18n();
@@ -24,7 +25,7 @@ export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: Roo
     if (value.length < 2) { setResults([]); return; }
     const timer = window.setTimeout(() => void props.api.users(value).then((response) => {
       if (version === requestVersion) setResults(response.users);
-    }).catch((cause: Error) => { if (version === requestVersion) setError(cause.message); }), 250);
+    }).catch((cause: unknown) => { if (version === requestVersion) setError(operationErrorMessage(cause, t("newRoom.error.search"), t)); }), 250);
     onCleanup(() => window.clearTimeout(timer));
   });
 
@@ -45,7 +46,7 @@ export function NewRoomDialog(props: { api: ApiClient; createGroup: (roomId: Roo
         catch { profileQueued = false; }
       }
       props.onCreated(result.room_id, encryptedName, profileQueued);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("newRoom.error.create")); setBusy(false); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("newRoom.error.create"), t)); setBusy(false); }
   }
 
   return <Dialog id="new-room" title={t("newRoom.title")} description={t("newRoom.description")} onClose={props.onClose}>

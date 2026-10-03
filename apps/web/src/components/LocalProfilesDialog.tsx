@@ -3,6 +3,7 @@ import { IconCheck, IconPlus, IconUserCircle } from "@tabler/icons-solidjs";
 import { useI18n } from "../i18n";
 import type { LocalProfile } from "../local-profiles";
 import { Dialog } from "./primitives";
+import { operationErrorMessage } from "../operation-errors";
 
 export function LocalProfilesDialog(props: {
   profiles: LocalProfile[];
@@ -18,7 +19,7 @@ export function LocalProfilesDialog(props: {
     if (busy()) return;
     setBusy(key); setError("");
     try { await operation(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("localProfiles.error")); setBusy(null); }
+    catch (cause) { setError(operationErrorMessage(cause, t("localProfiles.error"), t)); setBusy(null); }
   }
   return <Dialog id="local-profiles" title={t("localProfiles.title")} description={t("localProfiles.description")} onClose={() => { if (!busy()) props.onClose(); }}>
     <div class="p-3">

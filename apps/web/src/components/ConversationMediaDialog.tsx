@@ -4,6 +4,7 @@ import type { LocalRoomAttachment, LocalRoomAttachmentCursor, LocalRoomAttachmen
 import { useI18n } from "../i18n";
 import { attachmentPresentation, embeddedImagePreviewUrl, normalizeAttachmentMetadata, type AttachmentMetadata, type AttachmentPresentation } from "../media";
 import { Dialog } from "./primitives";
+import { operationErrorMessage } from "../operation-errors";
 
 type MediaFilter = "all" | AttachmentPresentation;
 
@@ -80,7 +81,7 @@ export function ConversationMediaDialog(props: {
       });
       setItems((current) => [...current, ...normalized]);
       setCursor(page.next_cursor); setHasMore(Boolean(page.next_cursor));
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("media.error.load")); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("media.error.load"), t)); }
     finally { setLoading(false); }
   }
 

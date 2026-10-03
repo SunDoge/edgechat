@@ -15,6 +15,8 @@ import { DeviceFingerprint } from "./DeviceFingerprint";
 import { LocalStoragePanel } from "./LocalStoragePanel";
 import { PwaCapabilityPanel } from "./PwaCapabilityPanel";
 import { useI18n } from "../i18n";
+import { authErrorMessage } from "../auth-errors";
+import { operationErrorMessage } from "../operation-errors";
 
 export type DeviceRow = { device_id: string; display_name: string; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
 export type DeviceRevocationProgress = { status: "working" | "failed"; completed: number; total: number; error?: string };
@@ -64,19 +66,19 @@ export function DevicesDialog(props: { devices: DeviceRow[]; revocations: Record
   async function changePolicy(policy: InvitationPolicy) {
     setSelectedPolicy(policy); setPrivacyBusy(true); setPrivacyError("");
     try { await props.onInvitationPolicy(policy); }
-    catch (cause) { setSelectedPolicy(props.invitationPolicy ?? "everyone"); setPrivacyError(cause instanceof Error ? cause.message : t("devices.error.invitationPolicy")); }
+    catch (cause) { setSelectedPolicy(props.invitationPolicy ?? "everyone"); setPrivacyError(operationErrorMessage(cause, t("devices.error.invitationPolicy"), t)); }
     finally { setPrivacyBusy(false); }
   }
   async function changeLinkPreviews() {
     setLinkBusy(true); setLinkError("");
     try { await props.onLinkPreviews(!props.linkPreviews); }
-    catch (cause) { setLinkError(cause instanceof Error ? cause.message : t("devices.error.linkPreviews")); }
+    catch (cause) { setLinkError(operationErrorMessage(cause, t("devices.error.linkPreviews"), t)); }
     finally { setLinkBusy(false); }
   }
   async function changePresenceSharing() {
     setPresenceBusy(true); setPresenceError("");
     try { await props.onPresenceSharing(!props.presenceSharing); }
-    catch (cause) { setPresenceError(cause instanceof Error ? cause.message : t("devices.error.presence")); }
+    catch (cause) { setPresenceError(operationErrorMessage(cause, t("devices.error.presence"), t)); }
     finally { setPresenceBusy(false); }
   }
   return <Dialog id="devices" title={t("devices.title")} description={t("devices.description")} onClose={props.onClose} footer={<div class="grid gap-2 border-t border-black/5 p-5"><button type="button" class="flex h-10 items-center gap-2 rounded-lg bg-brand-soft px-3 text-sm font-semibold text-brand hover:bg-brand/10" onClick={props.onLinkDevice}><IconQrcode class="size-4 stroke-brand"/>{t("devices.link")}</button><Show when={props.pushAvailable && props.pushStatus !== "unsupported"}><button type="button" disabled={props.pushStatus === "repairing"} class="flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-ink hover:bg-neutral-100 disabled:text-neutral-400" onClick={props.pushStatus === "on" ? props.onDisablePush : props.onEnablePush}><IconBell class="size-4 stroke-muted"/>{props.pushStatus === "repairing" ? t("devices.push.repairing") : props.pushStatus === "on" ? t("devices.push.disable") : props.pushStatus === "blocked" ? t("devices.push.allowAgain") : props.pushStatus === "error" ? t("devices.push.retry") : t("devices.push.enable")}</button></Show><Show when={props.passkeysSupported}><button type="button" class="flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-ink hover:bg-neutral-100" onClick={props.onManagePasskeys}><IconShieldLock class="size-4 stroke-muted"/>{t("devices.passkeys.manage")}</button></Show><Show when={props.passwordChangeSupported}><button type="button" class="flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-ink hover:bg-neutral-100" onClick={props.onChangePassword}><IconKey class="size-4 stroke-muted"/>{t("devices.password.change")}</button></Show><button type="button" disabled={props.exportBusy} class="flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-ink hover:bg-neutral-100 disabled:text-neutral-400" onClick={props.onExport}><IconDownload class="size-4 stroke-muted"/>{props.exportBusy ? t("devices.export.preparing") : t("devices.export.action")}</button><button type="button" class="flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-ink hover:bg-neutral-100" onClick={props.onLogout}><IconLogout class="size-4 stroke-muted"/>{t("devices.logout")}</button><button type="button" class="flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-red-600 hover:bg-red-50" onClick={props.onDeleteAccount}><IconTrash class="size-4 stroke-red-500"/>{t("devices.deleteAccount")}</button></div>}>
@@ -106,7 +108,7 @@ export function BackupDialog(props: { onCreate: (password: string) => Promise<vo
     if (!valid() || busy()) return;
     setBusy(true); setError("");
     try { await props.onCreate(password()); props.onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("backup.create.error")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("backup.create.error"), t)); }
     finally { setBusy(false); }
   }
   return <Dialog id="portable-backup" title={t("backup.create.title")} description={t("backup.create.description")} onClose={() => { if (!busy()) props.onClose(); }}>
@@ -135,7 +137,7 @@ export function AccountDeletionDialog(props: { accountCredential?: string; onDel
     if (!confirmed() || busy()) return;
     setBusy(true); setError("");
     try { await props.onDelete(reauthenticationCredential()); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("accountDelete.error")); setBusy(false); }
+    catch (cause) { setError(authErrorMessage(cause, t, t("accountDelete.error"))); setBusy(false); }
   }
   return <Dialog id="delete-account" title={t("accountDelete.title")} description={t("accountDelete.description")} onClose={() => { if (!busy()) props.onClose(); }}>
     <form class="grid gap-4 p-5" onSubmit={submit}>

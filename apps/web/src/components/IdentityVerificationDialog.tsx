@@ -8,6 +8,7 @@ import { activeIdentityDevices, deviceTrustState, verificationKey, type DeviceTr
 import { useI18n } from "../i18n";
 import { Dialog } from "./primitives";
 import { DeviceFingerprint } from "./DeviceFingerprint";
+import { operationErrorMessage } from "../operation-errors";
 
 type FingerprintedDevice = ServerDevice & { fingerprint: string; trust: DeviceTrustState; verified_at: number | null };
 
@@ -40,7 +41,7 @@ export function IdentityVerificationDialog(props: { roomId: RoomId; userIds: str
       next.sort((left, right) => left.user_id.localeCompare(right.user_id) || left.created_at - right.created_at || left.device_id.localeCompare(right.device_id));
       setDevices(next);
       if (selectedKey() && !next.some((device) => verificationKey(device.user_id, device.device_id) === selectedKey())) setSelectedKey(null);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("identity.error.load")); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("identity.error.load"), t)); }
     finally { setLoading(false); }
   }
 
@@ -52,7 +53,7 @@ export function IdentityVerificationDialog(props: { roomId: RoomId; userIds: str
       await props.db.verifyDevice(device.user_id, device.device_id, device.fingerprint, verifiedAt);
       setDevices((current) => current.map((item) => item.device_id === device.device_id && item.user_id === device.user_id ? { ...item, trust: "verified", verified_at: verifiedAt } : item));
       setConfirmed(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("identity.error.save")); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("identity.error.save"), t)); }
     finally { setBusy(false); }
   }
 
@@ -63,7 +64,7 @@ export function IdentityVerificationDialog(props: { roomId: RoomId; userIds: str
       await props.db.removeDeviceVerification(device.user_id, device.device_id);
       setDevices((current) => current.map((item) => item.device_id === device.device_id && item.user_id === device.user_id ? { ...item, trust: "unverified", verified_at: null } : item));
       setConfirmed(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("identity.error.remove")); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("identity.error.remove"), t)); }
     finally { setBusy(false); }
   }
 

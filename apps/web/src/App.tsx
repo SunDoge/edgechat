@@ -873,7 +873,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const hasOlder = nextOldest ? await db.hasMessagesBefore(roomId, Number(nextOldest.seq)) : false;
       if (selectedRef === roomId) setOlderMessagesState(hasOlder ? "idle" : "end");
     } catch (cause) {
-      if (selectedRef === roomId) { setOlderMessagesState("error"); setNotice(cause instanceof Error ? cause.message : "无法读取更早的本机消息"); }
+      if (selectedRef === roomId) { setOlderMessagesState("error"); setNotice(operationErrorMessage(cause, t("workspace.feedback.olderMessagesError"), t)); }
     }
   }
 
@@ -1520,7 +1520,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       timelineOpeningRoom = null;
       await markRoomRead(roomId);
-    })().catch((cause) => { if (selectedRef === roomId) timelineOpeningRoom = null; setNotice(cause instanceof Error ? cause.message : t("workspace.feedback.openConversationError")); });
+    })().catch((cause) => { if (selectedRef === roomId) timelineOpeningRoom = null; setNotice(operationErrorMessage(cause, t("workspace.feedback.openConversationError"), t)); });
     void refreshRoomIdentityTrust(roomId);
     void db.coverage(roomId).then((value) => setCoverageComplete(value.history_complete));
     void syncRef?.connectRoom(roomId);
@@ -1844,18 +1844,18 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       await loadRooms(mlsRef);
       const saved = rooms().find((room) => room.purpose === "saved");
-      if (!saved) throw new Error("已保存消息尚未准备好，请重试");
+      if (!saved) throw new UserFacingError(t("workspace.feedback.savedNotReady"));
       return saved;
     })().finally(() => { savedRoomCreation = null; });
     return savedRoomCreation;
   }
 
   async function openSavedRoom(): Promise<void> {
-    if (localProjectionRecoveryActive()) { setNotice("请等待本机记录恢复后再打开已保存消息"); return; }
+    if (localProjectionRecoveryActive()) { setNotice(t("workspace.feedback.savedRecovery")); return; }
     try {
       const saved = await ensureSavedRoom();
       setSelectedId(saved.room_id);
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法打开已保存消息"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.openSavedError"), t)); }
   }
 
   async function saveMessage(source: LocalMessage): Promise<void> {
@@ -1863,10 +1863,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setSavingMessageId(source.message_id);
     try {
       const saved = await ensureSavedRoom();
-      await forwardMessage(source, saved.room_id, "已保存到“已保存消息”", {
+      await forwardMessage(source, saved.room_id, t("workspace.feedback.messageSaved"), {
         kind: "message", message_id: source.message_id as MessageId, room_id: source.room_id,
       });
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法保存消息"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.saveMessageError"), t)); }
     finally { setSavingMessageId(null); }
   }
 
@@ -1876,7 +1876,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await db.saveRoomPreference(next);
       setRoomPreferences((value) => ({ ...value, [roomId]: next }));
       if (action === "archive" && next.archived_at !== null && selectedRef === roomId) setSelectedId(null);
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法更新对话设置"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.roomPreferenceError"), t)); }
   }
 
   async function setRoomMute(roomId: RoomId, mutedUntil: number | null): Promise<void> {
@@ -1886,7 +1886,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await db.saveRoomPreference(next);
       setRoomPreferences((value) => ({ ...value, [roomId]: next }));
       setNotice(next.muted_until === null ? "已恢复这段对话的通知" : next.muted_until === Number.MAX_SAFE_INTEGER ? "已一直静音这段对话" : `已静音至 ${new Date(next.muted_until).toLocaleString("zh-CN")}`);
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法更新静音设置"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.muteError"), t)); }
   }
 
   async function setRoomReadState(roomId: RoomId, markedUnread: boolean): Promise<void> {
@@ -1904,7 +1904,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await refreshUnreadCounts();
       if (!markedUnread) void sendReadReceipt(roomId, true).catch(() => undefined);
       setNotice(markedUnread ? "已标为未读" : "已标为已读");
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法更新未读状态"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.readStateError"), t)); }
   }
 
   async function updateLocalRetention(roomId: RoomId, days: LocalRetentionDays | null): Promise<number> {
@@ -1922,8 +1922,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (historyClearBusy()) return;
     setHistoryClearBusy(true);
     try {
-      if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先完成这段对话的历史恢复，再清空本机记录");
-      if ((await db.outbox(room.room_id)).some((item) => visibleMessageTypes.has(item.event.type))) throw new Error("请先发送或重试这段对话中等待发送的消息");
+      if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("workspace.feedback.clearHistoryRecovery"));
+      if ((await db.outbox(room.room_id)).some((item) => visibleMessageTypes.has(item.event.type))) throw new UserFacingError(t("workspace.feedback.clearHistoryOutbox"));
       const result = await db.clearRoomHistory(room.room_id, Number(room.current_seq));
       const cacheCleanup = await Promise.allSettled([
         ...result.attachment_ids.map((id) => attachmentCache.remove(id)),
@@ -1944,11 +1944,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function updateMessageExpiry(roomId: RoomId, seconds: MessageExpirySeconds | null): Promise<void> {
     const room = rooms().find((candidate) => candidate.room_id === roomId);
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
-    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new Error("对话状态尚未就绪");
-    if (!serverSupports(currentSession.protocol, "messages.expiry.v1")) throw new Error("当前服务器不支持消息自动消失");
-    if (room.blocked_by_me) throw new Error("请先取消屏蔽再更新设置");
-    if (room.request_status === "pending") throw new Error("接受消息请求后才能更新此设置");
-    if (historyRecoveryRooms().has(roomId)) throw new Error("请先恢复此对话");
+    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new UserFacingError(t("workspace.feedback.roomNotReady"));
+    if (!serverSupports(currentSession.protocol, "messages.expiry.v1")) throw new UserFacingError(t("workspace.feedback.expiryUnsupported"));
+    if (room.blocked_by_me) throw new UserFacingError(t("workspace.feedback.settingBlocked"));
+    if (room.request_status === "pending") throw new UserFacingError(t("workspace.feedback.settingRequestPending"));
+    if (historyRecoveryRooms().has(roomId)) throw new UserFacingError(t("contactSend.historyRecovery"));
     const updatedAt = Date.now();
     const payload: MessageExpiryPolicyPayload = { version: 1, kind: "room.message-expiry", expires_in_seconds: seconds, updated_at: updatedAt };
     await mutateMls(async () => {
@@ -1963,11 +1963,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const room = rooms().find((candidate) => candidate.room_id === roomId);
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     const normalizedName = name.trim();
-    if ((!room && !allowUnlistedRoom) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new Error("群聊状态尚未就绪");
-    if (!serverSupports(currentSession.protocol, "rooms.profile.v1")) throw new Error("当前服务器不支持加密群聊资料");
-    if (room && (room.kind !== "group" || room.purpose !== "chat" || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner"))) throw new Error("只有群主可以修改群聊名称");
-    if (!normalizedName || normalizedName.length > 100 || /[\u0000-\u001f\u007f]/u.test(normalizedName)) throw new Error("群聊名称应为 1–100 个可见字符");
-    if (!allowUnlistedRoom && historyRecoveryRooms().has(roomId)) throw new Error("请先恢复此群聊");
+    if ((!room && !allowUnlistedRoom) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new UserFacingError(t("workspace.feedback.groupNotReady"));
+    if (!serverSupports(currentSession.protocol, "rooms.profile.v1")) throw new UserFacingError(t("workspace.feedback.roomProfileUnsupported"));
+    if (room && (room.kind !== "group" || room.purpose !== "chat" || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner"))) throw new UserFacingError(t("workspace.feedback.roomProfileOwnerOnly"));
+    if (!normalizedName || normalizedName.length > 100 || /[\u0000-\u001f\u007f]/u.test(normalizedName)) throw new UserFacingError(t("workspace.feedback.roomProfileNameInvalid"));
+    if (!allowUnlistedRoom && historyRecoveryRooms().has(roomId)) throw new UserFacingError(t("workspace.feedback.groupRecovery"));
     const acceptedProfile = await db.roomProfile(roomId);
     const pendingProfile = (await db.outbox(roomId)).filter((item) => item.event.type === "control.room.profile" && isRoomProfilePayload(item.payload)).at(-1)?.payload;
     const currentAvatar = isRoomProfilePayload(pendingProfile) ? pendingProfile.avatar : acceptedProfile?.avatar ?? null;
@@ -2016,14 +2016,14 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function finishCreatedRoom(roomId: RoomId, encryptedName: string | null, profileQueued: boolean): Promise<void> {
     try { await loadRooms(mlsRef); }
-    catch (cause) {
-      setNotice(cause instanceof Error ? `群聊已建立，但暂时无法刷新列表：${cause.message}` : "群聊已建立，但暂时无法刷新列表");
+    catch {
+      setNotice(t("workspace.feedback.roomCreatedRefreshError"));
       return;
     }
     setSelectedId(roomId);
     if (!encryptedName || profileQueued) return;
     try { await updateRoomProfile(roomId, encryptedName); }
-    catch (cause) { setNotice(cause instanceof Error ? `群聊已建立，但名称尚未同步：${cause.message}` : "群聊已建立，但名称尚未同步；可在群设置中重试"); }
+    catch { setNotice(t("workspace.feedback.roomCreatedProfileError")); }
   }
 
   async function toggleHiddenGroupMember(roomId: RoomId, userId: UserId, hidden: boolean): Promise<void> {
@@ -2036,7 +2036,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
       setNotice(hidden ? "已隐藏该成员的消息，可随时重新显示" : "已重新显示该成员的消息");
     } catch (cause) {
-      throw new Error(cause instanceof Error ? cause.message : "无法更新成员显示设置");
+      throw new UserFacingError(operationErrorMessage(cause, t("workspace.feedback.memberVisibilityError"), t));
     }
   }
 
@@ -2058,7 +2058,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
     } catch (cause) {
       if (!room.blocked_by_me) void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-      setNotice(cause instanceof Error ? cause.message : "无法更新屏蔽状态");
+      setNotice(operationErrorMessage(cause, t("workspace.feedback.blockError"), t));
     }
   }
 
@@ -2069,7 +2069,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (selectedRef === room.room_id) await refreshRoomProjection(room.room_id, true);
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
       setNotice("已接受消息请求");
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法接受消息请求"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.acceptRequestError"), t)); }
   }
 
   async function rejectMessageRequest(room: ServerRoom): Promise<void> {
@@ -2081,7 +2081,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setNotice("已拒绝消息请求");
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-      setNotice(cause instanceof Error ? cause.message : "无法拒绝消息请求");
+      setNotice(operationErrorMessage(cause, t("workspace.feedback.rejectRequestError"), t));
     }
   }
 
@@ -2096,16 +2096,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setNotice("已举报并屏蔽此用户");
     } catch (cause) {
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
-      setNotice(cause instanceof Error ? cause.message : "无法提交举报");
+      setNotice(operationErrorMessage(cause, t("workspace.feedback.reportRequestError"), t));
     }
   }
 
   async function enqueueRelationEvent(type: "message.edit" | "message.reaction", target: LocalMessage, payload: MessageEditPayload | MessageReactionPayload): Promise<void> {
     const room = selected(); const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || target.room_id !== room.room_id) throw new Error("对话状态尚未就绪");
-    if (room.blocked_by_me) throw new Error("请先取消屏蔽再操作消息");
-    if (room.leave_status === "pending") throw new Error("正在等待群主安全完成退出，暂时不能操作消息");
-    if (historyRecoveryRooms().has(room.room_id)) throw new Error("请先从另一台设备或备份恢复此对话");
+    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || target.room_id !== room.room_id) throw new UserFacingError(t("workspace.feedback.roomNotReady"));
+    if (room.blocked_by_me) throw new UserFacingError(t("workspace.feedback.messageActionBlocked"));
+    if (room.leave_status === "pending") throw new UserFacingError(t("workspace.feedback.messageActionLeaving"));
+    if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("send.historyRecovery"));
     await mutateMls(async () => {
       await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
         roomId: room.room_id, type, createdAt: "edited_at" in payload ? payload.edited_at : payload.updated_at,
@@ -2227,7 +2227,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const payload: MessageEditPayload = { version: 1, kind: "message.edit", target: { kind: "message", message_id: target.message_id as MessageId, room_id: room.room_id }, text, edited_at: editedAt };
       await enqueueRelationEvent("message.edit", target, payload);
       stopTyping(room.room_id); composerRevision += 1; setEditingMessage(null); setCompose(""); clearComposerDraft(room.room_id); setNotice("编辑已加入发送队列");
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法编辑消息"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.editMessageError"), t)); }
     finally { setSendBusy(false); }
   }
 
@@ -2237,7 +2237,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const updatedAt = Date.now();
       const payload: MessageReactionPayload = { version: 1, kind: "message.reaction", target: { kind: "message", message_id: target.message_id as MessageId, room_id: room.room_id }, reaction, updated_at: updatedAt };
       await enqueueRelationEvent("message.reaction", target, payload);
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法回应消息"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.reactionError"), t)); }
   }
 
   function beginReply(message: LocalMessage) {
@@ -2313,7 +2313,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           payload: payload as unknown as Record<string, unknown>, metadata: { target_event_id: message.event_id } });
       });
       setPendingMessages(await db.outbox(room.room_id));
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法撤回消息"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.retractError"), t)); }
   }
 
   async function retryMessage(eventId: string) {
@@ -2428,7 +2428,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       })().catch((cause) => {
         if (!canApplyHistoryNavigation(revision, timelineNavigationRevision, roomId, selectedRef)) return;
         setHistoryFocus(null);
-        setNotice(cause instanceof Error ? cause.message : "无法打开搜索结果");
+        setNotice(operationErrorMessage(cause, t("workspace.feedback.openSearchResultError"), t));
       });
     }, 0);
   }
@@ -2447,7 +2447,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setHistoryFocus(null);
     setOlderMessagesState("checking");
     try { await refreshRoomProjection(roomId, true); await markRoomRead(roomId); setUnreadBoundary(null); }
-    catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法读取最新消息"); }
+    catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.latestMessagesError"), t)); }
   }
   async function openDevices() {
     setDevicesOpen(true); setStorage(null); setLocalStorageHealth(null); setInvitationPolicy(null); setProfile(null);
@@ -2456,7 +2456,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const [deviceResult, storageResult, privacyResult, profileResult] = await Promise.all([api.devices(), api.storageUsage(), api.privacy(), api.profile()]);
       setDevices(deviceResult.devices); setStorage(storageResult); setInvitationPolicy(privacyResult.invitation_policy); setProfile(profileResult.profile);
       const current = session(); if (current) setPushStatus(await reconcilePush(api, current.vapid_public_key));
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法读取账户状态"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.accountStateError"), t)); }
   }
   async function protectLocalStorage(): Promise<PersistenceRequestResult> {
     const result = await requestPersistentLocalStorage();
@@ -2468,10 +2468,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const result = await api.changePassword(currentPassword, newPassword, logoutOtherDevices);
       setNotice(result.other_sessions_revoked ? "登录密码已修改，其他设备已退出服务器" : "登录密码已修改，其他设备仍保持登录");
     } catch (cause) {
-      if (cause instanceof ApiError && cause.code === "invalid_credentials") throw new Error("当前密码不正确");
-      if (cause instanceof ApiError && cause.code === "authentication_rate_limited") throw new Error("尝试次数过多，请稍后再试");
-      if (cause instanceof ApiError && cause.code === "weak_password") throw new Error("新密码至少需要 10 个字符");
-      if (cause instanceof ApiError && cause.code === "password_unchanged") throw new Error("新密码不能与当前密码相同");
+      if (cause instanceof ApiError && cause.code === "invalid_credentials") throw new UserFacingError(t("workspace.feedback.currentPasswordIncorrect"));
+      if (cause instanceof ApiError && cause.code === "authentication_rate_limited") throw new UserFacingError(t("workspace.feedback.passwordRateLimited"));
+      if (cause instanceof ApiError && cause.code === "weak_password") throw new UserFacingError(t("workspace.feedback.passwordTooShort"));
+      if (cause instanceof ApiError && cause.code === "password_unchanged") throw new UserFacingError(t("passwordChange.same"));
       throw cause;
     }
   }
@@ -2561,8 +2561,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await staging?.abort(cause).catch(() => undefined); staging = null;
       await stagedCleanup?.().catch(() => undefined); stagedCleanup = null;
       if (!(cause instanceof DOMException && cause.name === "AbortError")) {
-        const reason = isAccountExportStorageError(cause) ? "本机可用空间不足，请释放一些设备空间后重试" : cause instanceof Error ? cause.message : null;
-        setNotice(reason ? `无法导出账户数据：${reason}` : "无法导出账户数据");
+        setNotice(isAccountExportStorageError(cause)
+          ? t("workspace.feedback.exportLocalStorageError")
+          : operationErrorMessage(cause, t("workspace.feedback.accountExportError"), t));
       }
     }
     finally { setAccountExportBusy(false); }
@@ -2616,8 +2617,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       await staging?.abort(cause).catch(() => undefined); staging = null;
       await stagedCleanup?.().catch(() => undefined); stagedCleanup = null;
       if (!(cause instanceof DOMException && cause.name === "AbortError")) {
-        const reason = isAccountExportStorageError(cause) ? "本机可用空间不足，请释放一些设备空间后重试" : cause instanceof Error ? cause.message : null;
-        setNotice(reason ? `无法导出聊天记录：${reason}` : "无法导出聊天记录");
+        setNotice(isAccountExportStorageError(cause)
+          ? t("workspace.feedback.exportLocalStorageError")
+          : operationErrorMessage(cause, t("workspace.feedback.conversationExportError"), t));
       }
     } finally { if (conversationExportAbort === controller) conversationExportAbort = null; setConversationExportBusy(false); }
   }
@@ -3092,7 +3094,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setNotice("设备已从所有加密对话移除，登录会话和实时连接已关闭");
     } catch (cause) {
       const previous = deviceRevocations()[deviceId];
-      setRevocationProgress(deviceId, { status: "failed", completed: previous?.completed ?? 0, total: previous?.total ?? 0, error: cause instanceof Error ? cause.message : "设备撤销未完成" });
+      setRevocationProgress(deviceId, { status: "failed", completed: previous?.completed ?? 0, total: previous?.total ?? 0,
+        error: operationErrorMessage(cause, t("workspace.feedback.deviceRevocationError"), t) });
       throw cause;
     }
   }
@@ -3246,7 +3249,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   function changeRoomMembership(roomId: RoomId, operation: "add" | "remove", targetUserId: UserId): Promise<void> {
-    if (roomMembershipRun) return Promise.reject(new Error("另一项成员变更正在进行"));
+    if (roomMembershipRun) return Promise.reject(new UserFacingError(t("workspace.feedback.membershipBusy")));
     setRoomMembershipBusy(targetUserId);
     roomMembershipRun = executeRoomMembershipChange(roomId, operation, targetUserId)
       .finally(() => { roomMembershipRun = null; setRoomMembershipBusy(null); });
@@ -3265,14 +3268,14 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       for (const task of delegated) await executeRoomMembershipChange(task.room_id, "remove", task.target_user_id as UserId, task.request_id);
       const count = pending.length + delegated.length;
       setNotice(count === 1 ? "群成员变更已完成" : `已完成 ${count} 项群成员变更`);
-    })().catch((cause) => { setNotice(cause instanceof Error ? `群成员变更尚未完成：${cause.message}` : "群成员变更尚未完成，可稍后重试"); })
+    })().catch((cause) => { setNotice(operationErrorMessage(cause, t("workspace.feedback.membershipChangeError"), t)); })
       .finally(() => { roomMembershipRun = null; setRoomMembershipBusy(null); });
     roomMembershipRun = run;
     await run;
   }
 
   async function requestRoomLeave(room: ServerRoom): Promise<void> {
-    if (!serverSupports(session()?.protocol, "rooms.leave.v1")) throw new Error("当前服务器不支持安全退出群聊");
+    if (!serverSupports(session()?.protocol, "rooms.leave.v1")) throw new UserFacingError(t("workspace.feedback.roomLeaveUnsupported"));
     if (!confirm(`退出“${roomTitle(room, session()!.user_id)}”？群主设备上线并更新群聊密钥后，你将停止接收新消息。`)) return;
     stopTyping(room.room_id); flushComposerDraft(room.room_id); cancelComposerMode(); setFiles([]); setVoiceDurationMs(null);
     await api.requestRoomLeave(room.room_id);
@@ -3380,7 +3383,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         await clearLocalAccount("账户已在其他设备上停用；本机消息和密钥已清除");
         return;
       }
-      setNotice(cause instanceof Error ? `成员安全更新尚未完成：${cause.message}` : "成员安全更新尚未完成，将自动重试");
+      setNotice(operationErrorMessage(cause, t("workspace.feedback.accountRemovalRetry"), t));
     }).finally(() => { accountRemovalRun = null; });
     return accountRemovalRun;
   }
@@ -3388,7 +3391,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function revokeDevice(deviceId: string) {
     const existing = deviceRevocations()[deviceId];
     if (!existing && !confirm("安全移除这台设备？将逐个更新所有对话的加密密钥，然后关闭它的登录与实时连接。过程中请保持此页面打开。")) return;
-    await executeDeviceRevocation(deviceId).catch((cause) => setNotice(cause instanceof Error ? `设备尚未完全移除：${cause.message}` : "设备尚未完全移除，可稍后重试"));
+    await executeDeviceRevocation(deviceId).catch((cause) => setNotice(operationErrorMessage(cause, t("workspace.feedback.deviceRevocationError"), t)));
   }
   async function enablePush() {
     try {
@@ -3397,17 +3400,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (status === "on") setNotice(t("workspace.feedback.pushEnabled"));
       else if (status === "blocked") setNotice(t("workspace.feedback.pushBlocked"));
       else if (status === "unsupported") setNotice(t("workspace.feedback.pushUnsupported"));
-    } catch (cause) { setPushStatus("error"); setNotice(cause instanceof Error ? cause.message : t("workspace.feedback.pushEnableError")); }
+    } catch (cause) { setPushStatus("error"); setNotice(operationErrorMessage(cause, t("workspace.feedback.pushEnableError"), t)); }
   }
   async function turnOffPush() {
     try { setPushStatus("repairing"); await disablePush(api); setPushStatus("off"); setNotice(t("workspace.feedback.pushDisabled")); }
-    catch (cause) { setPushStatus("error"); setNotice(cause instanceof Error ? cause.message : t("workspace.feedback.pushDisableError")); }
+    catch (cause) { setPushStatus("error"); setNotice(operationErrorMessage(cause, t("workspace.feedback.pushDisableError"), t)); }
   }
   async function downloadAttachment(attachment: AttachmentMetadata) {
     try {
       const plaintext = await decryptAttachment(attachment);
       const url = URL.createObjectURL(new Blob([plaintext], { type: attachment.type })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = attachment.name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1_000);
-    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "附件解密失败"); }
+    } catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.attachmentDecryptError"), t)); }
   }
   async function loadAttachmentCiphertext(id: string): Promise<ArrayBuffer> {
     return attachmentLoader.load(id);
@@ -3475,7 +3478,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function logout() {
     if (!confirm("从这台浏览器移除此身份？该身份的本机消息、搜索索引、附件缓存和密钥都会删除；服务器账户和其他设备不受影响。")) return;
     try { await removeCurrentLocalProfile(); }
-    catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法删除本机身份"); }
+    catch (cause) { setNotice(operationErrorMessage(cause, t("workspace.feedback.localProfileDeleteError"), t)); }
   }
 
   const Workspace = () => {

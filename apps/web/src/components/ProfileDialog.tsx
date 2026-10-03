@@ -7,6 +7,7 @@ import { useI18n } from "../i18n";
 import { avatarColor, initials } from "../presenters";
 import { Dialog, Input } from "./primitives";
 import { Avatar } from "./primitives";
+import { operationErrorMessage } from "../operation-errors";
 
 export type ProfileAvatarChange = { kind: "keep" } | { kind: "replace"; blob: Blob } | { kind: "remove" };
 
@@ -41,7 +42,7 @@ export function ProfileDialog(props: {
     catch (cause) {
       setError(cause instanceof ApiError && cause.code === "avatar_upload_busy"
         ? t("profile.error.avatarBusy")
-        : cause instanceof Error ? cause.message : t("profile.error.save"));
+        : operationErrorMessage(cause, t("profile.error.save"), t));
     }
     finally { setBusy(false); }
   }
@@ -53,7 +54,7 @@ export function ProfileDialog(props: {
       const blob = await prepareProfileAvatar(file); const previous = avatarPreview();
       const next = URL.createObjectURL(blob); setAvatarBlob(blob); setAvatarPreview(next); setRemoveAvatar(false);
       if (previous) URL.revokeObjectURL(previous);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("profile.error.avatar")); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("profile.error.avatar"), t)); }
     finally { setEncodingAvatar(false); }
   }
 

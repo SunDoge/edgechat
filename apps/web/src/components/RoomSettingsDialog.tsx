@@ -7,6 +7,7 @@ import { avatarColor, initials } from "../presenters";
 import { EncryptedRoomAvatar } from "./EncryptedRoomAvatar";
 import { Avatar, Dialog } from "./primitives";
 import { useI18n } from "../i18n";
+import { operationErrorMessage } from "../operation-errors";
 
 export type RoomProfileAvatarChange = { kind: "keep" } | { kind: "replace"; blob: Blob } | { kind: "remove" };
 
@@ -82,7 +83,7 @@ export function RoomSettingsDialog(props: {
       if (version !== memberSearchVersion) return;
       const members = new Set(props.members.map((member) => member.userId));
       setMemberResults(users.filter((user) => user.user_id !== props.currentUserId && !members.has(user.user_id)));
-    }).catch((cause) => { if (version === memberSearchVersion) setError(cause instanceof Error ? cause.message : t("roomSettings.error.searchUsers")); })
+    }).catch((cause) => { if (version === memberSearchVersion) setError(operationErrorMessage(cause, t("roomSettings.error.searchUsers"), t)); })
       .finally(() => { if (version === memberSearchVersion) setMemberSearchBusy(false); }), 250);
     onCleanup(() => window.clearTimeout(timer));
   });
@@ -92,7 +93,7 @@ export function RoomSettingsDialog(props: {
     if (!changed() || busy()) return;
     setBusy(true); setError("");
     try { await props.onSaveRetention(selectedDays()); props.onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.retention")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.retention"), t)); }
     finally { setBusy(false); }
   }
 
@@ -101,7 +102,7 @@ export function RoomSettingsDialog(props: {
     if (!expiryChanged() || expiryBusy() || !props.messageExpirySupported) return;
     setExpiryBusy(true); setError("");
     try { await props.onSaveMessageExpiry(selectedExpiry()); props.onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.expiry")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.expiry"), t)); }
     finally { setExpiryBusy(false); }
   }
 
@@ -109,14 +110,14 @@ export function RoomSettingsDialog(props: {
     if (anyBusy() || !confirm(t("roomSettings.confirm.clearHistory", { title: props.roomTitle }))) return;
     setError("");
     try { await props.onClearHistory(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.clearHistory")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.clearHistory"), t)); }
   }
 
   async function toggleMember(userId: string, hidden: boolean) {
     if (anyBusy()) return;
     setMemberBusy(userId); setError("");
     try { await props.onToggleMember(userId, hidden); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.memberVisibility")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.memberVisibility"), t)); }
     finally { setMemberBusy(null); }
   }
 
@@ -124,14 +125,14 @@ export function RoomSettingsDialog(props: {
     if (anyBusy()) return;
     setError("");
     try { await props.onAddMember(userId); setMemberQuery(""); setMemberResults([]); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.addMember")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.addMember"), t)); }
   }
 
   async function removeMember(userId: string, displayName: string) {
     if (anyBusy() || !confirm(t("roomSettings.confirm.removeMember", { name: displayName }))) return;
     setError("");
     try { await props.onRemoveMember(userId); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.removeMember")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.removeMember"), t)); }
   }
 
   async function transferOwnership(userId: string, displayName: string) {
@@ -139,14 +140,14 @@ export function RoomSettingsDialog(props: {
       || !confirm(t("roomSettings.confirm.transferOwnership", { name: displayName }))) return;
     setError("");
     try { await props.onTransferOwnership(userId); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.transferOwnership")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.transferOwnership"), t)); }
   }
 
   async function changeLeaveStatus() {
     if (anyBusy() || !props.leaveSupported || props.isRoomOwner) return;
     setLeaveBusy(true); setError("");
     try { if (props.leaveStatus === "pending") await props.onCancelLeave(); else await props.onRequestLeave(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.leave")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.leave"), t)); }
     finally { setLeaveBusy(false); }
   }
 
@@ -157,7 +158,7 @@ export function RoomSettingsDialog(props: {
       const blob = await prepareProfileAvatar(file); const previous = avatarPreview();
       if (previous) URL.revokeObjectURL(previous);
       setAvatarPreview(URL.createObjectURL(blob)); setAvatarChange({ kind: "replace", blob });
-    } catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.avatar")); }
+    } catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.avatar"), t)); }
     finally { setAvatarEncoding(false); }
   }
 
@@ -172,7 +173,7 @@ export function RoomSettingsDialog(props: {
     if (!name || (name === props.roomTitle && avatarChange().kind === "keep") || anyBusy() || !props.roomProfileSupported) return;
     setRoomNameBusy(true); setError("");
     try { await props.onSaveRoomProfile(name, avatarChange()); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : t("roomSettings.error.profile")); }
+    catch (cause) { setError(operationErrorMessage(cause, t("roomSettings.error.profile"), t)); }
     finally { setRoomNameBusy(false); }
   }
 

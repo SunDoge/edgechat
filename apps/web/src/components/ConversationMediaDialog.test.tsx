@@ -1,6 +1,7 @@
 import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LocalRoomAttachment } from "@edgechat/db";
+import { ApiError } from "@edgechat/sync";
 import { ConversationMediaDialog, roomAttachmentMetadata } from "./ConversationMediaDialog";
 
 let dispose: (() => void) | undefined;
@@ -49,5 +50,11 @@ describe("ConversationMediaDialog", () => {
     const preview = { type: "image/webp", data: "AAAA", width: 64, height: 48 };
     expect(roomAttachmentMetadata({ ...valid, metadata: { ...valid.metadata, preview } })?.preview).toEqual(preview);
     expect(roomAttachmentMetadata({ ...valid, metadata: { ...valid.metadata, preview: { ...preview, data: "A".repeat(20_000) } } })).toBeNull();
+  });
+
+  it("does not expose local database or server diagnostics", async () => {
+    mount(async () => { throw new ApiError("private D1 table and trace", 503, "internal_error"); });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("服务器暂时不可用，请稍后再试"));
+    expect(document.body.textContent).not.toContain("private D1");
   });
 });

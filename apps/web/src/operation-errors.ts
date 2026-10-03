@@ -1,13 +1,8 @@
 import { ApiError, ApiTimeoutError } from "@edgechat/sync";
 import { translate, type Translator } from "./i18n";
+import { UserFacingError } from "./user-facing-error";
 
-/** An expected validation/recovery message that is already safe for users. */
-export class UserFacingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "UserFacingError";
-  }
-}
+export { UserFacingError } from "./user-facing-error";
 
 /**
  * Converts transport/API failures to actionable copy without exposing raw
