@@ -250,6 +250,18 @@ response is served from the now-cleared D1 job on retry; a crash before commit
 leaves the job for lease-expiry retry. This path uses one repair PUT and no LIST
 or HEAD.
 
+Attachments, archive segments, and avatars share the same corrupt-object cleanup
+barrier. A metadata or digest failure first records `cleanup_pending` against the
+repair generation observed by that GET, then issues one exact-key DELETE. Repair
+leases and uploads remain unavailable until the DELETE succeeds. A failed or
+crash-interrupted deletion stays visible in the D1 repair queue; scheduled work
+claims at most 100 entries that have cooled for five minutes, retries only their
+recorded exact keys, and clears the barrier after success. Successful replacement
+atomically advances the source row's repair generation and removes its job, so a
+stale concurrent GET cannot recreate the old job or delete the replacement.
+Healthy object reads incur no extra request, and cleanup adds no LIST, discovery
+HEAD, or speculative GET.
+
 Archive compaction likewise retries at most once with the lease's preallocated
 segment ID and byte-identical ciphertext. The Worker binds an already committed
 ID to its room, sequence range, size and digest; a lost-response retry is served

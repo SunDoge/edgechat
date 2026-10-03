@@ -1,7 +1,7 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, deviceSessionProofBytes, type ClientEvent, type DeviceSessionChallenge, type DraftEnvelope, type EventId, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
-import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredDeviceSessionChallenges, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, isDatabaseSchemaMismatch, processPendingAttachmentDeletions, processPendingR2Writes, processProfileAvatarDeletions, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
+import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredDeviceSessionChallenges, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, isDatabaseSchemaMismatch, processPendingAttachmentDeletions, processPendingR2Writes, processPendingRepairObjectCleanups, processProfileAvatarDeletions, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
 import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push";
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
 import type { Env } from "../src/env";
@@ -999,14 +999,15 @@ describe("single-server durable delivery", () => {
     const profile = await uploaded.json() as { profile: { avatar_url: string } };
     const stored = await env.DB.prepare("SELECT avatar_object_key, avatar_sha256 FROM users WHERE user_id = ?").bind(account.user_id)
       .first<{ avatar_object_key: string; avatar_sha256: string }>();
-    await env.ARCHIVE.delete(stored!.avatar_object_key);
+    await env.ARCHIVE.put(stored!.avatar_object_key, bytes, { customMetadata: { sha256: "invalid" } });
 
     const missing = await SELF.fetch(`https://edgechat.test${profile.profile.avatar_url}`);
     expect(missing.status).toBe(503);
     expect(missing.headers.get("retry-after")).toBe("30");
     expect(await missing.json()).toMatchObject({ code: "avatar_repair_pending" });
-    expect(await env.DB.prepare("SELECT object_key FROM profile_avatar_repair_jobs WHERE user_id = ?").bind(account.user_id).first())
-      .toEqual({ object_key: stored!.avatar_object_key });
+    expect(await env.DB.prepare("SELECT object_key, cleanup_pending FROM profile_avatar_repair_jobs WHERE user_id = ?").bind(account.user_id).first())
+      .toEqual({ object_key: stored!.avatar_object_key, cleanup_pending: 0 });
+    expect(await env.ARCHIVE.head(stored!.avatar_object_key)).toBeNull();
 
     // Even if the key reappears out-of-band, the D1 circuit prevents another
     // GET from trusting it before the authenticated owner repair completes.
@@ -1014,10 +1015,21 @@ describe("single-server durable delivery", () => {
     const circuit = await SELF.fetch(`https://edgechat.test${profile.profile.avatar_url}`);
     expect(circuit.status).toBe(503);
     expect(await circuit.json()).toMatchObject({ code: "avatar_repair_pending" });
+    expect(await env.ARCHIVE.head(stored!.avatar_object_key)).not.toBeNull();
+
+    // A crash after registering the cleanup barrier but before DELETE remains
+    // recoverable without another GET, and owner repair stays blocked until it
+    // is complete.
+    await env.DB.prepare("UPDATE profile_avatar_repair_jobs SET cleanup_pending = 1, updated_at = 1 WHERE user_id = ?").bind(account.user_id).run();
+    const blockedRepair = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", { method: "PUT", headers, body: bytes });
+    expect(blockedRepair.status).toBe(503);
+    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1 });
+    expect(await env.ARCHIVE.head(stored!.avatar_object_key)).toBeNull();
 
     const repaired = await SELF.fetch("https://edgechat.test/api/v1/profile/avatar", { method: "PUT", headers, body: bytes });
     expect(repaired.status, await repaired.clone().text()).toBe(200);
     expect(await env.DB.prepare("SELECT user_id FROM profile_avatar_repair_jobs WHERE user_id = ?").bind(account.user_id).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT avatar_repair_generation FROM users WHERE user_id = ?").bind(account.user_id).first()).toEqual({ avatar_repair_generation: 1 });
     const restored = await SELF.fetch(`https://edgechat.test${profile.profile.avatar_url}`);
     expect(restored.status).toBe(200);
     expect(new Uint8Array(await restored.arrayBuffer())).toEqual(bytes);
@@ -1978,13 +1990,14 @@ describe("single-server durable delivery", () => {
     expect(attachment?.ciphertext_sha256).toBe(ciphertextHash);
     expect(attachment?.ciphertext_sha256).toMatch(/^[A-Za-z0-9_-]{43}$/);
     const usageBefore = await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first();
-    await env.ARCHIVE.delete(attachment!.object_key);
+    await env.ARCHIVE.put(attachment!.object_key, new Uint8Array(ciphertext.byteLength), { customMetadata: { room_id: roomId, sha256: "invalid" } });
 
     const missing = await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}`, { headers });
     expect(missing.status).toBe(503);
     expect(await missing.json()).toMatchObject({ code: "attachment_repair_pending" });
     expect(await env.DB.prepare("SELECT attachment_id FROM attachments WHERE attachment_id = ?").bind(attachmentId).first()).toEqual({ attachment_id: attachmentId });
-    expect(await env.DB.prepare("SELECT attachment_id FROM attachment_repair_jobs WHERE attachment_id = ?").bind(attachmentId).first()).toEqual({ attachment_id: attachmentId });
+    expect(await env.DB.prepare("SELECT attachment_id, cleanup_pending FROM attachment_repair_jobs WHERE attachment_id = ?").bind(attachmentId).first()).toEqual({ attachment_id: attachmentId, cleanup_pending: 0 });
+    expect(await env.ARCHIVE.head(attachment!.object_key)).toBeNull();
     expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageBefore);
 
     await env.ARCHIVE.put(attachment!.object_key, new Uint8Array(ciphertext.byteLength), { customMetadata: { roomId, sha256: "invalid" } });
@@ -1992,7 +2005,13 @@ describe("single-server durable delivery", () => {
     expect(circuitBroken.status).toBe(503);
     expect(await circuitBroken.json()).toMatchObject({ code: "attachment_repair_pending" });
     expect(await env.ARCHIVE.head(attachment!.object_key)).not.toBeNull();
-    await env.ARCHIVE.delete(attachment!.object_key);
+
+    await env.DB.prepare("UPDATE attachment_repair_jobs SET cleanup_pending = 1, updated_at = 1 WHERE attachment_id = ?").bind(attachmentId).run();
+    const hiddenJobs = await SELF.fetch("https://edgechat.test/api/v1/attachment-repair/jobs", { headers });
+    expect(await hiddenJobs.json()).toMatchObject({ jobs: [] });
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}/repair/lease`, { method: "POST", headers })).status).toBe(404);
+    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1 });
+    expect(await env.ARCHIVE.head(attachment!.object_key)).toBeNull();
 
     const jobs = await SELF.fetch("https://edgechat.test/api/v1/attachment-repair/jobs", { headers });
     expect(await jobs.json()).toMatchObject({ jobs: [{ attachment_id: attachmentId, ciphertext_bytes: ciphertext.byteLength, ciphertext_sha256: attachment!.ciphertext_sha256 }] });
@@ -2013,6 +2032,42 @@ describe("single-server durable delivery", () => {
     expect(await repaired.json()).toEqual({ attachment_id: attachmentId, restored: true });
     expect(new Uint8Array(await (await env.ARCHIVE.get(attachment!.object_key))!.arrayBuffer())).toEqual(ciphertext);
     expect(await env.DB.prepare("SELECT attachment_id FROM attachment_repair_jobs WHERE attachment_id = ?").bind(attachmentId).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT repair_generation FROM attachments WHERE attachment_id = ?").bind(attachmentId).first()).toEqual({ repair_generation: 1 });
+
+    // Hold one corrupt GET after it has captured generation 1. A second
+    // request may detect, clean and repair generation 2, but releasing the
+    // stale response must neither reopen a job nor delete the restored bytes.
+    await env.ARCHIVE.put(attachment!.object_key, new Uint8Array(ciphertext.byteLength), { customMetadata: { room_id: roomId, sha256: "invalid-again" } });
+    let releaseStaleRead!: () => void; let staleReadEntered!: () => void;
+    const staleReadGate = new Promise<void>((resolve) => { releaseStaleRead = resolve; });
+    const staleReadStarted = new Promise<void>((resolve) => { staleReadEntered = resolve; });
+    const delayedArchive = new Proxy(env.ARCHIVE, {
+      get(target, property) {
+        const value = Reflect.get(target, property);
+        if (property !== "get") return typeof value === "function" ? value.bind(target) : value;
+        return async (...args: unknown[]) => {
+          const object = await (target.get as (...values: unknown[]) => Promise<R2ObjectBody | null>)(...args);
+          staleReadEntered(); await staleReadGate; return object;
+        };
+      },
+    }) as R2Bucket;
+    const staleContext = createExecutionContext();
+    const staleRead = worker.fetch(new Request(`https://edgechat.test/api/v1/attachments/${attachmentId}`, { headers }) as Parameters<typeof worker.fetch>[0],
+      { ...(env as unknown as Env), ARCHIVE: delayedArchive }, staleContext);
+    await staleReadStarted;
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}`, { headers })).status).toBe(503);
+    const secondLeaseResponse = await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}/repair/lease`, { method: "POST", headers });
+    expect(secondLeaseResponse.status).toBe(201);
+    const secondLease = await secondLeaseResponse.json() as { token: string };
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/attachments/${attachmentId}/repair`, {
+      method: "PUT", headers: { authorization: `Bearer ${account.access_token}`, "x-repair-token": secondLease.token, "content-length": String(ciphertext.byteLength) }, body: ciphertext,
+    })).status).toBe(200);
+    releaseStaleRead();
+    expect((await staleRead).status).toBe(503);
+    await waitOnExecutionContext(staleContext);
+    expect(await env.DB.prepare("SELECT attachment_id FROM attachment_repair_jobs WHERE attachment_id = ?").bind(attachmentId).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT repair_generation FROM attachments WHERE attachment_id = ?").bind(attachmentId).first()).toEqual({ repair_generation: 2 });
+    expect(new Uint8Array(await (await env.ARCHIVE.get(attachment!.object_key))!.arrayBuffer())).toEqual(ciphertext);
     expect(await env.DB.prepare("SELECT attachment_bytes, attachment_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageBefore);
   });
 
@@ -2180,7 +2235,7 @@ describe("single-server durable delivery", () => {
     const segment = await env.DB.prepare("SELECT object_key, ciphertext_sha256 FROM archive_segments WHERE segment_id = ?").bind(segmentId).first<{ object_key: string; ciphertext_sha256: string }>();
     expect(segment?.ciphertext_sha256).toMatch(/^[A-Za-z0-9_-]{43}$/);
     const usageBefore = await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first();
-    await env.ARCHIVE.delete(segment!.object_key);
+    await env.ARCHIVE.put(segment!.object_key, new Uint8Array(ciphertext.byteLength), { customMetadata: { room_id: roomId, sha256: "invalid" } });
 
     const missing = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/segments/${segmentId}`, {
       headers: { authorization: `Bearer ${account.access_token}`, range: "bytes=0-1" },
@@ -2188,7 +2243,8 @@ describe("single-server durable delivery", () => {
     expect(missing.status).toBe(503);
     expect(await missing.json()).toMatchObject({ code: "archive_repair_pending" });
     expect(await env.DB.prepare("SELECT segment_id FROM archive_segments WHERE segment_id = ?").bind(segmentId).first()).toEqual({ segment_id: segmentId });
-    expect(await env.DB.prepare("SELECT segment_id FROM archive_segment_repair_jobs WHERE segment_id = ?").bind(segmentId).first()).toEqual({ segment_id: segmentId });
+    expect(await env.DB.prepare("SELECT segment_id, cleanup_pending FROM archive_segment_repair_jobs WHERE segment_id = ?").bind(segmentId).first()).toEqual({ segment_id: segmentId, cleanup_pending: 0 });
+    expect(await env.ARCHIVE.head(segment!.object_key)).toBeNull();
     expect(await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageBefore);
 
     await env.ARCHIVE.put(segment!.object_key, new Uint8Array(ciphertext.byteLength), { customMetadata: { roomId, sha256: "invalid" } });
@@ -2198,7 +2254,13 @@ describe("single-server durable delivery", () => {
     expect(circuitBroken.status).toBe(503);
     expect(await circuitBroken.json()).toMatchObject({ code: "archive_repair_pending" });
     expect(await env.ARCHIVE.head(segment!.object_key)).not.toBeNull();
-    await env.ARCHIVE.delete(segment!.object_key);
+
+    await env.DB.prepare("UPDATE archive_segment_repair_jobs SET cleanup_pending = 1, updated_at = 1 WHERE segment_id = ?").bind(segmentId).run();
+    const hiddenJobs = await SELF.fetch("https://edgechat.test/api/v1/archive-repair/jobs", { headers });
+    expect(await hiddenJobs.json()).toMatchObject({ jobs: [] });
+    expect((await SELF.fetch(`https://edgechat.test/api/v1/archive-segments/${segmentId}/repair/lease`, { method: "POST", headers })).status).toBe(404);
+    expect(await processPendingRepairObjectCleanups(env as unknown as Env, Date.now() + 5 * 60 * 1_000)).toEqual({ attempted: 1, completed: 1 });
+    expect(await env.ARCHIVE.head(segment!.object_key)).toBeNull();
 
     const jobs = await SELF.fetch("https://edgechat.test/api/v1/archive-repair/jobs", { headers });
     expect(await jobs.json()).toMatchObject({ jobs: [{ segment_id: segmentId, room_id: roomId, byte_size: ciphertext.byteLength, ciphertext_sha256: segment!.ciphertext_sha256 }] });
@@ -2222,6 +2284,7 @@ describe("single-server durable delivery", () => {
     expect(ranged.status).toBe(206);
     expect(new Uint8Array(await ranged.arrayBuffer())).toEqual(ciphertext.slice(1, 4));
     expect(await env.DB.prepare("SELECT segment_id FROM archive_segment_repair_jobs WHERE segment_id = ?").bind(segmentId).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT repair_generation FROM archive_segments WHERE segment_id = ?").bind(segmentId).first()).toEqual({ repair_generation: 1 });
     expect(await env.DB.prepare("SELECT archive_bytes, archive_objects FROM user_storage_usage WHERE user_id = ?").bind(account.user_id).first()).toEqual(usageBefore);
   });
 

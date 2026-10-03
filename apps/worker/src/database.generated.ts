@@ -60,6 +60,7 @@ export interface AccountDeletions {
 
 export interface ArchiveSegmentRepairJobs {
   attempts: Generated<number>;
+  cleanup_pending: Generated<number>;
   detected_at: number;
   last_error: string | null;
   lease_device_id: string | null;
@@ -81,6 +82,7 @@ export interface ArchiveSegments {
   created_at: number;
   end_seq: number;
   object_key: string;
+  repair_generation: Generated<number>;
   room_id: string;
   segment_id: string;
   start_seq: number;
@@ -110,6 +112,7 @@ export interface AttachmentGrants {
 export interface AttachmentRepairJobs {
   attachment_id: string;
   attempts: Generated<number>;
+  cleanup_pending: Generated<number>;
   detected_at: number;
   last_error: string | null;
   lease_device_id: string | null;
@@ -139,6 +142,7 @@ export interface Attachments {
   committed_seq: number | null;
   created_at: number;
   object_key: string;
+  repair_generation: Generated<number>;
   room_id: string;
   source_deleted_at: number | null;
   uploader_user_id: string;
@@ -452,6 +456,7 @@ export interface ProfileAvatarRepairJobs {
   attempts: Generated<number>;
   avatar_sha256: string;
   byte_size: number;
+  cleanup_pending: Generated<number>;
   detected_at: number;
   last_error: string | null;
   lease_expires_at: number | null;
@@ -631,6 +636,7 @@ export interface Users {
   avatar_bytes: Generated<number>;
   avatar_id: string | null;
   avatar_object_key: string | null;
+  avatar_repair_generation: Generated<number>;
   avatar_sha256: string | null;
   bio: Generated<string>;
   created_at: number;

@@ -212,6 +212,10 @@
     {
       "file": "0053_device_history_shard_repairs.sql",
       "sha256": "87c517b74039f52ffafbf1f24d8dbb69b9b8eb55f75322680ac63fb85112b7f5"
+    },
+    {
+      "file": "0054_repair_object_cleanup_barrier.sql",
+      "sha256": "43dc1501ac37b55c01f39c3f9bb8e02c72efba1b65f2f91a74eb77c2e2d0dab6"
     }
   ]
 }

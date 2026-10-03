@@ -60,6 +60,8 @@ const READINESS_BACKGROUND_WORK_SLO_MS = 24 * 60 * 60 * 1_000;
 const READINESS_APPEAL_SLO_MS = 7 * 24 * 60 * 60 * 1_000;
 const UNCOMMITTED_ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const PENDING_R2_WRITE_TTL_MS = 15 * 60 * 1_000;
+const REPAIR_OBJECT_CLEANUP_RETRY_MS = 5 * 60 * 1_000;
+const REPAIR_OBJECT_CLEANUP_BATCH = 100;
 const visibleMessageEventTypes = new Set(["message.text", "message.file", "message.contact"]);
 
 function validateArchiveV3Envelope(bytes: Uint8Array, totalBytes: number, startSeq: number, endSeq: number, uploaderDeviceId: string, activeDeviceIds: Set<string>): void {
@@ -1164,16 +1166,18 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
   const before = await db.selectFrom("users").select(["user_id", "display_name", "bio", "avatar_id", "avatar_object_key", "avatar_sha256", "avatar_bytes"])
     .where("user_id", "=", auth.userId).where("deletion_requested_at", "is", null).where("deleted_at", "is", null).executeTakeFirstOrThrow();
   if (before.avatar_sha256 === digest && before.avatar_id && before.avatar_object_key) {
-    const repair = await db.selectFrom("profile_avatar_repair_jobs").select(["object_key", "avatar_sha256", "byte_size"])
+    const repair = await db.selectFrom("profile_avatar_repair_jobs").select(["object_key", "avatar_sha256", "byte_size", "cleanup_pending"])
       .where("user_id", "=", auth.userId).executeTakeFirst();
     if (!repair) return json({ profile: profileView(before) });
     if (repair.object_key !== before.avatar_object_key || repair.avatar_sha256 !== digest || repair.byte_size !== bytes.byteLength) {
       throw new Error("Stored profile avatar repair job does not match the active avatar");
     }
+    if (repair.cleanup_pending) throw new HttpError(503, "Corrupt avatar cleanup is still pending", "avatar_repair_pending", { "retry-after": "30" });
     const leaseToken = randomId(18); const leaseNow = Date.now();
     const leased = await db.updateTable("profile_avatar_repair_jobs")
       .set({ lease_token: leaseToken, lease_expires_at: leaseNow + PROFILE_AVATAR_REPAIR_LEASE_MS, updated_at: leaseNow })
-      .where("user_id", "=", auth.userId).where((eb) => eb.or([eb("lease_token", "is", null), eb("lease_expires_at", "<=", leaseNow)]))
+      .where("user_id", "=", auth.userId).where("cleanup_pending", "=", 0)
+      .where((eb) => eb.or([eb("lease_token", "is", null), eb("lease_expires_at", "<=", leaseNow)]))
       .returning("user_id").executeTakeFirst();
     if (!leased) throw new HttpError(409, "Profile avatar repair is already in progress", "avatar_upload_busy", { "retry-after": "30" });
     try {
@@ -1182,11 +1186,19 @@ async function uploadProfileAvatar(request: Request, env: Env, auth: AuthContext
         cacheControl: "public, max-age=31536000, immutable", metadata: { sha256: digest },
       });
       if (!stored || stored.size !== bytes.byteLength) throw new Error("Profile avatar repair returned invalid object metadata");
-      const completed = await db.deleteFrom("profile_avatar_repair_jobs").where("user_id", "=", auth.userId).where("lease_token", "=", leaseToken)
-        .where((eb) => eb.exists(eb.selectFrom("users").select("user_id").where("user_id", "=", auth.userId)
-          .where("avatar_object_key", "=", before.avatar_object_key).where("avatar_sha256", "=", digest).where("avatar_bytes", "=", bytes.byteLength)))
-        .returning("user_id").executeTakeFirst();
-      if (!completed) {
+      const completed = await env.DB.batch([
+        env.DB.prepare(`UPDATE users SET avatar_repair_generation = avatar_repair_generation + 1
+          WHERE user_id = ?1 AND avatar_object_key = ?2 AND avatar_sha256 = ?3 AND avatar_bytes = ?4
+            AND EXISTS (SELECT 1 FROM profile_avatar_repair_jobs WHERE user_id = ?1 AND lease_token = ?5 AND cleanup_pending = 0)`)
+          .bind(auth.userId, before.avatar_object_key, digest, bytes.byteLength, leaseToken),
+        env.DB.prepare(`DELETE FROM profile_avatar_repair_jobs
+          WHERE user_id = ?1 AND lease_token = ?5 AND cleanup_pending = 0
+            AND EXISTS (SELECT 1 FROM users WHERE user_id = ?1 AND avatar_object_key = ?2 AND avatar_sha256 = ?3 AND avatar_bytes = ?4)`)
+          .bind(auth.userId, before.avatar_object_key, digest, bytes.byteLength, leaseToken),
+      ]);
+      const advanced = Number(completed[0].meta.changes ?? 0); const removed = Number(completed[1].meta.changes ?? 0);
+      if (advanced !== removed) throw new Error("Profile avatar repair generation and job completion diverged");
+      if (advanced !== 1) {
         const current = await db.selectFrom("users").select(["avatar_object_key", "avatar_sha256", "avatar_bytes"])
           .where("user_id", "=", auth.userId).executeTakeFirst();
         if (current?.avatar_object_key === before.avatar_object_key && current.avatar_sha256 === digest && current.avatar_bytes === bytes.byteLength) {
@@ -1290,40 +1302,47 @@ async function deleteProfileAvatar(env: Env, auth: AuthContext): Promise<Respons
   return json({ profile: { user_id: auth.userId, display_name: before.display_name, bio: before.bio, avatar_url: null } satisfies UserProfile });
 }
 
+async function finishProfileAvatarRepairCleanup(env: Env, userId: UserId, objectKey: string): Promise<boolean> {
+  const db = createDatabase(env.DB);
+  try { await objectStore(env).delete(objectKey); }
+  catch (error) {
+    await db.updateTable("profile_avatar_repair_jobs").set({
+      attempts: sql<number>`attempts + 1`, last_error: (error instanceof Error ? error.message : "corrupt avatar deletion failed").slice(0, 500), updated_at: Date.now(),
+    }).where("user_id", "=", userId).where("object_key", "=", objectKey).where("cleanup_pending", "=", 1).execute();
+    return false;
+  }
+  const cleared = await db.updateTable("profile_avatar_repair_jobs").set({ cleanup_pending: 0, last_error: null, updated_at: Date.now() })
+    .where("user_id", "=", userId).where("object_key", "=", objectKey).where("cleanup_pending", "=", 1).returning("user_id").executeTakeFirst();
+  return Boolean(cleared);
+}
+
 async function publicProfileAvatar(env: Env, avatarId: string): Promise<Response> {
   if (!/^[A-Za-z0-9_-]{24}$/.test(avatarId)) throw new HttpError(404, "Avatar not found", "not_found");
   const db = createDatabase(env.DB);
   const row = await db.selectFrom("users as u").leftJoin("profile_avatar_repair_jobs as repair", "repair.user_id", "u.user_id")
-    .select(["u.user_id", "u.avatar_object_key", "u.avatar_sha256", "u.avatar_bytes", "repair.user_id as repair_user_id"])
+    .select(["u.user_id", "u.avatar_object_key", "u.avatar_sha256", "u.avatar_bytes", "u.avatar_repair_generation", "repair.user_id as repair_user_id"])
     .where("u.avatar_id", "=", avatarId).where("u.deletion_requested_at", "is", null).where("u.deleted_at", "is", null).executeTakeFirst();
   if (!row?.avatar_object_key || !row.avatar_sha256) throw new HttpError(404, "Avatar not found", "not_found");
   if (row.repair_user_id) throw new HttpError(503, "Avatar is awaiting an exact owner repair", "avatar_repair_pending", { "retry-after": "30" });
   const object = await objectStore(env).get(row.avatar_object_key);
   const now = Date.now();
-  const markRepair = async (): Promise<boolean> => Boolean(await env.DB.prepare(`INSERT INTO profile_avatar_repair_jobs
-      (user_id, object_key, avatar_sha256, byte_size, detected_at, updated_at, attempts, last_error, lease_token, lease_expires_at)
-    SELECT user_id, avatar_object_key, avatar_sha256, avatar_bytes, ?1, ?1, 0, NULL, NULL, NULL
+  const markRepair = async (cleanupPending: boolean): Promise<boolean> => Boolean(await env.DB.prepare(`INSERT INTO profile_avatar_repair_jobs
+      (user_id, object_key, avatar_sha256, byte_size, detected_at, updated_at, attempts, last_error, lease_token, lease_expires_at, cleanup_pending)
+    SELECT user_id, avatar_object_key, avatar_sha256, avatar_bytes, ?1, ?1, 0, NULL, NULL, NULL, ?7
     FROM users
     WHERE user_id = ?2 AND avatar_id = ?3 AND avatar_object_key = ?4 AND avatar_sha256 = ?5 AND avatar_bytes = ?6
+      AND avatar_repair_generation = ?8
       AND deletion_requested_at IS NULL AND deleted_at IS NULL
-    ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at
-      WHERE profile_avatar_repair_jobs.object_key = excluded.object_key
-        AND profile_avatar_repair_jobs.avatar_sha256 = excluded.avatar_sha256
-        AND profile_avatar_repair_jobs.byte_size = excluded.byte_size
-    RETURNING user_id`).bind(now, row.user_id, avatarId, row.avatar_object_key, row.avatar_sha256, row.avatar_bytes).first());
+    ON CONFLICT(user_id) DO NOTHING
+    RETURNING user_id`).bind(now, row.user_id, avatarId, row.avatar_object_key, row.avatar_sha256, row.avatar_bytes, cleanupPending ? 1 : 0, row.avatar_repair_generation).first());
   if (!object?.body) {
-    if (!(await markRepair())) throw new HttpError(404, "Avatar not found", "not_found");
+    if (!(await markRepair(false))) throw new HttpError(404, "Avatar not found", "not_found");
     throw new HttpError(503, "Avatar is temporarily unavailable and awaiting exact owner repair", "avatar_repair_pending", { "retry-after": "30" });
   }
   if (object.size !== row.avatar_bytes || object.metadata.sha256 !== row.avatar_sha256) {
     await object.body.cancel().catch(() => undefined);
-    if (!(await markRepair())) throw new HttpError(404, "Avatar not found", "not_found");
-    try { await objectStore(env).delete(row.avatar_object_key); }
-    catch (error) {
-      await db.updateTable("profile_avatar_repair_jobs").set({
-        attempts: sql<number>`attempts + 1`, last_error: (error instanceof Error ? error.message : "corrupt avatar deletion failed").slice(0, 500), updated_at: Date.now(),
-      }).where("user_id", "=", row.user_id).execute();
-    }
+    if (!(await markRepair(true))) throw new HttpError(503, "Avatar is awaiting an exact owner repair", "avatar_repair_pending", { "retry-after": "30" });
+    await finishProfileAvatarRepairCleanup(env, row.user_id as UserId, row.avatar_object_key);
     throw new HttpError(503, "Avatar failed integrity validation and is awaiting exact owner repair", "avatar_repair_pending", { "retry-after": "30" });
   }
   return new Response(object.body, { headers: {
@@ -4909,13 +4928,8 @@ async function acknowledgeAttachmentRetention(env: Env, auth: AuthContext, id: s
   return json({ attachment_id: attachment.attachment_id });
 }
 
-async function markAttachmentRepairNeeded(env: Env, attachmentId: string): Promise<void> {
-  const now = Date.now(); const db = createDatabase(env.DB);
-  const inserted = await db.insertInto("attachment_repair_jobs").values({
-    attachment_id: attachmentId, detected_at: now, updated_at: now,
-    lease_device_id: null, lease_token_hash: null, lease_expires_at: null, attempts: 0, last_error: null,
-  }).onConflict((conflict) => conflict.column("attachment_id").doNothing()).returning("attachment_id").executeTakeFirst();
-  if (!inserted) return;
+async function notifyAttachmentRepairAvailable(env: Env, attachmentId: string): Promise<void> {
+  const db = createDatabase(env.DB);
   const [source, grants] = await Promise.all([
     db.selectFrom("attachments").select("room_id").where("attachment_id", "=", attachmentId).executeTakeFirst(),
     db.selectFrom("attachment_grants").select("room_id").distinct().where("source_attachment_id", "=", attachmentId).limit(19).execute(),
@@ -4924,12 +4938,41 @@ async function markAttachmentRepairNeeded(env: Env, attachmentId: string): Promi
   await Promise.all(rooms.map((roomId) => env.ROOMS.getByName(roomId).notifyAttachmentRepairAvailable(attachmentId)));
 }
 
+async function finishAttachmentRepairCleanup(env: Env, attachmentId: string, objectKey: string): Promise<boolean> {
+  const db = createDatabase(env.DB);
+  try { await objectStore(env).delete(objectKey); }
+  catch (error) {
+    await db.updateTable("attachment_repair_jobs").set({
+      attempts: sql<number>`attempts + 1`, last_error: (error instanceof Error ? error.message : "corrupt attachment deletion failed").slice(0, 500), updated_at: Date.now(),
+    }).where("attachment_id", "=", attachmentId).where("cleanup_pending", "=", 1).execute();
+    return false;
+  }
+  const cleared = await db.updateTable("attachment_repair_jobs").set({ cleanup_pending: 0, last_error: null, updated_at: Date.now() })
+    .where("attachment_id", "=", attachmentId).where("cleanup_pending", "=", 1).returning("attachment_id").executeTakeFirst();
+  if (!cleared) return false;
+  await notifyAttachmentRepairAvailable(env, attachmentId);
+  return true;
+}
+
+async function markAttachmentRepairNeeded(env: Env, attachmentId: string, expectedGeneration: number, corruptObjectKey?: string): Promise<void> {
+  const now = Date.now();
+  const inserted = await env.DB.prepare(`INSERT INTO attachment_repair_jobs
+      (attachment_id, detected_at, updated_at, lease_device_id, lease_token_hash, lease_expires_at, attempts, last_error, cleanup_pending)
+    SELECT attachment_id, ?2, ?2, NULL, NULL, NULL, 0, NULL, ?4 FROM attachments
+    WHERE attachment_id = ?1 AND repair_generation = ?3
+    ON CONFLICT(attachment_id) DO NOTHING RETURNING attachment_id`)
+    .bind(attachmentId, now, expectedGeneration, corruptObjectKey ? 1 : 0).first<{ attachment_id: string }>();
+  if (!inserted) return;
+  if (corruptObjectKey) await finishAttachmentRepairCleanup(env, attachmentId, corruptObjectKey);
+  else await notifyAttachmentRepairAvailable(env, attachmentId);
+}
+
 function attachmentRepairAccess(db: ReturnType<typeof createDatabase>, auth: AuthContext, attachmentId: string) {
   return db.selectFrom("attachment_repair_jobs as job")
     .innerJoin("attachments as a", "a.attachment_id", "job.attachment_id")
     .innerJoin("attachment_retention_acks as ack", (join) => join.onRef("ack.attachment_id", "=", "a.attachment_id").on("ack.device_id", "=", auth.deviceId))
     .select(["a.attachment_id", "a.object_key", "a.ciphertext_bytes", "a.ciphertext_sha256", "a.room_id", "job.lease_device_id", "job.lease_token_hash", "job.lease_expires_at"])
-    .where("a.attachment_id", "=", attachmentId).where("a.source_deleted_at", "is", null)
+    .where("a.attachment_id", "=", attachmentId).where("a.source_deleted_at", "is", null).where("job.cleanup_pending", "=", 0)
     .where((eb) => eb.or([
       eb.exists(eb.selectFrom("room_members as source_rm").select("source_rm.room_id")
         .whereRef("source_rm.room_id", "=", "a.room_id").where("source_rm.user_id", "=", auth.userId).where("source_rm.removed_at", "is", null)),
@@ -4947,7 +4990,7 @@ async function attachmentRepairJobs(request: Request, env: Env, auth: AuthContex
     .innerJoin("attachments as a", "a.attachment_id", "job.attachment_id")
     .innerJoin("attachment_retention_acks as ack", (join) => join.onRef("ack.attachment_id", "=", "a.attachment_id").on("ack.device_id", "=", auth.deviceId))
     .select(["a.attachment_id", "a.ciphertext_bytes", "a.ciphertext_sha256", "job.detected_at"])
-    .where("a.ciphertext_sha256", "is not", null).where("a.source_deleted_at", "is", null)
+    .where("a.ciphertext_sha256", "is not", null).where("a.source_deleted_at", "is", null).where("job.cleanup_pending", "=", 0)
     .where((eb) => eb.or([eb("job.lease_expires_at", "is", null), eb("job.lease_expires_at", "<=", now), eb("job.lease_device_id", "=", auth.deviceId)]))
     .where((eb) => eb.or([
       eb.exists(eb.selectFrom("room_members as source_rm").select("source_rm.room_id")
@@ -4988,8 +5031,8 @@ async function uploadAttachmentRepair(request: Request, env: Env, auth: AuthCont
   const token = request.headers.get("x-repair-token"); const declaredSize = Number(request.headers.get("content-length"));
   if (!token || token.length > 128) throw new HttpError(400, "Repair token required", "invalid_repair_lease");
   if (!request.body || !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > MAX_ATTACHMENT) throw new HttpError(411, "Valid Content-Length required", "length_required");
-  const db = createDatabase(env.DB); const row = await attachmentRepairAccess(db, auth, id).executeTakeFirst();
-  if (!row || row.lease_device_id !== auth.deviceId || row.lease_token_hash !== await sha256(token) || !row.lease_expires_at || row.lease_expires_at <= Date.now()) {
+  const db = createDatabase(env.DB); const tokenHash = await sha256(token); const row = await attachmentRepairAccess(db, auth, id).executeTakeFirst();
+  if (!row || row.lease_device_id !== auth.deviceId || row.lease_token_hash !== tokenHash || !row.lease_expires_at || row.lease_expires_at <= Date.now()) {
     throw new HttpError(409, "Attachment repair lease is missing or stale", "invalid_repair_lease");
   }
   if (!row.ciphertext_sha256) throw new HttpError(409, "Legacy attachment has no verifiable digest", "attachment_repair_unverified");
@@ -5015,8 +5058,18 @@ async function uploadAttachmentRepair(request: Request, env: Env, auth: AuthCont
       const existing = await objectStore(env).head(row.object_key);
       if (!existing || existing.size !== row.ciphertext_bytes || existing.metadata.sha256 !== row.ciphertext_sha256) throw new Error("Object-store key was recreated with conflicting bytes");
     }
-    const completed = await db.deleteFrom("attachment_repair_jobs").where("attachment_id", "=", id).where("lease_device_id", "=", auth.deviceId).where("lease_token_hash", "=", await sha256(token)).executeTakeFirst();
-    if (completed.numDeletedRows !== 1n) {
+    const completed = await env.DB.batch([
+      env.DB.prepare(`UPDATE attachments SET repair_generation = repair_generation + 1
+        WHERE attachment_id = ?1 AND EXISTS (
+          SELECT 1 FROM attachment_repair_jobs WHERE attachment_id = ?1 AND lease_device_id = ?2 AND lease_token_hash = ?3 AND cleanup_pending = 0
+        )`).bind(id, auth.deviceId, tokenHash),
+      env.DB.prepare(`DELETE FROM attachment_repair_jobs
+        WHERE attachment_id = ?1 AND lease_device_id = ?2 AND lease_token_hash = ?3 AND cleanup_pending = 0
+          AND EXISTS (SELECT 1 FROM attachments WHERE attachment_id = ?1)`).bind(id, auth.deviceId, tokenHash),
+    ]);
+    const advanced = Number(completed[0].meta.changes ?? 0); const removed = Number(completed[1].meta.changes ?? 0);
+    if (advanced !== removed) throw new Error("Attachment repair generation and job completion diverged");
+    if (advanced !== 1) {
       // Retention/account deletion may have removed the logical attachment
       // while this bounded upload was in flight. Never leave our new R2 write
       // behind as an untracked, quota-free orphan.
@@ -5092,14 +5145,14 @@ async function downloadAttachment(request: Request, env: Env, auth: AuthContext,
   const original = await db.selectFrom("attachments as a")
     .innerJoin("room_members as rm", "rm.room_id", "a.room_id")
     .leftJoin("attachment_repair_jobs as repair", "repair.attachment_id", "a.attachment_id")
-    .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256", "repair.attachment_id as repair_attachment_id"])
+    .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256", "a.repair_generation", "repair.attachment_id as repair_attachment_id"])
     .where("a.attachment_id", "=", id).where("a.source_deleted_at", "is", null)
     .where("rm.user_id", "=", auth.userId).where("rm.removed_at", "is", null).executeTakeFirst();
   const row = original ?? await db.selectFrom("attachment_grants as g")
     .innerJoin("attachments as a", "a.attachment_id", "g.source_attachment_id")
     .innerJoin("room_members as rm", "rm.room_id", "g.room_id")
     .leftJoin("attachment_repair_jobs as repair", "repair.attachment_id", "a.attachment_id")
-    .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256", "repair.attachment_id as repair_attachment_id"])
+    .select(["a.attachment_id", "a.object_key", "a.uploader_user_id", "a.ciphertext_bytes", "a.ciphertext_sha256", "a.repair_generation", "repair.attachment_id as repair_attachment_id"])
     .where("g.grant_id", "=", id).where("rm.user_id", "=", auth.userId).where("rm.removed_at", "is", null).executeTakeFirst();
   if (!row) throw new HttpError(404, "Attachment not found", "not_found");
   if (row.repair_attachment_id) {
@@ -5109,14 +5162,13 @@ async function downloadAttachment(request: Request, env: Env, auth: AuthContext,
   if (!object?.body) {
     const deletion = await db.selectFrom("attachment_deletions").select("delete_event_id").where("attachment_id", "=", row.attachment_id).executeTakeFirst();
     if (deletion) await processPendingAttachmentDeletions(env, deletion.delete_event_id);
-    else await markAttachmentRepairNeeded(env, row.attachment_id);
+    else await markAttachmentRepairNeeded(env, row.attachment_id, row.repair_generation);
     if (deletion) throw new HttpError(404, "Attachment not found", "not_found");
     throw new HttpError(503, "Attachment ciphertext is temporarily unavailable and queued for device repair", row.ciphertext_sha256 ? "attachment_repair_pending" : "attachment_repair_unverified", { "retry-after": "30" });
   }
   if (object.size !== row.ciphertext_bytes || (row.ciphertext_sha256 && object.metadata.sha256 !== row.ciphertext_sha256)) {
     await object.body.cancel().catch(() => undefined);
-    await objectStore(env).delete(row.object_key);
-    await markAttachmentRepairNeeded(env, row.attachment_id);
+    await markAttachmentRepairNeeded(env, row.attachment_id, row.repair_generation, row.object_key);
     throw new HttpError(503, "Attachment ciphertext failed integrity metadata validation and is queued for device repair", "attachment_repair_pending", { "retry-after": "30" });
   }
   const headers = new Headers({ "content-type": "application/octet-stream", etag: object.entityTag, "accept-ranges": "bytes", "cache-control": "private, max-age=31536000, immutable" });
@@ -5343,11 +5395,32 @@ async function acknowledgeArchiveSegmentRetention(env: Env, auth: AuthContext, s
   return json({ segment_id: segmentId, room_id: segment.room_id });
 }
 
-async function markArchiveRepairNeeded(env: Env, segmentId: string, roomId: RoomId): Promise<void> {
-  const now = Date.now(); const inserted = await createDatabase(env.DB).insertInto("archive_segment_repair_jobs").values({
-    segment_id: segmentId, detected_at: now, updated_at: now, lease_device_id: null, lease_token_hash: null, lease_expires_at: null, attempts: 0, last_error: null,
-  }).onConflict((conflict) => conflict.column("segment_id").doNothing()).returning("segment_id").executeTakeFirst();
-  if (inserted) await env.ROOMS.getByName(roomId).notifyArchiveRepairAvailable(segmentId);
+async function finishArchiveRepairCleanup(env: Env, segmentId: string, roomId: RoomId, objectKey: string): Promise<boolean> {
+  const db = createDatabase(env.DB);
+  try { await objectStore(env).delete(objectKey); }
+  catch (error) {
+    await db.updateTable("archive_segment_repair_jobs").set({
+      attempts: sql<number>`attempts + 1`, last_error: (error instanceof Error ? error.message : "corrupt archive deletion failed").slice(0, 500), updated_at: Date.now(),
+    }).where("segment_id", "=", segmentId).where("cleanup_pending", "=", 1).execute();
+    return false;
+  }
+  const cleared = await db.updateTable("archive_segment_repair_jobs").set({ cleanup_pending: 0, last_error: null, updated_at: Date.now() })
+    .where("segment_id", "=", segmentId).where("cleanup_pending", "=", 1).returning("segment_id").executeTakeFirst();
+  if (!cleared) return false;
+  await env.ROOMS.getByName(roomId).notifyArchiveRepairAvailable(segmentId);
+  return true;
+}
+
+async function markArchiveRepairNeeded(env: Env, segmentId: string, roomId: RoomId, expectedGeneration: number, corruptObjectKey?: string): Promise<void> {
+  const now = Date.now(); const inserted = await env.DB.prepare(`INSERT INTO archive_segment_repair_jobs
+      (segment_id, detected_at, updated_at, lease_device_id, lease_token_hash, lease_expires_at, attempts, last_error, cleanup_pending)
+    SELECT segment_id, ?2, ?2, NULL, NULL, NULL, 0, NULL, ?4 FROM archive_segments
+    WHERE segment_id = ?1 AND repair_generation = ?3
+    ON CONFLICT(segment_id) DO NOTHING RETURNING segment_id`)
+    .bind(segmentId, now, expectedGeneration, corruptObjectKey ? 1 : 0).first<{ segment_id: string }>();
+  if (!inserted) return;
+  if (corruptObjectKey) await finishArchiveRepairCleanup(env, segmentId, roomId, corruptObjectKey);
+  else await env.ROOMS.getByName(roomId).notifyArchiveRepairAvailable(segmentId);
 }
 
 function archiveRepairAccess(db: ReturnType<typeof createDatabase>, auth: AuthContext, segmentId: string) {
@@ -5357,7 +5430,7 @@ function archiveRepairAccess(db: ReturnType<typeof createDatabase>, auth: AuthCo
     .innerJoin("archive_segment_retention_acks as ack", (join) => join.onRef("ack.segment_id", "=", "s.segment_id").on("ack.device_id", "=", auth.deviceId))
     .innerJoin("room_members as rm", "rm.room_id", "s.room_id")
     .select(["s.segment_id", "s.room_id", "s.start_seq", "s.end_seq", "s.object_key", "s.byte_size", "s.ciphertext_sha256", "job.lease_device_id", "job.lease_token_hash", "job.lease_expires_at"])
-    .where("s.segment_id", "=", segmentId).whereRef("s.start_seq", ">", "r.retention_floor_seq")
+    .where("s.segment_id", "=", segmentId).whereRef("s.start_seq", ">", "r.retention_floor_seq").where("job.cleanup_pending", "=", 0)
     .where("rm.user_id", "=", auth.userId).where("rm.removed_at", "is", null);
 }
 
@@ -5371,7 +5444,7 @@ async function archiveRepairJobs(request: Request, env: Env, auth: AuthContext):
     .innerJoin("archive_segment_retention_acks as ack", (join) => join.onRef("ack.segment_id", "=", "s.segment_id").on("ack.device_id", "=", auth.deviceId))
     .innerJoin("room_members as rm", "rm.room_id", "s.room_id")
     .select(["s.segment_id", "s.room_id", "s.byte_size", "s.ciphertext_sha256", "job.detected_at"])
-    .where("s.ciphertext_sha256", "is not", null).whereRef("s.start_seq", ">", "r.retention_floor_seq")
+    .where("s.ciphertext_sha256", "is not", null).whereRef("s.start_seq", ">", "r.retention_floor_seq").where("job.cleanup_pending", "=", 0)
     .where("rm.user_id", "=", auth.userId).where("rm.removed_at", "is", null)
     .where((eb) => eb.or([eb("job.lease_expires_at", "is", null), eb("job.lease_expires_at", "<=", now), eb("job.lease_device_id", "=", auth.deviceId)]))
     .orderBy("s.segment_id").limit(101);
@@ -5407,8 +5480,8 @@ async function uploadArchiveRepair(request: Request, env: Env, auth: AuthContext
   const token = request.headers.get("x-repair-token"); const declaredSize = Number(request.headers.get("content-length"));
   if (!token || token.length > 128) throw new HttpError(400, "Repair token required", "invalid_repair_lease");
   if (!request.body || !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > MAX_SEGMENT) throw new HttpError(411, "Valid Content-Length required", "length_required");
-  const db = createDatabase(env.DB); const row = await archiveRepairAccess(db, auth, segmentId).executeTakeFirst();
-  if (!row || row.lease_device_id !== auth.deviceId || row.lease_token_hash !== await sha256(token) || !row.lease_expires_at || row.lease_expires_at <= Date.now()) throw new HttpError(409, "Archive repair lease is missing or stale", "invalid_repair_lease");
+  const db = createDatabase(env.DB); const tokenHash = await sha256(token); const row = await archiveRepairAccess(db, auth, segmentId).executeTakeFirst();
+  if (!row || row.lease_device_id !== auth.deviceId || row.lease_token_hash !== tokenHash || !row.lease_expires_at || row.lease_expires_at <= Date.now()) throw new HttpError(409, "Archive repair lease is missing or stale", "invalid_repair_lease");
   if (!row.ciphertext_sha256) throw new HttpError(409, "Legacy archive segment has no verifiable digest", "archive_repair_unverified");
   if (declaredSize !== row.byte_size) throw new HttpError(400, "Archive segment length mismatch", "invalid_segment_length");
   const digest = fromB64url(row.ciphertext_sha256);
@@ -5432,9 +5505,18 @@ async function uploadArchiveRepair(request: Request, env: Env, auth: AuthContext
       const existing = await objectStore(env).head(row.object_key);
       if (!existing || existing.size !== row.byte_size || existing.metadata.sha256 !== row.ciphertext_sha256) throw new Error("Object-store archive key was recreated with conflicting bytes");
     }
-    const completed = await db.deleteFrom("archive_segment_repair_jobs").where("segment_id", "=", segmentId)
-      .where("lease_device_id", "=", auth.deviceId).where("lease_token_hash", "=", await sha256(token)).executeTakeFirst();
-    if (completed.numDeletedRows !== 1n) {
+    const completed = await env.DB.batch([
+      env.DB.prepare(`UPDATE archive_segments SET repair_generation = repair_generation + 1
+        WHERE segment_id = ?1 AND EXISTS (
+          SELECT 1 FROM archive_segment_repair_jobs WHERE segment_id = ?1 AND lease_device_id = ?2 AND lease_token_hash = ?3 AND cleanup_pending = 0
+        )`).bind(segmentId, auth.deviceId, tokenHash),
+      env.DB.prepare(`DELETE FROM archive_segment_repair_jobs
+        WHERE segment_id = ?1 AND lease_device_id = ?2 AND lease_token_hash = ?3 AND cleanup_pending = 0
+          AND EXISTS (SELECT 1 FROM archive_segments WHERE segment_id = ?1)`).bind(segmentId, auth.deviceId, tokenHash),
+    ]);
+    const advanced = Number(completed[0].meta.changes ?? 0); const removed = Number(completed[1].meta.changes ?? 0);
+    if (advanced !== removed) throw new Error("Archive repair generation and job completion diverged");
+    if (advanced !== 1) {
       if (stored) await objectStore(env).delete(row.object_key);
       throw new HttpError(409, "Archive segment was collected while repair was in progress", "invalid_repair_lease");
     }
@@ -5450,7 +5532,7 @@ async function downloadSegment(request: Request, env: Env, auth: AuthContext, ro
   const db = createDatabase(env.DB);
   const row = await db.selectFrom("archive_segments as s").innerJoin("rooms as r", "r.room_id", "s.room_id")
     .leftJoin("archive_segment_repair_jobs as repair", "repair.segment_id", "s.segment_id")
-    .select(["s.object_key", "s.byte_size", "s.ciphertext_sha256", "s.start_seq", "r.retention_floor_seq", "r.created_by", "repair.segment_id as repair_segment_id"])
+    .select(["s.object_key", "s.byte_size", "s.ciphertext_sha256", "s.repair_generation", "s.start_seq", "r.retention_floor_seq", "r.created_by", "repair.segment_id as repair_segment_id"])
     .where("s.segment_id", "=", segmentId).where("s.room_id", "=", roomId).executeTakeFirst();
   if (!row) throw new HttpError(404, "Segment not found", "not_found");
   if (row.start_seq <= row.retention_floor_seq) throw new HttpError(410, "Archive segment was intentionally removed", "history_intentionally_deleted");
@@ -5459,12 +5541,12 @@ async function downloadSegment(request: Request, env: Env, auth: AuthContext, ro
   }
   const object = await objectStore(env).get(row.object_key, { rangeHeader: request.headers.get("range") ?? undefined });
   if (!object?.body) {
-    await markArchiveRepairNeeded(env, segmentId, roomId);
+    await markArchiveRepairNeeded(env, segmentId, roomId, row.repair_generation);
     throw new HttpError(503, "Archive segment is temporarily unavailable and queued for device repair", row.ciphertext_sha256 ? "archive_repair_pending" : "archive_repair_unverified", { "retry-after": "30" });
   }
   if (object.size !== row.byte_size || (row.ciphertext_sha256 && object.metadata.sha256 !== row.ciphertext_sha256)) {
-    await object.body.cancel().catch(() => undefined); await objectStore(env).delete(row.object_key);
-    await markArchiveRepairNeeded(env, segmentId, roomId);
+    await object.body.cancel().catch(() => undefined);
+    await markArchiveRepairNeeded(env, segmentId, roomId, row.repair_generation, row.object_key);
     throw new HttpError(503, "Archive segment failed integrity metadata validation and is queued for device repair", "archive_repair_pending", { "retry-after": "30" });
   }
   const headers = new Headers({ "content-type": "application/octet-stream", "accept-ranges": "bytes", etag: object.entityTag });
@@ -5472,6 +5554,45 @@ async function downloadSegment(request: Request, env: Env, auth: AuthContext, ro
   if (range) headers.set("content-range", `bytes ${range.offset}-${range.offset + range.length - 1}/${object.size}`);
   headers.set("content-length", String(range?.length ?? object.size));
   return new Response(object.body, { status: range ? 206 : 200, headers });
+}
+
+export async function processPendingRepairObjectCleanups(env: Env, now = Date.now()): Promise<{ attempted: number; completed: number }> {
+  const db = createDatabase(env.DB); const cutoff = now - REPAIR_OBJECT_CLEANUP_RETRY_MS;
+  const [attachments, archives, avatars] = await Promise.all([
+    db.selectFrom("attachment_repair_jobs as job").innerJoin("attachments as a", "a.attachment_id", "job.attachment_id")
+      .select(["job.attachment_id as id", "a.object_key"]).where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
+      .orderBy("job.updated_at").orderBy("job.attachment_id").limit(REPAIR_OBJECT_CLEANUP_BATCH).execute(),
+    db.selectFrom("archive_segment_repair_jobs as job").innerJoin("archive_segments as s", "s.segment_id", "job.segment_id")
+      .select(["job.segment_id as id", "s.object_key", "s.room_id"]).where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
+      .orderBy("job.updated_at").orderBy("job.segment_id").limit(REPAIR_OBJECT_CLEANUP_BATCH).execute(),
+    db.selectFrom("profile_avatar_repair_jobs as job").select(["job.user_id as id", "job.object_key"])
+      .where("job.cleanup_pending", "=", 1).where("job.updated_at", "<=", cutoff)
+      .orderBy("job.updated_at").orderBy("job.user_id").limit(REPAIR_OBJECT_CLEANUP_BATCH).execute(),
+  ]);
+  const jobs = [
+    ...attachments.map((row) => ({ kind: "attachment" as const, ...row })),
+    ...archives.map((row) => ({ kind: "archive" as const, ...row })),
+    ...avatars.map((row) => ({ kind: "avatar" as const, ...row })),
+  ].slice(0, REPAIR_OBJECT_CLEANUP_BATCH);
+  let attempted = 0; let completed = 0;
+  for (const job of jobs) {
+    const table = job.kind === "attachment" ? "attachment_repair_jobs" : job.kind === "archive" ? "archive_segment_repair_jobs" : "profile_avatar_repair_jobs";
+    const idColumn = job.kind === "attachment" ? "attachment_id" : job.kind === "archive" ? "segment_id" : "user_id";
+    const objectCondition = job.kind === "avatar" ? " AND object_key = ?4" : "";
+    const claim = env.DB.prepare(`UPDATE ${table} SET updated_at = ?1
+      WHERE ${idColumn} = ?2 AND cleanup_pending = 1 AND updated_at <= ?3${objectCondition}
+      RETURNING ${idColumn} AS id`);
+    const claimed = await (job.kind === "avatar" ? claim.bind(now, job.id, cutoff, job.object_key) : claim.bind(now, job.id, cutoff)).first<{ id: string }>();
+    if (!claimed) continue;
+    attempted += 1;
+    const done = job.kind === "attachment"
+      ? await finishAttachmentRepairCleanup(env, job.id, job.object_key)
+      : job.kind === "archive"
+        ? await finishArchiveRepairCleanup(env, job.id, job.room_id as RoomId, job.object_key)
+        : await finishProfileAvatarRepairCleanup(env, job.id as UserId, job.object_key);
+    if (done) completed += 1;
+  }
+  return { attempted, completed };
 }
 
 async function pushSubscribe(request: Request, env: Env, auth: AuthContext): Promise<Response> {
@@ -5912,6 +6033,9 @@ export default {
       }),
       processProfileAvatarDeletions(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "deleted replaced profile avatars", count }));
+      }),
+      processPendingRepairObjectCleanups(env).then((result) => {
+        if (result.attempted) console.log(JSON.stringify({ message: "processed corrupt repair object cleanup", ...result }));
       }),
       cleanupExpiredKeyPackages(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "deleted expired MLS KeyPackages", count }));
