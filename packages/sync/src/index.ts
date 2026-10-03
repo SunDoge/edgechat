@@ -1,5 +1,5 @@
 import type { LocalDatabase } from "@edgechat/db";
-import { assertCompatibleServerProtocol, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserId, type UserProfile } from "@edgechat/protocol";
+import { assertCompatibleServerProtocol, isMlsMembershipCommitEventType, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserId, type UserProfile } from "@edgechat/protocol";
 import { decodeSegmentChunk, decodeSegmentHeader, decodeSegmentIndex, rangesForSequences, SEGMENT_HEADER_BYTES } from "./archive";
 
 export class ApiError extends Error {
@@ -1065,7 +1065,7 @@ export class SyncEngine extends EventTarget {
       // A failed membership Commit must stop the room: later epochs cannot be
       // decrypted safely. Malformed application events are quarantined so one
       // authenticated but buggy/malicious sender cannot poison global sync.
-      if (event.type === "control.group.commit" || event.type === "control.device.revoke"
+      if (isMlsMembershipCommitEventType(event.type)
         || error instanceof LocalStagingIntegrityError || error instanceof LocalProjectionPersistenceError) throw error;
       const message = error instanceof Error ? error.message : "Encrypted event processing failed";
       await this.db.quarantineEvent(event, message);

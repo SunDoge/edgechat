@@ -344,6 +344,24 @@ describe("SyncEngine event ingestion", () => {
     expect(markProcessed).not.toHaveBeenCalled();
   });
 
+  it.each(["control.group.commit", "control.device.add", "control.device.revoke"] as const)("never quarantines or advances a failed %s MLS epoch transition", async (type) => {
+    const roomId = "!mls-commit-failure:example.com" as const;
+    const event = { event_id: `$mls-${type.replaceAll(".", "-")}:example.com`, room_id: roomId, seq: 1, sender: "@alice:example.com", device_id: "device-1",
+      type, created_at: 1, ciphertext: "ciphertext", metadata: { mls_epoch: 2 }, signature: "signature" } as RoomEvent;
+    const quarantineEvent = vi.fn(async () => undefined); const markProcessed = vi.fn(async () => undefined);
+    const db = {
+      roomSequenceState: async () => ({ room_id: roomId, baseline_seq: 0, processed_through_seq: 0 }),
+      hasMessage: async () => false, quarantineEvent, markProcessed,
+    } as unknown as LocalDatabase;
+    const failure = new Error("MLS transition failed");
+    const engine = new SyncEngine(new ApiClient(""), db, async () => { throw failure; });
+    const ingest = (engine as unknown as { ingest: (value: RoomEvent) => Promise<void> }).ingest.bind(engine);
+
+    await expect(ingest(event)).rejects.toBe(failure);
+    expect(quarantineEvent).not.toHaveBeenCalled();
+    expect(markProcessed).not.toHaveBeenCalled();
+  });
+
   it("does not replay events already represented by a newly joined device state", async () => {
     const decrypt = vi.fn(async () => null);
     const db = {

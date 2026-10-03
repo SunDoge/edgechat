@@ -173,6 +173,15 @@ export const roomEventTypes = [
 ] as const;
 export type RoomEventType = typeof roomEventTypes[number];
 
+const mlsMembershipCommitEventTypes: readonly RoomEventType[] = [
+  "control.group.commit", "control.device.add", "control.device.revoke",
+];
+
+/** Events that advance the MLS group epoch and therefore cannot be skipped. */
+export function isMlsMembershipCommitEventType(value: unknown): value is "control.group.commit" | "control.device.add" | "control.device.revoke" {
+  return typeof value === "string" && mlsMembershipCommitEventTypes.includes(value as RoomEventType);
+}
+
 export type ClientEvent = {
   event_id: EventId;
   room_id: RoomId;

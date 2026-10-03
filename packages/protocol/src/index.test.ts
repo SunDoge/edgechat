@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
+import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -84,6 +84,14 @@ describe("federation-ready identifiers", () => {
     expect(isRoomEventEnvelope({ ...event, metadata: { nested: { plaintext: true } } })).toBe(false);
     expect(isRoomEventEnvelope({ ...event, acceptance_receipt: { version: 1, key_id: "v1", room_id: event.room_id, seq: 8, event_id: event.event_id, event_hash: "hash", retention_generation: 1, accepted_at: 2, mac: "mac" } })).toBe(false);
     expect(isRoomEventEnvelope({ ...event, acceptance_receipt: { version: 1, key_id: "v1", room_id: event.room_id, seq: event.seq, event_id: event.event_id, event_hash: "hash", retention_generation: 1, accepted_at: 2, mac: "mac" } })).toBe(true);
+  });
+
+  it("classifies every epoch-advancing MLS membership event as unskippable", () => {
+    expect(isMlsMembershipCommitEventType("control.group.commit")).toBe(true);
+    expect(isMlsMembershipCommitEventType("control.device.add")).toBe(true);
+    expect(isMlsMembershipCommitEventType("control.device.revoke")).toBe(true);
+    expect(isMlsMembershipCommitEventType("control.room.profile")).toBe(false);
+    expect(isMlsMembershipCommitEventType("message.text")).toBe(false);
   });
 });
 
