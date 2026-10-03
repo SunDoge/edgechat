@@ -18,7 +18,8 @@
     "test:pwa": "node scripts/pwa-offline.mjs",
     "test:pwa:firefox": "EDGECHAT_BROWSER=firefox node scripts/pwa-offline.mjs",
     "test:pwa:webkit": "EDGECHAT_BROWSER=webkit node scripts/pwa-offline.mjs",
-    "test:pwa:matrix": "pnpm run test:pwa && pnpm run test:pwa:firefox && pnpm run test:pwa:webkit"
+    "test:pwa:matrix": "pnpm run test:pwa && pnpm run test:pwa:firefox && pnpm run test:pwa:webkit",
+    "smoke:tunnel": "node scripts/tunnel-smoke.mjs"
   },
   "dependencies": {
     "@edgechat/db": "workspace:*",

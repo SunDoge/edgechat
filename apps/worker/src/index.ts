@@ -2574,10 +2574,10 @@ async function createRoom(request: Request, env: Env, auth: AuthContext): Promis
   const directPeer = kind === "direct" && purpose === "chat" && members.length === 2
     ? members.find((userId) => userId !== auth.userId) ?? null : null;
   const createsMessageRequest = Boolean(directPeer && auth.actor === "user" && !(await hasEstablishedRelationship(env, auth.userId, directPeer)));
-  const welcome = stringField(body, "mls_welcome", 1_000_000);
+  const welcome = purpose === "saved" && body.mls_welcome === "" ? "" : stringField(body, "mls_welcome", 1_000_000);
   const ratchetTree = stringField(body, "mls_ratchet_tree", 1_000_000);
   const epoch = Number(body.mls_epoch);
-  if (!Number.isInteger(epoch) || epoch < 1) throw new HttpError(400, "Invalid MLS epoch", "invalid_mls_epoch");
+  if (!Number.isInteger(epoch) || epoch < (purpose === "saved" ? 0 : 1)) throw new HttpError(400, "Invalid MLS epoch", "invalid_mls_epoch");
   const recipients = Array.isArray(body.mls_recipients) ? body.mls_recipients.filter((value): value is string => typeof value === "string") : [];
   const claimIds = Array.isArray(body.mls_claim_ids) ? body.mls_claim_ids.filter((value): value is string => typeof value === "string") : [];
   const activeDevices = await db.selectFrom("devices").select(["device_id", "user_id"]).where("user_id", "in", members).where("kind", "=", "user").where("revoked_at", "is", null).execute();

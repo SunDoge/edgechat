@@ -1,6 +1,12 @@
 const PRECACHE_SENTINEL = '["__EDGECHAT_PRECACHE__"]';
 const BUILD_SENTINEL = "__BUILD_ID__";
 
+export function precacheAssetPaths(fileNames: readonly string[]): string[] {
+  return fileNames
+    .filter((fileName) => fileName.startsWith("assets/") && !fileName.endsWith(".map") && !fileName.includes("semantic-worker"))
+    .map((fileName) => `/${fileName}`);
+}
+
 export function renderServiceWorker(source: string, assetPaths: readonly string[], buildId: string): string {
   if (!/^[a-f0-9]{12}$/.test(buildId)) throw new Error("Invalid service worker build identifier");
   if (source.split(PRECACHE_SENTINEL).length !== 2 || source.split(BUILD_SENTINEL).length !== 2) {

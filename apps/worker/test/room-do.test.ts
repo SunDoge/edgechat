@@ -27,6 +27,13 @@ function event(id: string, sender = alice, epoch = 1): ClientEvent {
 }
 
 describe("RoomDurableObject", () => {
+  it("orders ciphertext in a creator-only epoch-zero MLS room", async () => {
+    const room = env.ROOMS.getByName(roomId);
+    await room.initialize(roomId, [{ user_id: alice, role: "owner" }], Date.now(), 0);
+    const accepted = await room.appendEvent(event("saved-at-epoch-zero", alice, 0), 0);
+    expect(accepted).toMatchObject({ ok: true, event: { seq: 1, metadata: { mls_epoch: 0 } } });
+  });
+
   it("assigns monotonic sequence numbers and deduplicates", async () => {
     const room = env.ROOMS.getByName(roomId);
     await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());

@@ -646,6 +646,39 @@ describe("SyncEngine event ingestion", () => {
     expect(resets).toEqual([{ room_id: roomId }]);
   });
 
+  it("keeps exponential backoff when sockets only open briefly", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      constructor() { sockets.push(this); queueMicrotask(() => { this.readyState = 1; this.onopen?.(); }); }
+      close(): void { this.readyState = 3; }
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient;
+    const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
+    const engine = new SyncEngine(api, db, async () => null, undefined, null);
+    const roomId = "!flapping-room-0001:example.com" as const;
+
+    await engine.start(); await engine.connectRoom(roomId); await Promise.resolve();
+    sockets[0].readyState = 3; sockets[0].onclose?.({ code: 1006 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(2);
+    await Promise.resolve();
+    sockets[1].readyState = 3; sockets[1].onclose?.({ code: 1006 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(3);
+
+    engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+  });
+
   it("serializes overlapping durable catch-up calls so the cursor cannot regress", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });

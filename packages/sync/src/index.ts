@@ -603,6 +603,8 @@ export function reconnectDelay(attempt: number): number {
   return Math.min(30_000, 500 * 2 ** Math.min(6, Math.max(1, attempt)));
 }
 
+export const STABLE_SOCKET_RESET_MS = 30_000;
+
 export class RoomSequenceGapError extends Error {
   constructor(public readonly roomId: RoomId, public readonly processedThrough: number, public readonly receivedSeq: number) {
     super(`Room ${roomId} requires ordered recovery for sequences ${processedThrough + 1}-${receivedSeq - 1}`);
@@ -643,6 +645,7 @@ export class SyncEngine extends EventTarget {
   private sockets = new Map<RoomId, WebSocket>();
   private reconnects = new Map<RoomId, number>();
   private reconnectTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
+  private stableSocketTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
   private connecting = new Map<RoomId, Promise<void>>();
   private desiredRooms = new Set<RoomId>();
   private disconnectedRooms = new Set<RoomId>();
@@ -728,6 +731,8 @@ export class SyncEngine extends EventTarget {
     this.networkEvents?.removeEventListener("online", this.onlineHandler);
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
+    for (const timer of this.stableSocketTimers.values()) clearTimeout(timer);
+    this.stableSocketTimers.clear();
     for (const timer of this.projectionRetryTimers.values()) clearTimeout(timer);
     this.projectionRetryTimers.clear();
     this.projectionRetryAttempts.clear();
@@ -801,7 +806,16 @@ export class SyncEngine extends EventTarget {
       if (this.sharePresence) url.searchParams.set("presence", "1");
       const socket = new WebSocket(url);
       this.sockets.set(roomId, socket);
-      socket.onopen = () => { this.reconnects.set(roomId, 0); this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: true } })); };
+      socket.onopen = () => {
+        const previous = this.stableSocketTimers.get(roomId);
+        if (previous) clearTimeout(previous);
+        const stable = setTimeout(() => {
+          if (this.sockets.get(roomId) === socket && socket.readyState === 1) this.reconnects.set(roomId, 0);
+          if (this.stableSocketTimers.get(roomId) === stable) this.stableSocketTimers.delete(roomId);
+        }, STABLE_SOCKET_RESET_MS);
+        this.stableSocketTimers.set(roomId, stable);
+        this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: true } }));
+      };
       socket.onmessage = (message) => {
         if (!this.running || this.sockets.get(roomId) !== socket) return;
         try {
@@ -826,6 +840,9 @@ export class SyncEngine extends EventTarget {
   private socketClosed(roomId: RoomId, socket: WebSocket, code: number): void {
     this.finishSocketProbe(roomId, socket, false);
     if (this.sockets.get(roomId) !== socket) return;
+    const stable = this.stableSocketTimers.get(roomId);
+    if (stable) clearTimeout(stable);
+    this.stableSocketTimers.delete(roomId);
     this.sockets.delete(roomId);
     this.dispatchEvent(new CustomEvent("presence-reset", { detail: { room_id: roomId } }));
     this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: false } }));
@@ -1002,6 +1019,9 @@ export class SyncEngine extends EventTarget {
     const timer = this.reconnectTimers.get(roomId);
     if (timer) clearTimeout(timer);
     this.reconnectTimers.delete(roomId);
+    const stable = this.stableSocketTimers.get(roomId);
+    if (stable) clearTimeout(stable);
+    this.stableSocketTimers.delete(roomId);
     const socket = this.sockets.get(roomId);
     this.sockets.delete(roomId);
     socket?.close(1000, "room disconnected");

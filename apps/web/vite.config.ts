@@ -3,7 +3,7 @@ import tailwindcss from "@tailwindcss/vite";
 import solid from "vite-plugin-solid";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { renderServiceWorker } from "./build-service-worker.ts";
+import { precacheAssetPaths, renderServiceWorker } from "./build-service-worker.ts";
 
 const ONNX_WASM_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/ort-wasm-simd-threaded.asyncify.wasm";
 
@@ -24,9 +24,7 @@ function buildServiceWorker(): Plugin {
     apply: "build",
     async generateBundle(_options, bundle) {
       const source = await readFile(new URL("./public/sw.js", import.meta.url), "utf8");
-      const assets = Object.keys(bundle)
-        .filter((fileName) => fileName.startsWith("assets/") && !fileName.endsWith(".map"))
-        .map((fileName) => `/${fileName}`);
+      const assets = precacheAssetPaths(Object.keys(bundle));
       const buildId = createHash("sha256").update(source).update("\0").update([...assets].sort().join("\0")).digest("hex").slice(0, 12);
       this.emitFile({ type: "asset", fileName: "sw.js", source: renderServiceWorker(source, assets, buildId) });
     },

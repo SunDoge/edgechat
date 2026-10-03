@@ -243,9 +243,6 @@ impl MlsClient {
             return Err(js("MLS group already exists or device group limit reached"));
         }
         let encoded: Vec<String> = serde_json::from_slice(key_packages_json).map_err(js)?;
-        if encoded.is_empty() {
-            return Err(js("MLS group requires another device"));
-        }
         let packages = encoded
             .iter()
             .map(|value| URL_SAFE_NO_PAD.decode(value).map_err(js))
@@ -256,13 +253,25 @@ impl MlsClient {
             .with_group_id(GroupId::from_slice(group_id))
             .build(&self.provider, &self.signer, self.credential.clone())
             .map_err(js)?;
-        let (_commit, welcome, _) = group
-            .add_members(&self.provider, &self.signer, &packages)
-            .map_err(js)?;
-        group.merge_pending_commit(&self.provider).map_err(js)?;
+        let welcome = if packages.is_empty() {
+            None
+        } else {
+            let (_commit, welcome, _) = group
+                .add_members(&self.provider, &self.signer, &packages)
+                .map_err(js)?;
+            group.merge_pending_commit(&self.provider).map_err(js)?;
+            Some(welcome)
+        };
         let tree: RatchetTreeIn = group.export_ratchet_tree().into();
         let output = CreateGroupOutput {
-            welcome: URL_SAFE_NO_PAD.encode(serialize_message(&welcome)?),
+            // A creator-only MLS group has no recipient and therefore no
+            // Welcome. It is used for the account's saved-messages room.
+            welcome: welcome
+                .as_ref()
+                .map(serialize_message)
+                .transpose()?
+                .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+                .unwrap_or_default(),
             ratchet_tree: URL_SAFE_NO_PAD.encode(tree.tls_serialize_detached().map_err(js)?),
             epoch: group.epoch().as_u64(),
         };
@@ -585,5 +594,21 @@ mod tests {
         assert_eq!(processed.sender_device_id, "@alice:example|alice-device");
         let restored = MlsClient::import_state(&charlie.export_state().unwrap()).unwrap();
         assert_eq!(restored.epoch(b"!room:example").unwrap(), 3);
+    }
+
+    #[test]
+    fn creator_only_group_supports_saved_messages() {
+        let mut alice = MlsClient::new(b"@alice:example|alice-device").unwrap();
+        let created: CreateGroupOutput = serde_json::from_slice(
+            &alice.create_group(b"!saved:example", b"[]").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(created.epoch, 0);
+        assert!(created.welcome.is_empty());
+        assert_eq!(alice.epoch(b"!saved:example").unwrap(), 0);
+        assert!(!alice.encrypt_message(b"!saved:example", b"private note").unwrap().is_empty());
+
+        let restored = MlsClient::import_state(&alice.export_state().unwrap()).unwrap();
+        assert_eq!(restored.epoch(b"!saved:example").unwrap(), 0);
     }
 }

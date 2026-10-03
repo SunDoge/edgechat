@@ -1,11 +1,16 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { renderServiceWorker } from "../build-service-worker";
+import { precacheAssetPaths, renderServiceWorker } from "../build-service-worker";
 
 const source = readFileSync(resolve(process.cwd(), "public/sw.js"), "utf8");
 
 describe("service worker application shell", () => {
+  it("does not prefetch the optional semantic-search worker", () => {
+    expect(precacheAssetPaths(["assets/index.js", "assets/semantic-worker-abc.js", "assets/index.js.map"]))
+      .toEqual(["/assets/index.js"]);
+  });
+
   it("injects a deterministic, versioned list of hashed build assets", () => {
     const rendered = renderServiceWorker(source, ["/assets/app-b.js", "/assets/app-a.css", "/assets/app-b.js"], "0123456789ab");
     expect(rendered).toContain('const CACHE = "edgechat-shell-0123456789ab"');

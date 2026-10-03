@@ -121,7 +121,10 @@ export class RoomDurableObject extends DurableObject<Env> {
       return { ok: true, event: existing };
     }
 
-    if (!Number.isInteger(expectedCurrentEpoch) || expectedCurrentEpoch < 1) return { ok: false, code: "invalid_epoch" };
+    // A creator-only MLS group starts at epoch 0. This is used by Saved
+    // Messages before a second device is linked; ordinary rooms still enter at
+    // epoch 1 because their creation path contains an MLS membership commit.
+    if (!Number.isInteger(expectedCurrentEpoch) || expectedCurrentEpoch < 0) return { ok: false, code: "invalid_epoch" };
     if (meta.mls_epoch === 0) {
       this.ctx.storage.sql.exec("UPDATE room_meta SET mls_epoch = ? WHERE room_id = ? AND mls_epoch = 0", expectedCurrentEpoch, meta.room_id);
       meta.mls_epoch = expectedCurrentEpoch;

@@ -7,6 +7,7 @@ import {
   IconArrowForwardUp,
   IconAlertTriangle,
   IconAddressBook,
+  IconBookmark,
   IconLock,
   IconMessageCircle,
   IconPaperclip,
@@ -19,7 +20,7 @@ import {
 import { LocalDatabase, LocalRestoreCommitUnknownError, type LocalComposerDraft, type LocalDeliveryReceipt, type LocalMessage, type LocalMessageExpiryPolicy, type LocalReactionSummary, type LocalReadReceipt, type LocalRetentionDays, type LocalRoomAttachmentCursor, type LocalRoomListActivity, type LocalRoomPreference, type OutboxItem, type RoomMembershipOutboxItem } from "@edgechat/db";
 import { decodeBase64Url, deviceFingerprint, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
 import { canonicalEventBytes, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isReadReceiptPayload, isRoomOwnerTransferPayload, isRoomProfilePayload, normalizeServerProtocol, serverSupports, type ClientEvent, type DeliveryReceiptPayload, type EventId, type MessageDeletePayload, type MessageEditPayload, type MessageExpiryPolicyPayload, type MessageExpirySeconds, type MessageId, type MessageReactionPayload, type MessageReference, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type ReadReceiptPayload, type RoomEvent, type RoomId, type RoomOwnerTransferPayload, type RoomProfileAvatar, type RoomProfilePayload, type TypingSocketFrame, type UserId, type UserProfile } from "@edgechat/protocol";
-import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
+import { ApiClient, ApiError, ArchiveCoordinator, ArchiveSegmentBuilder, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, LocalProjectionPersistenceError, LocalStagingIntegrityError, OutboxEngine, SyncEngine, type AccountRemovalTask, type ArchiveSegmentDescriptor, type DeviceLinkPreview, type DeviceRevocation, type InvitationPolicy, type RoomDeviceSigningKey, type ServerDevice, type ServerRoom, type SessionIdentity, type StorageUsage } from "@edgechat/sync";
 import { ChatComposer, ChatViewport, VirtualMessageList, type VirtualMessageListHandle } from "@edgechat/ui";
 import { clearIdentity, loadIdentity, saveIdentity } from "./vault";
 import { AuthScreen } from "./components/AuthScreen";
@@ -36,6 +37,8 @@ import { ForwardDialog } from "./components/ForwardDialog";
 import { avatarColor, initials, memberName, roomTitle, userName } from "./presenters";
 import { assertMessageEnvelope, attachmentEventTypeForFiles, createContactMessagePayload, createForwardPayload, createMessagePayload, messageAttachments, messageContacts, messageText, normalizeMessagePayload, quoteTextForMessage, quoteTextSnapshot, readImageDimensions, type AttachmentMetadata, type ContactIdentity, type MessagePayload } from "./media";
 import { LocalImageSemanticSearch } from "./semantic-search";
+import { semanticSearchEnabled as storedSemanticSearchEnabled, setSemanticSearchEnabled as persistSemanticSearchEnabled } from "./semantic-search-preference";
+import { roomAllowsReceipts } from "./message-request";
 import { replenishMlsKeyPackages } from "./key-package-replenishment";
 import { applyRoomMute, applyRoomPreferenceAction, defaultRoomPreference, organizedRooms, type RoomPreferenceAction } from "./room-preferences";
 import { createPortableBackupBlob, readPortableBackup, writePortableBackup } from "./portable-backup";
@@ -86,6 +89,7 @@ import { formatRoomActivityPreview } from "./room-list-preview";
 import { conversationExportFilename, streamConversationTranscript } from "./conversation-export";
 import { commitAcceptedControlEvent } from "./control-event-ack";
 import { MlsProjectionBarrier } from "./mls-projection-barrier";
+import { clearRoomSigningKeyPins, pinRoomSigningKeys, pinnedRoomSigningKey } from "./room-signing-key-pins";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -190,6 +194,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   const [incomingShare, setIncomingShare] = createSignal<StagedShare | null>(null);
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchResults, setSearchResults] = createSignal<LocalSearchResult[]>([]);
+  const [semanticSearchEnabled, setSemanticSearchEnabled] = createSignal(storedSemanticSearchEnabled(profileId));
   const [semanticStatus, setSemanticStatus] = createSignal<"idle" | "loading" | "ready" | "error">("idle");
   const [coverageComplete, setCoverageComplete] = createSignal(false);
   const [historyFocus, setHistoryFocus] = createSignal<HistoryFocus | null>(null);
@@ -208,7 +213,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   let identityRef: DeviceIdentity | null = null;
   let mlsRef: OpenMlsMessagingCore | null = null;
   let semanticRef: LocalImageSemanticSearch | null = null;
-  const roomSigningKeyRefreshes = new Map<RoomId, Promise<void>>();
+  const roomSigningKeyRefreshes = new Map<RoomId, Promise<RoomDeviceSigningKey[]>>();
   let semanticSearchTimer: number | undefined;
   let readReceiptTimer: number | undefined;
   let typingStopTimer: number | undefined;
@@ -509,16 +514,20 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function authenticateRoomEvent(event: RoomEvent): Promise<void> {
     try {
-      let key = await db.roomDeviceSigningKey(event.room_id, event.device_id);
+      let key = pinnedRoomSigningKey(profileId, event.room_id, event.device_id);
       if (!key) {
         let refresh = roomSigningKeyRefreshes.get(event.room_id);
         if (!refresh) {
-          refresh = api.roomSigningKeys(event.room_id).then(({ keys }) => db.saveRoomDeviceSigningKeys(event.room_id, keys));
+          refresh = api.roomSigningKeys(event.room_id).then(({ keys }) => {
+            pinRoomSigningKeys(profileId, event.room_id, keys);
+            return keys;
+          });
           roomSigningKeyRefreshes.set(event.room_id, refresh);
           void refresh.finally(() => { if (roomSigningKeyRefreshes.get(event.room_id) === refresh) roomSigningKeyRefreshes.delete(event.room_id); }).catch(() => undefined);
         }
-        await refresh;
-        key = await db.roomDeviceSigningKey(event.room_id, event.device_id);
+        const candidate = (await refresh).find((item) => item.device_id === event.device_id);
+        if (!candidate) throw new Error("message sender signing key is unavailable");
+        key = { ...candidate, room_id: event.room_id };
       }
       if (!key || key.user_id !== event.sender) throw new Error("message sender does not match the pinned room device identity");
       await verifyRoomEventSignature(event, key.signing_key);
@@ -563,8 +572,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function processEvent(event: RoomEvent) {
     const currentMls = mlsRef;
     if (!currentMls?.hasGroup(event.room_id)) {
-      if (mlsProjectionBarrier.isBlocked()) throw new LocalProjectionPersistenceError(new Error("Room MLS state is waiting for staged projection recovery"));
-      return null;
+      // Never advance the durable sequence over ciphertext that we cannot yet
+      // decrypt. A newly discovered room can race its MLS Welcome against the
+      // sync event; treating that event as processed would lose the local
+      // plaintext projection permanently.
+      throw new LocalProjectionPersistenceError(new Error(mlsProjectionBarrier.isBlocked()
+        ? "Room MLS state is waiting for staged projection recovery"
+        : "Room MLS state is not available yet"));
     }
     await authenticateRoomEvent(event);
     const isMembershipCommit = isMlsMembershipCommitEventType(event.type);
@@ -1171,7 +1185,6 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   createEffect(() => {
     const currentSession = session(); const currentIdentity = identity(); const currentMls = mls();
-    rooms().length;
     if (!currentSession || !currentIdentity || !currentMls) return;
     const engine = new SyncEngine(api, db, processEvent, async () => { await loadRooms(currentMls); }, undefined, resolveArchiveKey, presenceSharing(), db, archiveSegmentCache); syncRef = engine;
     let foregroundResumePending = false;
@@ -1318,7 +1331,12 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     engine.addEventListener("attachment-repair-available", attachmentRepairAvailable);
     engine.addEventListener("archive-repair-available", archiveRepairAvailable);
     navigator.serviceWorker?.addEventListener("message", pushSyncHint);
-    engine.addEventListener("quarantined", () => setNotice("一条无法验证的加密消息已隔离，后续消息仍会继续同步"));
+    engine.addEventListener("quarantined", (received) => {
+      const detail = (received as CustomEvent<{ event: RoomEvent; error: unknown }>).detail;
+      console.warn(JSON.stringify({ message: "encrypted room event quarantined", room_id: detail.event.room_id,
+        event_id: detail.event.event_id, error: detail.error instanceof Error ? detail.error.message : String(detail.error) }));
+      setNotice("一条无法验证的加密消息已隔离，后续消息仍会继续同步");
+    });
     const resumeVisibleSession = () => {
       if (document.visibilityState !== "visible" || !navigator.onLine || foregroundResumePending) return;
       foregroundResumePending = true;
@@ -1331,7 +1349,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const resumePersistedPage = (event: PageTransitionEvent) => { if (event.persisted) resumeVisibleSession(); };
     document.addEventListener("visibilitychange", resumeVisibleSession);
     window.addEventListener("pageshow", resumePersistedPage);
-    void engine.start().then(() => rooms().forEach((room) => { void engine.connectRoom(room.room_id); scheduleDeliveryReceipt(room.room_id); }));
+    void engine.start();
     peerRecoveryTimer = window.setInterval(() => { if (navigator.onLine) void processPeerRecoveries().catch(() => undefined); }, 30_000);
     onCleanup(() => {
       engine.removeEventListener("typing", typing); engine.removeEventListener("presence", presence); engine.removeEventListener("presence-snapshot", presenceSnapshot); engine.removeEventListener("presence-reset", presenceReset); engine.removeEventListener("repair-available", repairAvailable); engine.removeEventListener("attachment-repair-available", attachmentRepairAvailable); engine.removeEventListener("archive-repair-available", archiveRepairAvailable); engine.removeEventListener("synced", resumeRemovals); engine.removeEventListener("account-deletion", accountDeletion); engine.removeEventListener("device-revoked", deviceRevoked); engine.removeEventListener("session-expired", sessionExpired); engine.removeEventListener("room-unavailable", unavailableRoom); engine.removeEventListener("device-event", deviceEvent); engine.removeEventListener("realtime", realtime); engine.removeEventListener("error", syncError); engine.removeEventListener("local-projection", localProjection); engine.removeEventListener("history-transfer-required", historyTransferRequired); engine.removeEventListener("history-recovery-complete", historyRecoveryComplete); navigator.serviceWorker?.removeEventListener("message", pushSyncHint); document.removeEventListener("visibilitychange", resumeVisibleSession); window.removeEventListener("pageshow", resumePersistedPage); engine.stop();
@@ -1342,6 +1360,19 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (syncRef === engine) syncRef = null;
       window.clearInterval(peerRecoveryTimer); peerRecoveryTimer = undefined;
     });
+  });
+
+  // Room discovery must not replace an engine that may be halfway through an
+  // MLS projection. Connecting a newly discovered room is idempotent.
+  createEffect(() => {
+    const roomIds = rooms().map((room) => room.room_id);
+    if (!session() || !mls()) return;
+    const engine = syncRef;
+    if (!engine) return;
+    for (const roomId of roomIds) {
+      void engine.connectRoom(roomId);
+      scheduleDeliveryReceipt(roomId);
+    }
   });
 
   createEffect(() => {
@@ -1789,6 +1820,14 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     return savedRoomCreation;
   }
 
+  async function openSavedRoom(): Promise<void> {
+    if (localProjectionRecoveryActive()) { setNotice("请等待本机记录恢复后再打开已保存消息"); return; }
+    try {
+      const saved = await ensureSavedRoom();
+      setSelectedId(saved.room_id);
+    } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法打开已保存消息"); }
+  }
+
   async function saveMessage(source: LocalMessage): Promise<void> {
     if (savingMessageId() || selected()?.purpose === "saved") return;
     setSavingMessageId(source.message_id);
@@ -1996,6 +2035,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     try {
       await api.acceptMessageRequest(room.room_id);
       await loadRooms(mlsRef);
+      if (selectedRef === room.room_id) await refreshRoomProjection(room.room_id, true);
       void syncRef?.connectRoom(room.room_id).catch(() => undefined);
       setNotice("已接受消息请求");
     } catch (cause) { setNotice(cause instanceof Error ? cause.message : "无法接受消息请求"); }
@@ -2099,8 +2139,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function sendReadReceipt(roomId: RoomId, explicit = false): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
+    const room = rooms().find((candidate) => candidate.room_id === roomId);
     if ((!explicit && (document.visibilityState !== "visible" || selectedRef !== roomId)) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)
-      || mlsProjectionBarrier.isBlocked() || rooms().find((room) => room.room_id === roomId)?.leave_status === "pending") return;
+      || mlsProjectionBarrier.isBlocked() || !roomAllowsReceipts(room)) return;
     const latestSeq = await db.latestVisibleMessageSeq(roomId);
     const [state, queuedSeq] = await Promise.all([db.readState(roomId), db.latestQueuedReadReceiptSeq(roomId)]);
     if (latestSeq < 1 || latestSeq <= Math.max(state.last_receipt_sent_seq, queuedSeq)) return;
@@ -2127,7 +2168,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendDeliveryReceipt(roomId: RoomId): Promise<void> {
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     const room = rooms().find((candidate) => candidate.room_id === roomId);
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || mlsProjectionBarrier.isBlocked() || room?.blocked_by_me || room?.leave_status === "pending") return;
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId) || mlsProjectionBarrier.isBlocked() || !roomAllowsReceipts(room)) return;
     const latestSeq = await db.latestIncomingMessageSeq(roomId, currentSession.user_id);
     const [state, queuedSeq] = await Promise.all([db.deliveryState(roomId), db.latestQueuedDeliveryReceiptSeq(roomId)]);
     if (latestSeq < 1 || latestSeq <= Math.max(state.last_receipt_sent_seq, queuedSeq)) return;
@@ -2275,6 +2316,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!value.trim()) { setSearchResults([]); setSemanticStatus("idle"); return; }
     const results = await db.search(value.trim(), selectedId() ?? undefined);
     if (version === searchRequestVersion) setSearchResults(results);
+    if (!semanticSearchEnabled()) { setSemanticStatus("idle"); return; }
     semanticSearchTimer = window.setTimeout(() => void (async () => {
       try {
         setSemanticStatus("loading");
@@ -2287,6 +2329,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     })(), 350);
   }
   function indexImage(attachment: AttachmentMetadata, plaintext: ArrayBuffer) {
+    if (!semanticSearchEnabled()) return;
     const copy = plaintext.slice(0);
     const schedule = window.requestIdleCallback ?? ((callback: IdleRequestCallback) => window.setTimeout(() => callback({ didTimeout: false, timeRemaining: () => 0 }), 1_000));
     schedule(() => {
@@ -2294,6 +2337,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       semanticRef ??= new LocalImageSemanticSearch(db);
       void semanticRef.index(attachment.id, copy, attachment.type).then(() => setSemanticStatus("ready")).catch(() => setSemanticStatus("error"));
     }, { timeout: 5_000 });
+  }
+  function enableSemanticSearch(): void {
+    try {
+      persistSemanticSearchEnabled(profileId, true);
+      setSemanticSearchEnabled(true);
+      setSemanticStatus("idle");
+      if (searchQuery().trim()) void runSearch(searchQuery());
+    } catch {
+      setSemanticStatus("error");
+      setNotice("无法保存图片语义搜索设置，请检查浏览器存储权限");
+    }
   }
   function openSearchResult(roomId: RoomId, messageId: string) {
     setSelectedId(roomId); setSearchOpen(false);
@@ -2651,7 +2705,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     } catch { localCleanupFailed = true; }
     semanticRef?.close(); semanticRef = null;
     mlsRef?.destroy(); mlsRef = null; identityRef = null;
-    await clearIdentity(profileId); clearPendingDeviceLink(profileId);
+    await clearIdentity(profileId); clearPendingDeviceLink(profileId); clearRoomSigningKeyPins(profileId);
     const nextProfile = await removeLocalProfile(profileId); if (nextProfile) await setActivePushProfile(nextProfile.profile_id); api.setToken(null);
     window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; window.clearTimeout(draftRemoteSyncTimer); draftRemoteSyncTimer = undefined; selectedRef = null; composerRevision += 1;
     const shared = incomingShare(); if (shared) void deleteStagedShare(shared.id).catch(() => undefined);
@@ -3328,6 +3382,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           <div class="grid gap-3 border-b border-black/5 p-3">
             <div class="flex items-center justify-between px-1"><h1 class="text-xl font-semibold tracking-tight text-ink">消息</h1><IconButton label={localProjectionRecoveryActive() ? "本机记录恢复后才能新建对话" : "新建对话"} disabled={localProjectionRecoveryActive()} class="text-brand hover:bg-brand-soft disabled:opacity-40" onClick={() => setNewRoom(true)}><IconPlus class="size-4 stroke-brand" stroke-width={2.2}/></IconButton></div>
             <button type="button" class="flex h-10 items-center gap-2 rounded-lg bg-neutral-100 px-3 text-left text-sm text-muted hover:bg-neutral-200" onClick={() => setSearchOpen(true)}><IconSearch class="size-4 shrink-0 stroke-muted"/><span class="min-w-0 flex-1">搜索本机消息</span><kbd class="text-xs text-neutral-400">⌘K</kbd></button>
+            <Show when={!rooms().some((room) => room.purpose === "saved")}><button type="button" disabled={localProjectionRecoveryActive()} class="flex min-h-10 items-center gap-2 rounded-lg px-3 text-left text-sm font-medium text-ink hover:bg-brand-soft disabled:text-neutral-400" onClick={() => void openSavedRoom()}><IconBookmark class="size-4 shrink-0 stroke-brand"/><span class="min-w-0 flex-1">已保存消息</span><small class="text-xs font-normal text-muted">给自己发消息</small></button></Show>
           </div>
           <div class="overflow-y-auto p-2"><Show when={rooms().some((room) => room.request_status !== "rejected")} fallback={<div class="grid h-full place-content-center justify-items-center px-8 text-center"><IconMessageCircle class="size-8 stroke-neutral-300"/><h2 class="mt-4 text-base font-semibold text-ink">还没有对话</h2><p class="mt-1 text-sm/5 text-muted">添加同一服务器上的用户开始聊天。</p><button type="button" disabled={localProjectionRecoveryActive()} class="mt-4 text-sm font-semibold text-brand disabled:text-neutral-400" onClick={() => setNewRoom(true)}>新建对话</button></div>}><Show when={showArchived()}><button type="button" class="mb-1 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-brand hover:bg-brand-soft" onClick={() => setShowArchived(false)}><IconChevronLeft class="size-4 stroke-brand"/>返回消息</button></Show><Show when={!showArchived() && incomingRequests().length}><section class="mb-3" aria-labelledby="message-requests-heading"><div class="flex items-center justify-between px-3 py-2"><h2 id="message-requests-heading" class="text-xs font-semibold uppercase tracking-wide text-muted">消息请求</h2><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">{incomingRequests().length}</span></div><div role="list"><For each={incomingRequests()}>{(room) => <div role="listitem"><button type="button" aria-current={selectedId() === room.room_id ? "page" : undefined} class={`grid min-h-[72px] w-full grid-cols-[44px_minmax(0,1fr)] items-center gap-3 rounded-xl px-2.5 text-left ${selectedId() === room.room_id ? "bg-amber-50" : "hover:bg-neutral-100"}`} onClick={() => setSelectedId(room.room_id)}><Avatar class="size-11" label={initials(roomTitle(room, currentSession().user_id))} color={avatarColor(room.room_id)}/><span class="min-w-0"><strong class="block truncate text-sm font-semibold text-ink">{roomTitle(room, currentSession().user_id)}</strong><small class="mt-1 block truncate text-sm text-amber-700">想给你发送消息</small></span></button></div>}</For></div></section></Show><div role="list"><For each={listedRooms()}>{(room) => { const peer = () => room.kind === "direct" ? room.members.find((member) => member.user_id !== currentSession().user_id) : undefined; return <RoomListItem room={room} title={roomTitle(room, currentSession().user_id)} avatarLabel={initials(roomTitle(room, currentSession().user_id))} avatarColor={avatarColor(room.room_id)} groupAvatar={roomProfileAvatars()[room.room_id]} decryptGroupAvatar={decryptRoomProfileAvatar} preview={roomPreview(room)} activityAt={roomActivityTimes()[room.room_id]} selected={selectedId() === room.room_id} unread={unreadCounts()[room.room_id] ?? 0} preference={preferenceFor(room.room_id)} recoveryRequired={historyRecoveryRooms().has(room.room_id)} onOpen={() => setSelectedId(room.room_id)} onTogglePinned={() => void updateRoomPreference(room.room_id, "pin")} onSetMutedUntil={(mutedUntil) => void setRoomMute(room.room_id, mutedUntil)} onSetReadState={(markedUnread) => void setRoomReadState(room.room_id, markedUnread)} onToggleArchived={() => void updateRoomPreference(room.room_id, "archive")} blockable={Boolean(peer())} blockedByMe={room.blocked_by_me} onToggleBlocked={() => void toggleRoomBlock(room)}/>; }}</For></div><Show when={!listedRooms().length && !incomingRequests().length}><div class="grid place-content-center justify-items-center px-8 py-12 text-center"><IconArchive class="size-7 stroke-neutral-300"/><p class="mt-3 text-sm text-muted">{showArchived() ? "没有已归档的对话" : "所有对话都已归档"}</p></div></Show><Show when={!showArchived() && archivedRoomCount() > 0}><button type="button" class="mt-2 flex min-h-11 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted hover:bg-neutral-100" onClick={() => setShowArchived(true)}><IconArchive class="size-4 stroke-muted"/><span class="flex-1 text-left">已归档</span><span class="text-xs tabular-nums text-neutral-400">{archivedRoomCount()}</span></button></Show></Show></div>
           <footer role="status" aria-live="polite" class="flex items-center gap-2 border-t border-black/5 px-4 text-xs text-muted"><span aria-hidden="true" class={`size-1.5 rounded-full ${localProjectionRecoveryActive() ? "animate-pulse bg-amber-500" : connectionState() === "online" ? "bg-emerald-500" : connectionState() === "syncing" ? "animate-pulse bg-amber-500" : "bg-neutral-400"}`}/>{localProjectionRecoveryActive() ? "本机存储恢复中" : connectionState() === "online" ? "已连接" : connectionState() === "syncing" ? "正在同步" : "离线，可查看和发送"}</footer>
@@ -3403,7 +3458,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       <Show when={contactShareOpen() && selected()}>{(room) => <ContactShareDialog contacts={shareableContacts(room())} onSend={sendContactCard} onClose={() => setContactShareOpen(false)}/>}</Show>
       <Show when={forwardingMessages()}>{(items) => <ForwardDialog messages={items()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onForward={(roomId) => forwardMessages(items(), roomId)} onClose={() => { setForwardingMessages(null); cancelMessageSelection(); }}/>}</Show>
       <Show when={incomingShare()}>{(share) => <ShareTargetDialog share={share()} rooms={rooms().filter((room) => room.leave_status !== "pending")} currentUserId={currentSession().user_id} onSend={sendIncomingShare} onClose={discardIncomingShare}/>}</Show>
-      <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticStatus={semanticStatus()} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
+      <Show when={searchOpen()}><SearchDialog query={searchQuery()} results={searchResults()} coverageComplete={coverageComplete()} semanticEnabled={semanticSearchEnabled()} semanticStatus={semanticStatus()} onEnableSemantic={enableSemanticSearch} onQuery={(value) => void runSearch(value)} onSelect={openSearchResult} onClose={() => setSearchOpen(false)}/></Show>
       <Show when={roomSettingsOpen() && selected()}>{(room) => <RoomSettingsDialog roomTitle={roomTitle(room(), currentSession().user_id)} roomAvatar={roomProfileAvatars()[room().room_id] ?? null} decryptRoomAvatar={decryptRoomProfileAvatar} preference={preferenceFor(room().room_id)} messageExpirySeconds={messageExpiryFor(room().room_id)?.expires_in_seconds ?? null} messageExpirySupported={serverSupports(currentSession().protocol, "messages.expiry.v1")} roomProfileSupported={serverSupports(currentSession().protocol, "rooms.profile.v1")} identityMemberCount={room().members.filter((member) => member.user_id !== currentSession().user_id).length} currentUserId={currentSession().user_id} isGroupChat={room().kind === "group" && room().purpose === "chat"} isRoomOwner={room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} leaveStatus={room().leave_status ?? null} leaveSupported={serverSupports(currentSession().protocol, "rooms.leave.v1")} ownershipTransferSupported={serverSupports(currentSession().protocol, "rooms.owner-transfer.v1")} ownershipBusyUserId={roomOwnershipBusy()} canManageMembers={room().kind === "group" && room().purpose === "chat" && room().members.some((member) => member.user_id === currentSession().user_id && member.role === "owner")} membershipBusyUserId={roomMembershipBusy()} members={room().kind === "group" ? room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => ({ userId: member.user_id, displayName: member.display_name, hidden: room().hidden_member_ids.includes(member.user_id), role: member.role })) : []} searchUsers={async (query) => (await api.users(query)).users} onAddMember={(userId) => changeRoomMembership(room().room_id, "add", userId as UserId)} onRemoveMember={(userId) => changeRoomMembership(room().room_id, "remove", userId as UserId)} onTransferOwnership={(userId) => transferRoomOwnership(room(), userId as UserId)} onToggleMember={(userId, hidden) => toggleHiddenGroupMember(room().room_id, userId as UserId, hidden)} onSaveRoomProfile={(name, avatar) => updateRoomProfileWithAvatar(room().room_id, name, avatar)} onSaveRetention={(days) => updateLocalRetention(room().room_id, days)} clearHistoryBusy={historyClearBusy()} onClearHistory={() => clearLocalRoomHistory(room())} onSaveMessageExpiry={(seconds) => updateMessageExpiry(room().room_id, seconds)} onRequestLeave={() => requestRoomLeave(room())} onCancelLeave={() => cancelRoomLeave(room())} onOpenMedia={() => { setRoomSettingsOpen(false); setConversationMediaOpen(true); }} exportBusy={conversationExportBusy()} onExportConversation={() => exportConversation(room())} onCancelExport={() => conversationExportAbort?.abort()} onVerifyIdentity={() => { setRoomSettingsOpen(false); setIdentityVerificationOpen(true); }} onClose={() => setRoomSettingsOpen(false)}/>}</Show>
       <Show when={conversationMediaOpen() && selected()}>{(room) => <ConversationMediaDialog roomTitle={roomTitle(room(), currentSession().user_id)} coverageComplete={coverageComplete()} loadPage={(cursor: LocalRoomAttachmentCursor | null) => db.roomAttachments(room().room_id, cursor)} loadCachedImage={decryptCachedAttachment} displayName={(userId) => memberName(room(), userId)} onOpenMessage={(messageId) => { setConversationMediaOpen(false); openSearchResult(room().room_id, messageId); }} onClose={() => setConversationMediaOpen(false)}/>}</Show>
       <Show when={identityVerificationOpen() && selected()}>{(room) => <IdentityVerificationDialog roomId={room().room_id} userIds={room().members.filter((member) => member.user_id !== currentSession().user_id).map((member) => member.user_id)} displayNames={Object.fromEntries(room().members.map((member) => [member.user_id, member.display_name]))} api={api} db={db} onClose={() => { setIdentityVerificationOpen(false); void refreshRoomIdentityTrust(room().room_id); }}/>}</Show>

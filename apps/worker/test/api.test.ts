@@ -604,6 +604,21 @@ describe("single-server durable delivery", () => {
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
   });
 
+  it("creates a creator-only epoch-zero saved room before another device exists", async () => {
+    const ownerDevice = await device("single-saved-room-device");
+    const owner = await register("single_saved_room_owner", ownerDevice);
+    const roomId = "!single-saved-room:localhost" as RoomId;
+    const headers = { authorization: `Bearer ${owner.access_token}`, "content-type": "application/json" };
+    const create = await SELF.fetch("https://edgechat.test/api/v1/rooms", {
+      method: "POST", headers,
+      body: JSON.stringify({ room_id: roomId, kind: "group", purpose: "saved", members: [], mls_welcome: "", mls_ratchet_tree: "tree", mls_epoch: 0, mls_recipients: [], mls_claim_ids: [] }),
+    });
+    expect(create.status, await create.clone().text()).toBe(201);
+    expect(await create.json()).toEqual({ room_id: roomId, created: true });
+    expect(await env.DB.prepare("SELECT purpose, mls_epoch FROM rooms WHERE room_id = ?").bind(roomId).first()).toEqual({ purpose: "saved", mls_epoch: 0 });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+  });
+
   it("consumes one-time MLS claims when the owner adds a group member and retries the exact commit idempotently", async () => {
     const aliceDevice = await device("group-owner-device");
     const bobDevice = await device("group-existing-device");
