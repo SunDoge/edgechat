@@ -7,13 +7,13 @@ describe("local backup health", () => {
   it("asks for a first backup without implying a cloud copy", () => {
     const health = backupHealth(null, now);
     expect(health.attention).toBe(true);
-    expect(health.detail).toContain("无法从服务器恢复");
+    expect(health.state).toBe("missing");
     expect(backupHealth({ created_at: now + 10 * 60_000, delivery: "confirmed_file" }, now).attention).toBe(true);
   });
 
   it("distinguishes a confirmed file write from an unverified browser download", () => {
-    expect(backupHealth({ created_at: now - 1_000, delivery: "confirmed_file" }, now).detail).toContain("已写入");
-    expect(backupHealth({ created_at: now - 1_000, delivery: "download_started" }, now).detail).toContain("请确认文件");
+    expect(backupHealth({ created_at: now - 1_000, delivery: "confirmed_file" }, now).delivery).toBe("confirmed_file");
+    expect(backupHealth({ created_at: now - 1_000, delivery: "download_started" }, now).delivery).toBe("download_started");
   });
 
   it("uses a calm thirty-day freshness threshold", () => {

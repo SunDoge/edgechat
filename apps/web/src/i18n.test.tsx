@@ -22,6 +22,8 @@ describe("local message catalog", () => {
     expect(translate("search.similarity", { score: 87 })).toBe("相似度 87%");
     expect(translate("roomSettings.members.count", { count: 5 })).toBe("5 人");
     expect(translate("roomSettings.confirm.transferOwnership", { name: "小林" })).toContain("转让给 小林");
+    expect(translate("devices.storage.breakdown", { attachments: "1 MB", archives: "2 MB", avatars: "3 KB" })).toBe("附件 1 MB · 消息历史 2 MB · 头像 3 KB");
+    expect(translate("devices.revocation.working", { completed: 2, total: 5 })).toBe("正在安全移除 · 2/5 个对话");
     const unsafeTranslate = translate as (key: "deviceLink.rooms") => string;
     expect(() => unsafeTranslate("deviceLink.rooms")).toThrow("Missing translation value: deviceLink.rooms.count");
     if (false) {

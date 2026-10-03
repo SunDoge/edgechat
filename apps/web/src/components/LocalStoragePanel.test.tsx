@@ -8,6 +8,13 @@ let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); });
 
 describe("LocalStoragePanel", () => {
+  it("renders a loading state before storage inspection completes", () => {
+    const root = document.createElement("div"); document.body.append(root);
+    dispose = render(() => <LocalStoragePanel health={null} onRequestPersistence={vi.fn()}/>, root);
+    expect(root.textContent).toContain("正在读取");
+    expect(root.textContent).toContain("正在检查浏览器");
+  });
+
   it("separates approximate local usage from cloud quota and requests persistence explicitly", async () => {
     const initial: LocalStorageHealth = { persistence: "best-effort", canRequestPersistence: true, usage: 512 * 1024 ** 2, quota: 2 * 1024 ** 3 };
     const persistent: LocalStorageHealth = { ...initial, persistence: "persistent", canRequestPersistence: false };
