@@ -296,6 +296,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   let archiveRepairRun: Promise<void> | null = null;
   let peerRecoveryRun: Promise<void> | null = null;
   let draftSyncRun: Promise<void> | null = null;
+  let connectionMaintenanceRun: Promise<void> | null = null;
 
   function reflectLocalProfile(value: { user_id: string; display_name: string; device_id: string }): void {
     setLocalProfiles((current) => current.map((item) => item.profile_id === profileId
@@ -1260,6 +1261,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!currentSession || !currentIdentity || !currentMls) return;
     const engine = new SyncEngine(api, db, processEvent, async () => { await loadRooms(); }, undefined, resolveArchiveKey, presenceSharing(), db, archiveSegmentCache, untrack(httpsOnly)); syncRef = engine;
     let foregroundResumePending = false;
+    let initialMaintenancePending = true;
     const refresh = (received: Event) => {
       const event = (received as CustomEvent<RoomEvent>).detail;
       setRooms((current) => current.map((room) => room.room_id === event.room_id ? { ...room, current_seq: Math.max(room.current_seq, event.seq) } : room));
@@ -1285,24 +1287,32 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (owned && event.seq % 25 === 0) void archiveRef?.compact(event.room_id).catch(() => undefined);
     };
     engine.addEventListener("processed", refresh);
-    const resumeRemovals = () => {
+    const syncCompleted = () => {
       if (!foregroundResumePending) setConnectionState("online");
-      void acknowledgeRetentionCoverage().catch(() => undefined);
-      void repairCloudHistory().catch(() => undefined);
-      void repairCloudAttachments().catch(() => undefined);
-      void repairCloudArchive().catch(() => undefined);
-      void attachmentSendCleanup.reconcile();
-      void processPeerRecoveries().catch(() => undefined);
-      void archiveRef?.reconcilePendingUploads().then(() => archiveRef?.reconcileRetentionAcks()).catch(() => undefined);
-      void pullRemoteDrafts().then(() => processDraftSync()).catch((cause) => {
-        console.warn(JSON.stringify({ message: "cross-device draft sync failed", error: cause instanceof Error ? cause.message : String(cause) }));
-      });
-      if (needsRemoteRoomRefresh) {
-        needsRemoteRoomRefresh = false;
-        void loadRooms().catch(() => { needsRemoteRoomRefresh = true; setConnectionState("offline"); });
+      if (initialMaintenancePending) {
+        initialMaintenancePending = false;
+        void runConnectionMaintenance();
       }
-      void resumeAccountRemovals();
-      void resumeRoomMembershipChanges();
+    };
+    const runConnectionMaintenance = (): Promise<void> => {
+      if (connectionMaintenanceRun) return connectionMaintenanceRun;
+      const task = (async () => {
+        const draftSync = pullRemoteDrafts().then(() => processDraftSync()).catch((cause) => {
+          console.warn(JSON.stringify({ message: "cross-device draft sync failed", error: cause instanceof Error ? cause.message : String(cause) }));
+        });
+        await Promise.allSettled([
+          acknowledgeRetentionCoverage(), repairCloudHistory(), repairCloudAttachments(), repairCloudArchive(),
+          attachmentSendCleanup.reconcile(), processPeerRecoveries(),
+          archiveRef?.reconcilePendingUploads().then(() => archiveRef?.reconcileRetentionAcks()),
+          draftSync, resumeAccountRemovals(), resumeRoomMembershipChanges(),
+        ]);
+        if (needsRemoteRoomRefresh) {
+          needsRemoteRoomRefresh = false;
+          await loadRooms().catch(() => { needsRemoteRoomRefresh = true; setConnectionState("offline"); });
+        }
+      })();
+      connectionMaintenanceRun = task;
+      return task.finally(() => { if (connectionMaintenanceRun === task) connectionMaintenanceRun = null; });
     };
     const accountDeletion = () => { void clearLocalAccount(t("workspace.feedback.accountDisabled")); };
     const deviceRevoked = () => { void clearLocalAccount(t("workspace.feedback.deviceRevoked")); };
@@ -1313,6 +1323,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (["profile.updated", "room.leave.requested", "room.leave.updated", "room.leave.cancelled"].includes(String(detail?.type))) {
         void loadRooms().catch(() => setConnectionState("offline"));
       }
+      if (detail?.type === "draft.updated" && detail.source_device_id !== currentIdentity.deviceId) {
+        void pullRemoteDrafts().catch(() => undefined);
+      }
+      if (detail?.type === "room.leave.requested") void resumeRoomMembershipChanges();
       if (detail?.type === "device.link.expired" || detail?.type === "device.link.cancelled") {
         setNotice(detail.type === "device.link.cancelled" ? t("devices.linkCancelled.removing") : t("devices.linkExpired.removing"));
         const activeMls = mlsRef;
@@ -1377,7 +1391,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setHistoryRecoveryState(roomId, null); peerRecoveryNeeds.delete(roomId); peerRecoveryByRoom.delete(roomId);
       setNotice(t("workspace.feedback.historyRecoveryComplete"));
     };
-    engine.addEventListener("synced", resumeRemovals);
+    engine.addEventListener("synced", syncCompleted);
     engine.addEventListener("account-deletion", accountDeletion);
     engine.addEventListener("device-revoked", deviceRevoked);
     engine.addEventListener("session-expired", sessionExpired);
@@ -1439,23 +1453,29 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       foregroundResumePending = true;
       setConnectionState("syncing");
       void engine.resume()
-        .then(() => { if (session() === currentSession) { setConnectionState("online"); void outboxRef?.kick(); } })
+        .then(() => { if (session() === currentSession) { setConnectionState("online"); void outboxRef?.kick(); void runConnectionMaintenance(); } })
         .catch((cause) => { if (canUseOfflineSession(cause, navigator.onLine)) setConnectionState("offline"); })
         .finally(() => { foregroundResumePending = false; });
     };
+    const resumeOnlineSession = () => { if (document.visibilityState === "visible") void engine.resume().then(() => runConnectionMaintenance()).catch(() => undefined); };
     const resumePersistedPage = (event: PageTransitionEvent) => { if (event.persisted) resumeVisibleSession(); };
     engine.setForeground(document.visibilityState === "visible");
     document.addEventListener("visibilitychange", resumeVisibleSession);
     window.addEventListener("pageshow", resumePersistedPage);
+    window.addEventListener("online", resumeOnlineSession);
     void engine.start();
+    const maintenanceTimer = window.setInterval(() => {
+      if (navigator.onLine && document.visibilityState === "visible" && connectionState() === "online") void runConnectionMaintenance();
+    }, 5 * 60_000);
     peerRecoveryTimer = window.setInterval(() => { if (navigator.onLine) void processPeerRecoveries().catch(() => undefined); }, 30_000);
     onCleanup(() => {
-      engine.removeEventListener("typing", typing); engine.removeEventListener("presence", presence); engine.removeEventListener("presence-snapshot", presenceSnapshot); engine.removeEventListener("presence-reset", presenceReset); engine.removeEventListener("repair-available", repairAvailable); engine.removeEventListener("attachment-repair-available", attachmentRepairAvailable); engine.removeEventListener("archive-repair-available", archiveRepairAvailable); engine.removeEventListener("synced", resumeRemovals); engine.removeEventListener("account-deletion", accountDeletion); engine.removeEventListener("device-revoked", deviceRevoked); engine.removeEventListener("session-expired", sessionExpired); engine.removeEventListener("room-unavailable", unavailableRoom); engine.removeEventListener("device-event", deviceEvent); engine.removeEventListener("realtime", realtime); engine.removeEventListener("transport", transport); engine.removeEventListener("error", syncError); engine.removeEventListener("local-projection", localProjection); engine.removeEventListener("history-transfer-required", historyTransferRequired); engine.removeEventListener("history-recovery-complete", historyRecoveryComplete); navigator.serviceWorker?.removeEventListener("message", pushSyncHint); document.removeEventListener("visibilitychange", resumeVisibleSession); window.removeEventListener("pageshow", resumePersistedPage); engine.stop();
+      engine.removeEventListener("typing", typing); engine.removeEventListener("presence", presence); engine.removeEventListener("presence-snapshot", presenceSnapshot); engine.removeEventListener("presence-reset", presenceReset); engine.removeEventListener("repair-available", repairAvailable); engine.removeEventListener("attachment-repair-available", attachmentRepairAvailable); engine.removeEventListener("archive-repair-available", archiveRepairAvailable); engine.removeEventListener("synced", syncCompleted); engine.removeEventListener("account-deletion", accountDeletion); engine.removeEventListener("device-revoked", deviceRevoked); engine.removeEventListener("session-expired", sessionExpired); engine.removeEventListener("room-unavailable", unavailableRoom); engine.removeEventListener("device-event", deviceEvent); engine.removeEventListener("realtime", realtime); engine.removeEventListener("transport", transport); engine.removeEventListener("error", syncError); engine.removeEventListener("local-projection", localProjection); engine.removeEventListener("history-transfer-required", historyTransferRequired); engine.removeEventListener("history-recovery-complete", historyRecoveryComplete); navigator.serviceWorker?.removeEventListener("message", pushSyncHint); document.removeEventListener("visibilitychange", resumeVisibleSession); window.removeEventListener("pageshow", resumePersistedPage); window.removeEventListener("online", resumeOnlineSession); engine.stop();
       for (const timer of typingExpiryTimers.values()) window.clearTimeout(timer);
       typingExpiryTimers.clear(); setTypingSessions({}); setPresenceByRoom({});
       for (const timer of deliveryReceiptTimers.values()) window.clearTimeout(timer);
       deliveryReceiptTimers.clear();
       if (syncRef === engine) syncRef = null;
+      window.clearInterval(maintenanceTimer);
       window.clearInterval(peerRecoveryTimer); peerRecoveryTimer = undefined;
     });
   });

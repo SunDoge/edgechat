@@ -315,6 +315,20 @@ async function runManualHttpsMode(alicePage, bobPage, roomId, evidence) {
     throw new Error(`HTTPS-only delivery attempted realtime: ${JSON.stringify({ ticketsBefore, ticketsAfter: evidence.wsTickets, socketsBefore, socketsAfter: evidence.webSockets })}`);
   }
 
+  // A compatibility poll is the durable delivery primitive, not a trigger for
+  // every repair/retention/draft workflow. Otherwise a 4-7 second /sync cadence
+  // quietly multiplies D1 traffic and can wake pending object-store repairs.
+  await bobPage.waitForTimeout(1_000);
+  const idleRequestStart = evidence.apiRequests.length;
+  await waitForNetworkEvidence(bobPage, evidence, (current) => current.apiRequests.slice(idleRequestStart).some((item) => item.path === "/api/v1/sync"));
+  await bobPage.waitForTimeout(250);
+  const idlePollRequests = evidence.apiRequests.slice(idleRequestStart);
+  const coupledMaintenance = idlePollRequests.filter((item) => [
+    "/api/v1/retention/coverage", "/api/v1/repair/jobs", "/api/v1/attachment-repair/jobs", "/api/v1/archive-repair/jobs",
+    "/api/v1/drafts", "/api/v1/devices", "/api/v1/account-removals", "/api/v1/room-leave-tasks",
+  ].includes(item.path));
+  if (coupledMaintenance.length) throw new Error(`HTTPS idle poll triggered maintenance requests: ${JSON.stringify(coupledMaintenance)}`);
+
   await accountDialog.getByRole("button", { name: "关闭", exact: true }).click();
   await bobPage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
   await bobPage.getByText(alice.name, { exact: true }).first().click();
@@ -337,6 +351,7 @@ async function runManualHttpsMode(alicePage, bobPage, roomId, evidence) {
     delivered_without_realtime: true,
     preference_survived_reload: true,
     realtime_restored_after_opt_out: true,
+    idle_poll_decoupled_from_maintenance: true,
     object_ledger_delta: objectLedgerDelta,
     object_store_probe_requests: 0,
   }));
@@ -353,9 +368,13 @@ async function main() {
   const bobContext = await bobBrowser.newContext({ serviceWorkers: "block" });
   const alicePage = await aliceContext.newPage();
   const bobPage = await bobContext.newPage();
-  const bobNetworkEvidence = { wsTickets: 0, webSockets: 0 };
+  const bobNetworkEvidence = { wsTickets: 0, webSockets: 0, apiRequests: [] };
   bobPage.on("request", (request) => {
-    try { if (new URL(request.url()).pathname === "/api/v1/ws-ticket") bobNetworkEvidence.wsTickets += 1; } catch { /* ignore malformed URLs */ }
+    try {
+      const path = new URL(request.url()).pathname;
+      if (path.startsWith("/api/v1/")) bobNetworkEvidence.apiRequests.push({ method: request.method(), path });
+      if (path === "/api/v1/ws-ticket") bobNetworkEvidence.wsTickets += 1;
+    } catch { /* ignore malformed URLs */ }
   });
   bobPage.on("websocket", (socket) => {
     try { if (new URL(socket.url()).pathname === "/api/v1/ws") bobNetworkEvidence.webSockets += 1; } catch { /* ignore malformed URLs */ }
