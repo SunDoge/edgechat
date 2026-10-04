@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@edgechat/protocol": "workspace:*",
+    "@noble/hashes": "2.4.0",
     "@simplewebauthn/server": "14.0.3",
     "@sundoge/kysely-d1": "latest",
     "aws4fetch": "^1.0.20",

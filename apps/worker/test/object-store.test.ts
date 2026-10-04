@@ -105,6 +105,8 @@ describe("SigV4 S3 object-store contract", () => {
     expect([...new Uint8Array(await requests[0].body)]).toEqual([...value]);
     expect(requests[2].headers.get("range")).toBe("bytes=2-4");
     expect(requests[3].url).toBe("https://s3.us-west-004.backblazeb2.com/edgechat-test?delete");
+    expect(requests[3].headers.get("content-md5")).toBe("G1ZMmgIWWFSOqNXp09Pk/A==");
+    expect(requests[3].headers.get("x-amz-content-sha256")).toBe("38e46b40164b1b6570fa0c684fb9025f2e5175a9e786b96f01764f7abc586ce7");
     expect(new TextDecoder().decode(await requests[3].body)).toContain("<Key>folder/&lt;second&gt;&amp;.bin</Key>");
   });
 

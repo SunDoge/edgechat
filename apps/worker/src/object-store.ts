@@ -1,4 +1,5 @@
 import { AwsClient } from "aws4fetch";
+import { md5 } from "@noble/hashes/legacy.js";
 import type { Env } from "./env";
 
 export type ObjectStoreBody = ReadableStream | ArrayBuffer | ArrayBufferView<ArrayBuffer> | string | Blob;
@@ -227,6 +228,12 @@ function xmlEscape(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
+function base64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 async function boundedText(response: Response, maximumBytes: number): Promise<string> {
   if (!response.body) return "";
   const reader = response.body.getReader();
@@ -374,9 +381,11 @@ export class S3ObjectStore implements ObjectStore {
         continue;
       }
       const body = `<Delete>${page.map((key) => `<Object><Key>${xmlEscape(key)}</Key></Object>`).join("")}<Quiet>true</Quiet></Delete>`;
-      const digest = checksumHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+      const encoded = new TextEncoder().encode(body);
+      const digest = checksumHex(await crypto.subtle.digest("SHA-256", encoded));
+      // S3 requires Content-MD5 as a transport checksum; SigV4 still authenticates the SHA-256 payload digest.
       const response = await this.request(`${this.url()}?delete`, { method: "POST", body,
-        headers: { "content-type": "application/xml", "x-amz-content-sha256": digest } });
+        headers: { "content-type": "application/xml", "content-md5": base64(md5(encoded)), "x-amz-content-sha256": digest } });
       if (!response.ok) return this.failure("delete", response);
       const result = await boundedText(response, MAX_DELETE_RESULT_BYTES);
       if (/<Error>/i.test(result)) throw new ObjectStoreRequestError("delete", response.status, "S3 batch delete reported an object error");
