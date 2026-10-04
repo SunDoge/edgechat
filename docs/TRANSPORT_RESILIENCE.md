@@ -61,17 +61,16 @@ VLESS-over-WebSocket is not a useful answer when the network specifically blocks
 
 REALITY is also a native/direct-server option, not a Cloudflare Worker feature. It depends on controlling the raw TLS endpoint and client TLS fingerprint behavior; Cloudflare terminates TLS before a Worker, while a browser PWA cannot select uTLS fingerprints or open raw sockets. A REALITY/VLESS access point would therefore be a separately operated direct server or local proxy, carrying the normal EdgeChat HTTPS API rather than becoming a second message protocol.
 
-Proxy URLs, UUIDs, keys, and REALITY parameters are device secrets. They must stay in OS-protected local storage where available and must not be uploaded to D1/R2, synced through room events, included in portable backups by default, or exposed to web content. The adapter boundary can remain small:
+Proxy URLs, UUIDs, keys, and REALITY parameters are device secrets. They must stay in OS-protected local storage where available and must not be uploaded to D1/R2, synced through room events, included in portable backups by default, or exposed to web content. `@edgechat/sync` exports this small boundary, and `ApiClient` accepts it as its optional third constructor argument:
 
 ```ts
-interface NativeNetworkRoute {
-  kind: "direct" | "system-proxy" | "vless";
+interface NetworkRoute {
   fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
-  openRealtime(url: URL, protocols?: string[]): NativeRealtimeSocket;
+  openRealtime(url: URL): RealtimeSocket;
 }
 ```
 
-This is intentionally a native-app extension point. The PWA continues to use browser-managed HTTPS/WSS plus HTTPS polling fallback.
+The same route owns API requests and realtime socket creation, so a native shell cannot accidentally proxy one while leaking the other through the default network. It receives bearer-authenticated ciphertext traffic and must therefore be trusted, but the interface is never given MLS state, archive keys, attachment keys, decrypted messages, or search data. The PWA uses the exported `browserNetworkRoute`, which delegates to browser-managed Fetch/WebSocket plus HTTPS polling fallback.
 
 WebTransport is not the fallback baseline. Its browser API and HTTP/2/HTTP/3 mappings are still evolving, and QUIC-only reachability would be a regression on networks that permit only ordinary HTTPS over TCP: <https://www.w3.org/TR/webtransport/>.
 

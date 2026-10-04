@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import { decodeTransportRecord, encodeTransportRecord, type RoomEvent } from "@edgechat/protocol";
-import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, HTTPS_FALLBACK_ERROR_MAX_MS, HTTPS_FALLBACK_POLL_MAX_MS, HTTPS_FALLBACK_POLL_MIN_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, httpsFallbackPollDelay, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
+import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, HTTPS_FALLBACK_ERROR_MAX_MS, HTTPS_FALLBACK_POLL_MAX_MS, HTTPS_FALLBACK_POLL_MIN_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, httpsFallbackPollDelay, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer, type NetworkRoute } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -642,20 +642,20 @@ describe("SyncEngine event ingestion", () => {
       close(): void { this.readyState = 3; }
       send(value: string): void { this.sent.push(value); }
     }
-    vi.stubGlobal("WebSocket", FakeSocket);
-    vi.stubGlobal("location", { origin: "https://chat.example.com" });
-    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient;
+    const openRealtime = vi.fn((url: URL) => new FakeSocket(url.toString()));
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }), openRealtime } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, null);
     const roomId = "!padding-room-00001:example.com" as const;
 
     await engine.start(); await engine.connectRoom(roomId); await Promise.resolve();
+    expect(openRealtime).toHaveBeenCalledOnce();
     expect(new URL(sockets[0].url).searchParams.get("padding")).toBe("v1");
     sockets[0].onmessage?.({ data: encodeTransportRecord({ type: "ready", room_id: roomId, current_seq: 0 }) } as MessageEvent);
     expect(engine.sendTyping(roomId, true)).toBe(true);
     expect(decodeTransportRecord(sockets[0].sent[0])).toEqual({ frame: { type: "typing", active: true }, padded: true });
 
-    engine.stop(); vi.unstubAllGlobals();
+    engine.stop();
   });
 
   it("opts into presence per device and clears room presence when its socket closes", async () => {
@@ -669,9 +669,7 @@ describe("SyncEngine event ingestion", () => {
       close(): void { this.readyState = 3; }
       send(): void {}
     }
-    vi.stubGlobal("WebSocket", FakeSocket);
-    vi.stubGlobal("location", { origin: "https://chat.example.com" });
-    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }), openRealtime: (url: URL) => new FakeSocket(url.toString()) } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, null, undefined, true);
     const roomId = "!presence-room-0001:example.com" as const;
@@ -685,7 +683,7 @@ describe("SyncEngine event ingestion", () => {
     sockets[0].onmessage?.({ data: JSON.stringify({ type: "presence.snapshot", room_id: roomId, user_ids: ["@bob:example.com"] }) } as MessageEvent);
     sockets[0].onmessage?.({ data: JSON.stringify({ type: "presence", room_id: roomId, user_id: "@bob:example.com", active: false }) } as MessageEvent);
     sockets[0].onclose?.({ code: 1000 });
-    engine.stop(); vi.unstubAllGlobals();
+    engine.stop();
 
     expect(snapshots).toEqual([{ type: "presence.snapshot", room_id: roomId, user_ids: ["@bob:example.com"] }]);
     expect(changes).toEqual([{ type: "presence", room_id: roomId, user_id: "@bob:example.com", active: false }]);
@@ -704,9 +702,7 @@ describe("SyncEngine event ingestion", () => {
       close(): void { this.readyState = 3; }
       send(): void {}
     }
-    vi.stubGlobal("WebSocket", FakeSocket);
-    vi.stubGlobal("location", { origin: "https://chat.example.com" });
-    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }), openRealtime: () => new FakeSocket() } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, null);
     const roomId = "!flapping-room-0001:example.com" as const;
@@ -722,7 +718,7 @@ describe("SyncEngine event ingestion", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(sockets).toHaveLength(3);
 
-    engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+    engine.stop(); vi.useRealTimers();
   });
 
   it("serializes overlapping durable catch-up calls so the cursor cannot regress", async () => {
@@ -790,7 +786,7 @@ describe("SyncEngine event ingestion", () => {
     }
     vi.stubGlobal("WebSocket", FakeSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
-    const api = { baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync, wsTicket, openRealtime: (url: URL) => new FakeSocket(url.toString()) } as unknown as ApiClient;
     const engine = new SyncEngine(api, db, async () => null, undefined, network);
     const roomId = "!recovery-room-0001:example.com" as const;
 
@@ -817,7 +813,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("WebSocket", BlockedSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
-    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient, db, async () => null, undefined, null);
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket, openRealtime: () => new BlockedSocket() } as unknown as ApiClient, db, async () => null, undefined, null);
     const transports: string[] = [];
     engine.addEventListener("transport", (event) => transports.push((event as CustomEvent<{ mode: string }>).detail.mode));
 
@@ -851,7 +847,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("WebSocket", BlockedSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
-    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient, db, async () => null, undefined, null);
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket, openRealtime: () => new BlockedSocket() } as unknown as ApiClient, db, async () => null, undefined, null);
 
     try {
       await engine.start();
@@ -878,7 +874,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
     const engine = new SyncEngine(
-      { baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient,
+      { baseUrl: "https://chat.example.com", sync, wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient,
       db,
       async () => null,
       undefined,
@@ -929,7 +925,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("WebSocket", FakeSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
-    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient, db, async () => null, undefined, null);
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient, db, async () => null, undefined, null);
     const roomId = "!transport-switch-01:example.com" as const;
 
     try {
@@ -960,7 +956,7 @@ describe("SyncEngine event ingestion", () => {
     class FakeSocket { constructor() { sockets.push(this); } }
     vi.stubGlobal("WebSocket", FakeSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
-    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, null);
 
@@ -1000,7 +996,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
     const engine = new SyncEngine(
-      { baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient,
+      { baseUrl: "https://chat.example.com", sync, wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient,
       db, async () => null, undefined, null, undefined, false, undefined, undefined, true,
     );
     const modes: string[] = [];
@@ -1044,10 +1040,8 @@ describe("SyncEngine event ingestion", () => {
     let cursor = 0;
     const sync = vi.fn(async () => ({ next_cursor: ++cursor, has_more: false, items: [] }));
     class BlockedSocket { constructor() { throw new TypeError("WebSocket upgrade blocked"); } }
-    vi.stubGlobal("WebSocket", BlockedSocket);
-    vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
-    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient, db, async () => null, undefined, null);
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket: async () => ({ ticket: "ticket" }), openRealtime: () => new BlockedSocket() } as unknown as ApiClient, db, async () => null, undefined, null);
 
     try {
       await engine.start();
@@ -1064,7 +1058,7 @@ describe("SyncEngine event ingestion", () => {
       await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
       expect(sync).toHaveBeenCalledTimes(backgroundCalls + 1);
     } finally {
-      engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+      engine.stop(); vi.useRealTimers();
     }
   });
 
@@ -1086,10 +1080,8 @@ describe("SyncEngine event ingestion", () => {
       return { next_cursor: ++cursor, has_more: false, items: [] };
     });
     class BlockedSocket { constructor() { throw new TypeError("WebSocket upgrade blocked"); } }
-    vi.stubGlobal("WebSocket", BlockedSocket);
-    vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
-    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient, db, async () => null, undefined, null);
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket: async () => ({ ticket: "ticket" }), openRealtime: () => new BlockedSocket() } as unknown as ApiClient, db, async () => null, undefined, null);
 
     try {
       await engine.start();
@@ -1132,7 +1124,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const sync = vi.fn(async () => ({ next_cursor: 0, has_more: false, items: [] }));
     const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
-    const api = { baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync, wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, null);
 
@@ -1163,7 +1155,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("WebSocket", FakeSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
-    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, null);
 
@@ -1196,7 +1188,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("WebSocket", FakeSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
-    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, network);
     const invalidated = vi.fn(); engine.addEventListener("device-revoked", invalidated);
@@ -1228,7 +1220,7 @@ describe("SyncEngine event ingestion", () => {
     vi.stubGlobal("WebSocket", FakeSocket);
     vi.stubGlobal("location", { origin: "https://chat.example.com" });
     const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
-    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket } as unknown as ApiClient;
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket, openRealtime: () => new FakeSocket() } as unknown as ApiClient;
     const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
     const engine = new SyncEngine(api, db, async () => null, undefined, network);
     const expired = vi.fn(); engine.addEventListener("session-expired", expired);
@@ -1249,6 +1241,23 @@ describe("SyncEngine event ingestion", () => {
 });
 
 describe("ApiClient protocol negotiation", () => {
+  it("routes HTTPS and realtime through one injectable outer transport", async () => {
+    const socket = { readyState: 0, onopen: null, onmessage: null, onclose: null, send: vi.fn(), close: vi.fn() };
+    const route = {
+      fetch: vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ user_id: "@alice:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false })),
+      openRealtime: vi.fn(() => socket),
+    } satisfies NetworkRoute;
+    const api = new ApiClient("https://edgechat.test", "token", route);
+
+    await expect(api.me()).resolves.toMatchObject({ user_id: "@alice:example.com" });
+    const realtimeUrl = new URL("wss://edgechat.test/api/v1/ws");
+    expect(api.openRealtime(realtimeUrl)).toBe(socket);
+    expect(route.fetch).toHaveBeenCalledOnce();
+    expect(route.fetch.mock.calls[0][0]).toBe("https://edgechat.test/api/v1/me");
+    expect(new Headers(route.fetch.mock.calls[0][1]?.headers).get("authorization")).toBe("Bearer token");
+    expect(route.openRealtime).toHaveBeenCalledWith(realtimeUrl);
+  });
+
   it("announces its version and normalizes a current server session", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => Response.json({
       user_id: "@alice:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false,

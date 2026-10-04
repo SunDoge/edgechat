@@ -19,6 +19,29 @@ export class ApiTimeoutError extends Error {
   }
 }
 
+export interface RealtimeSocket {
+  readonly readyState: number;
+  onopen: ((event: Event) => void) | null;
+  onmessage: ((event: MessageEvent) => void) | null;
+  onclose: ((event: CloseEvent) => void) | null;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+}
+
+/**
+ * Outer network route for browser or native shells. It sees authenticated
+ * ciphertext traffic, but never receives MLS state or decrypted content.
+ */
+export interface NetworkRoute {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  openRealtime(url: URL): RealtimeSocket;
+}
+
+export const browserNetworkRoute: NetworkRoute = {
+  fetch: (input, init) => globalThis.fetch(input, init),
+  openRealtime: (url) => new WebSocket(url),
+};
+
 export type SessionIdentity = { user_id: string; device_id: string; display_name: string; avatar_url?: string | null; server_name?: string; vapid_public_key?: string; device_credential?: string; archive_compaction_enabled: boolean; protocol?: ServerProtocolCapabilities };
 export type ServerDevice = { device_id: string; user_id: string; display_name: string; kind: "user" | "bot"; signing_key: JsonWebKey; encryption_key: JsonWebKey; created_at: number; revoked_at: number | null };
 export type RoomArchiveDevice = ServerDevice;
@@ -148,9 +171,10 @@ export type PasskeySummary = {
 };
 
 export class ApiClient {
-  constructor(public readonly baseUrl = "", private token: string | null = null) {}
+  constructor(public readonly baseUrl = "", private token: string | null = null, private readonly networkRoute: NetworkRoute = browserNetworkRoute) {}
   setToken(token: string | null): void { this.token = token; }
   getToken(): string | null { return this.token; }
+  openRealtime(url: URL): RealtimeSocket { return this.networkRoute.openRealtime(url); }
 
   register(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/register", { method: "POST", body: JSON.stringify(payload) }); }
   async registerOpaque(payload: Record<string, unknown>) {
@@ -536,7 +560,7 @@ export class ApiClient {
       controller.abort(new DOMException("Request timed out", "TimeoutError"));
     }, timeoutMs);
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
+      const response = await this.networkRoute.fetch(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
       if (!response.ok) {
         const body = await response.json().catch(() => ({ error: "Request failed", code: "request_failed" })) as { error: string; code: string; request_id?: unknown };
         const headerRequestId = response.headers.get("x-edgechat-request-id");
@@ -838,7 +862,7 @@ export class InvalidRoomEventEnvelopeError extends Error {
 export class SyncEngine extends EventTarget {
   private running = false;
   private startTask: Promise<void> | null = null;
-  private sockets = new Map<RoomId, WebSocket>();
+  private sockets = new Map<RoomId, RealtimeSocket>();
   private paddedSockets = new Set<RoomId>();
   private reconnects = new Map<RoomId, number>();
   private reconnectTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
@@ -860,7 +884,7 @@ export class SyncEngine extends EventTarget {
   private pendingIngests = 0;
   private catchUpTask: Promise<void> | null = null;
   private resumeTask: Promise<void> | null = null;
-  private socketProbes = new Map<RoomId, { socket: WebSocket; timer: ReturnType<typeof setTimeout>; promise: Promise<boolean>; resolve: (alive: boolean) => void }>();
+  private socketProbes = new Map<RoomId, { socket: RealtimeSocket; timer: ReturnType<typeof setTimeout>; promise: Promise<boolean>; resolve: (alive: boolean) => void }>();
   private readonly archiveCatchUp: OrderedArchiveCatchUp | null;
   private readonly onlineHandler = () => { void this.recover(); };
 
@@ -1022,7 +1046,7 @@ export class SyncEngine extends EventTarget {
       url.searchParams.set("ticket", ticket);
       url.searchParams.set("padding", "v1");
       if (this.sharePresence) url.searchParams.set("presence", "1");
-      const socket = new WebSocket(url);
+      const socket = this.api.openRealtime(url);
       this.sockets.set(roomId, socket);
       socket.onopen = () => {
         if (this.httpsOnly || !this.running || this.sockets.get(roomId) !== socket) {
@@ -1064,7 +1088,7 @@ export class SyncEngine extends EventTarget {
     }
   }
 
-  private socketClosed(roomId: RoomId, socket: WebSocket, code: number): void {
+  private socketClosed(roomId: RoomId, socket: RealtimeSocket, code: number): void {
     this.finishSocketProbe(roomId, socket, false);
     if (this.sockets.get(roomId) !== socket) return;
     const stable = this.stableSocketTimers.get(roomId);
@@ -1287,7 +1311,7 @@ export class SyncEngine extends EventTarget {
     if (syncError) throw syncError;
   }
 
-  private probeSocket(roomId: RoomId, socket: WebSocket): Promise<boolean> {
+  private probeSocket(roomId: RoomId, socket: RealtimeSocket): Promise<boolean> {
     if (socket.readyState !== 1) return Promise.resolve(false);
     const existing = this.socketProbes.get(roomId);
     if (existing?.socket === socket) return existing.promise;
@@ -1301,7 +1325,7 @@ export class SyncEngine extends EventTarget {
     return promise;
   }
 
-  private finishSocketProbe(roomId: RoomId, socket: WebSocket, alive: boolean): void {
+  private finishSocketProbe(roomId: RoomId, socket: RealtimeSocket, alive: boolean): void {
     const probe = this.socketProbes.get(roomId);
     if (!probe || probe.socket !== socket) return;
     clearTimeout(probe.timer);
