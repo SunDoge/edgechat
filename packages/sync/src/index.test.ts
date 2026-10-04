@@ -814,6 +814,46 @@ describe("SyncEngine event ingestion", () => {
     }
   });
 
+  it("lets a user probe realtime immediately from compatibility mode", async () => {
+    vi.useFakeTimers();
+    let cursor = 0;
+    const sync = vi.fn(async () => ({ next_cursor: ++cursor, has_more: false, items: [] }));
+    const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
+    class BlockedSocket { constructor() { throw new TypeError("WebSocket upgrade blocked"); } }
+    vi.stubGlobal("WebSocket", BlockedSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient, db, async () => null, undefined, null);
+
+    try {
+      await engine.start();
+      await engine.connectRoom("!manual-probe-0001:example.com");
+      await vi.advanceTimersByTimeAsync(reconnectDelay(1));
+      await vi.advanceTimersByTimeAsync(reconnectDelay(2) + 1);
+      const ticketsBeforeProbe = wsTicket.mock.calls.length;
+
+      await engine.retryRealtime();
+      expect(wsTicket).toHaveBeenCalledTimes(ticketsBeforeProbe + 1);
+    } finally {
+      engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns a manual realtime retry failure after scheduling normal recovery", async () => {
+    const failure = new TypeError("network unavailable");
+    const sync = vi.fn(async () => { throw failure; });
+    const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync } as unknown as ApiClient, db, async () => null, undefined, null);
+    const errors: unknown[] = [];
+    engine.addEventListener("error", (event) => errors.push((event as CustomEvent<unknown>).detail));
+
+    await engine.start();
+    await expect(engine.retryRealtime()).rejects.toBe(failure);
+    engine.stop();
+
+    expect(errors).toEqual([failure, failure]);
+  });
+
   it("pauses compatibility polling in the background and resumes without room amplification", async () => {
     vi.useFakeTimers();
     let cursor = 0;

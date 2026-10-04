@@ -1134,7 +1134,7 @@ export class SyncEngine extends EventTarget {
     this.scheduleHttpsFallbackPoll();
   }
 
-  private async recover(): Promise<void> {
+  private async recover(rethrow = false): Promise<void> {
     if (!this.running) return;
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
@@ -1146,7 +1146,13 @@ export class SyncEngine extends EventTarget {
     } catch (error) {
       this.connectionError(error);
       if (retryableConnectionError(error)) for (const roomId of this.desiredRooms) this.scheduleReconnect(roomId);
+      if (rethrow) throw error;
     }
+  }
+
+  /** User-initiated durable catch-up followed by one bounded realtime probe. */
+  retryRealtime(): Promise<void> {
+    return this.recover(true);
   }
 
   /**

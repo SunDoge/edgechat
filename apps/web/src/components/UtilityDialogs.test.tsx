@@ -73,21 +73,28 @@ describe("account safety dialogs", () => {
     const noop = vi.fn(); const asyncNoop = vi.fn(async () => undefined);
     const onReadReceiptSharing = vi.fn(async () => undefined);
     const onTypingIndicatorSharing = vi.fn(async () => undefined);
+    const onRetryRealtime = vi.fn(async () => undefined);
     dispose = render(() => <DevicesDialog
       devices={[]} revocations={{}} profile={null}
       storage={{ attachment_bytes: 1024, archive_bytes: 2048, avatar_bytes: 512, attachment_objects: 1, archive_objects: 1, avatar_objects: 1, used_bytes: 3584, quota_bytes: 1_048_576, remaining_bytes: 1_044_992, used_objects: 3, object_limit: 100, remaining_objects: 97, quota_source: "default", updated_at: 1 }}
       localStorageHealth={null} backup={null} invitationPolicy="everyone" installState={{ status: "unavailable", platform: "browser" }}
+      connectionState="online" transportMode="https"
       currentDeviceId="device" pushAvailable={false} pushStatus="off" voiceRecordingAvailable qrScanningAvailable passwordChangeSupported passkeysSupported linkPreviews={false} presenceSharing={false} readReceiptSharing={false} typingIndicatorSharing={false} exportBusy={false}
       onEditProfile={noop} onShareContact={noop} onManageBlockedUsers={noop} onInvitationPolicy={asyncNoop} onLinkPreviews={asyncNoop} onPresenceSharing={asyncNoop} onReadReceiptSharing={onReadReceiptSharing} onTypingIndicatorSharing={onTypingIndicatorSharing} onRequestPersistence={vi.fn(async () => ({ outcome: "unsupported" as const, health: { persistence: "unsupported" as const, canRequestPersistence: false, usage: null, quota: null } }))}
-      onInstall={noop} onLinkDevice={noop} onEnablePush={noop} onDisablePush={noop} onBackup={noop} onChangePassword={noop} onManagePasskeys={noop} onExport={noop} onDeleteAccount={noop} onRevoke={noop} onLogout={noop} onClose={noop}/>, root());
+      onRetryRealtime={onRetryRealtime} onInstall={noop} onLinkDevice={noop} onEnablePush={noop} onDisablePush={noop} onBackup={noop} onChangePassword={noop} onManagePasskeys={noop} onExport={noop} onDeleteAccount={noop} onRevoke={noop} onLogout={noop} onClose={noop}/>, root());
     expect(document.body.textContent).toContain("云端加密存储");
     expect(document.body.textContent).toContain("附件 1.0 KB · 消息历史 2.0 KB · 头像 512 B");
+    expect(document.body.textContent).toContain("HTTPS 兼容模式");
+    Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("重试实时连接"))!.click();
     const switches = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="switch"]'));
     switches.find((button) => button.getAttribute("aria-label") === "发送已读回执")!.click();
     switches.find((button) => button.getAttribute("aria-label") === "发送正在输入状态")!.click();
     await vi.waitFor(() => {
       expect(onReadReceiptSharing).toHaveBeenCalledWith(true);
       expect(onTypingIndicatorSharing).toHaveBeenCalledWith(true);
+      expect(onRetryRealtime).toHaveBeenCalledOnce();
     });
+    expect(document.querySelector<HTMLDetailsElement>("details")!.open).toBe(false);
+    expect(document.body.textContent).toContain("VLESS");
   });
 });

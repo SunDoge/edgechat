@@ -211,6 +211,15 @@ async function main() {
       await alicePage.getByRole("button", { name: "发送", exact: true }).click();
       await timelineMessage(bobPage, fallbackMessage).waitFor({ timeout: 30_000 });
       console.log(JSON.stringify({ step: "websocket-blocked-https-fallback" }));
+
+      await bobPage.getByRole("button", { name: /设备与账户/ }).click();
+      const accountDialog = bobPage.getByRole("dialog", { name: "设备与账户" });
+      await accountDialog.getByText("HTTPS 兼容模式", { exact: true }).waitFor();
+      await accountDialog.getByText("消息仍会定时同步；正在输入和在线状态可能延迟。", { exact: true }).waitFor();
+      await accountDialog.getByText("浏览器网络限制", { exact: true }).waitFor();
+      await accountDialog.getByRole("button", { name: "重试实时连接", exact: true }).click();
+      await accountDialog.getByRole("button", { name: "重试实时连接", exact: true }).waitFor({ timeout: 30_000 });
+      console.log(JSON.stringify({ step: "compatibility-mode-recovery-ui" }));
     }
 
     await verifyIdempotentAttachment(alice, roomId);

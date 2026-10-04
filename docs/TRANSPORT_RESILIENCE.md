@@ -19,6 +19,7 @@ The durable source of delivery remains the monotonic `/api/v1/sync` log. WebSock
 5. The UI labels this as **兼容模式** and explains that messages still sync while typing and presence may be delayed.
 6. A backgrounded document pauses compatibility polling and relies on Web Push for notification hints; foreground resume performs an immediate durable catch-up. This avoids hidden-tab D1 polling without treating Push as delivery.
 7. Consecutive HTTPS failures exponentially back off the next poll to a 60-second ceiling. The first successful cursor read restores the normal 4–7 second interval.
+8. The account panel exposes the current transport and one explicit realtime retry. It performs one shared durable catch-up and one WSS probe per affected room; a failed attempt remains in compatibility mode and reports a human-readable recovery state.
 
 This path performs bounded D1 cursor reads only. It never reads, writes, lists, heads, copies, pads, or duplicates an R2/S3 object. Message sends continue through their ordinary HTTPS endpoint, and missing events retain the same signature, MLS and sequence validation as WebSocket delivery. Web Push remains only a content-free wake-up hint: foreground `/sync` is still the durable recovery mechanism.
 
