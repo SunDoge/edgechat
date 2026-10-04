@@ -16,7 +16,7 @@ export const DEFAULT_SCENARIO = Object.freeze({
   averageEventBytes: 2_048,
   attachmentRate: 0.05,
   averageAttachmentBytes: 2 * 1024 * 1024,
-  compressionRatio: 0.65,
+  compressionRatio: 0.85,
   keyEnvelopeBytes: 512,
   indexBytesPerEvent: 18,
   coldArchiveLookupsPerDay: 5,
@@ -162,6 +162,7 @@ export function createCapacityPlan(input = {}) {
     notes: [
       "Counts describe successful-path object operations; retries, repair, deletion and temporary device-transfer objects are intentionally separate.",
       "Attachment rate is the average attachment-object count per accepted event and may be greater than one for albums.",
+      "The default 0.85 archive compression ratio is conservative for base64url-encoded high-entropy MLS ciphertext and is release-tested against the real zstd segment builder.",
       "Cold archive lookup means header plus envelope/index plus requested chunk ranges; warm lookup reuses authenticated local metadata.",
       "Storage bytes are planning estimates. Apply current provider prices outside this model so changing R2/B2/S3 tariffs cannot silently alter the protocol budget.",
     ],

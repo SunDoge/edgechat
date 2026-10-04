@@ -219,6 +219,12 @@ into the current provider price sheet, record the date and provider, then compar
 them with deployed metrics. The forecast excludes retries, repair, deletion and
 temporary device-transfer objects and labels that limitation in its output; it
 is a planning gate, not a substitute for a production load/cost measurement.
+The default compression ratio is a conservative 0.85 because MLS ciphertext is
+high entropy even though its base64url representation and repeated JSON framing
+still compress. Release tests build representative 500-event segments through
+the real zrip/zstd implementation and require the forecast not to undercount the
+result. Override the ratio only when a recorded representative corpus justifies
+it.
 
 Normal attachment upload uses one client-chosen 192-bit opaque ID and one
 conditional PUT. D1 binds that ID to the uploader, room, size and ciphertext
