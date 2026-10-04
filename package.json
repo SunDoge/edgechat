@@ -44,6 +44,7 @@
     "db:types:check": "pnpm --filter @edgechat/worker db:types:check",
     "audit:storage": "node packages/storage-audit/src/cli.mjs",
     "plan:capacity": "node packages/capacity-plan/src/cli.mjs",
+    "report:object-usage": "node packages/capacity-plan/src/observed-cli.mjs",
     "operator": "node packages/operator-cli/src/cli.mjs",
     "deploy": "pnpm run build && pnpm --filter @edgechat/worker deploy"
   },

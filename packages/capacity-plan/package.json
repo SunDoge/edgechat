@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "bin": {
-    "edgechat-capacity-plan": "./src/cli.mjs"
+    "edgechat-capacity-plan": "./src/cli.mjs",
+    "edgechat-object-usage": "./src/observed-cli.mjs"
   },
   "scripts": {
-    "build": "node --check src/model.mjs && node --check src/cli.mjs",
-    "typecheck": "node --check src/model.mjs && node --check src/cli.mjs",
+    "build": "node --check src/model.mjs && node --check src/cli.mjs && node --check src/observed.mjs && node --check src/observed-cli.mjs",
+    "typecheck": "node --check src/model.mjs && node --check src/cli.mjs && node --check src/observed.mjs && node --check src/observed-cli.mjs",
     "test": "node --test"
   },
   "engines": {

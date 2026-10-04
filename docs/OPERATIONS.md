@@ -96,6 +96,36 @@ boundary. It performs no D1 query, bucket listing, probe, or additional
 R2/S3 operation. Disable it after the exercise. Readiness reports whether it is
 enabled but continues to return `probed: false`.
 
+Capture a bounded staging window as JSON Lines, then summarize it offline:
+
+```sh
+pnpm --filter @edgechat/worker exec wrangler tail edgechat-staging \
+  --format json > object-operations.jsonl
+
+pnpm run report:object-usage -- \
+  --input object-operations.jsonl \
+  --max-error-events 0 \
+  --max-unknown-request-events 0 \
+  --max-unknown-byte-events 0 \
+  --max-confirmed-requests 100000
+```
+
+Stop the tail process at the end of the declared exercise window. The report
+accepts direct structured Workers Logs JSONL, Workers Logs API events with a
+structured `source`, and `wrangler tail --format json` invocation records. It
+streams the file line by line and ignores unrelated log events. A malformed
+`object_store.operation` fails closed instead of silently lowering the total.
+Configured limits exit with status 2 for CI use.
+
+`confirmed_requests` is only a lower bound when
+`unknown_request_events` is non-zero, such as an interrupted multi-page S3
+delete. `logical_bytes` is likewise a lower bound when `unknown_byte_events` is
+non-zero. Set both unknown-event limits to zero for a release cost exercise.
+Even a complete parser result cannot correct for Cloudflare sampling,
+truncation, retention, or an incomplete capture window; record those settings
+and reconcile the result with provider billing. The report command itself is
+offline and makes no Worker, D1, R2, S3, HEAD, or LIST request.
+
 ## Before a schema or protocol rollout
 
 1. Install the pinned non-Chromium browser runtimes once with
