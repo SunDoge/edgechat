@@ -83,9 +83,9 @@ import { AttachmentSendCleanupCoordinator } from "./attachment-send-cleanup";
 import { AttachmentCiphertextLoader } from "./attachment-loader";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
 import { createDeviceHistoryBundle } from "./device-history-bundle";
-import { openRoomPeerRecovery, RoomPeerRecoveryError, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
+import { openRoomPeerRecovery, sealRoomPeerRecovery, type RoomPeerRecoveryContext } from "./room-peer-recovery";
 import { RoomOperationError } from "./room-operation-error";
-import { historyRecoveryCopy, type HistoryRecoveryViewState } from "./history-recovery-ui";
+import { historyRecoveryCopy, historyRecoveryErrorKey, type HistoryRecoveryViewState } from "./history-recovery-ui";
 import { openComposerDraft, sealComposerDraft } from "./draft-sync";
 import { clearPushConfig, disablePush, reconcilePush, setActivePushProfile, suspendPush, type PushStatus } from "./push-subscription";
 import { activateLocalProfile, bindLocalProfile, clearLocalProfileToken, createLocalProfile, localBackupExport, profileSessionKey, recordLocalBackupExport, removeLocalProfile, updateLocalProfileName, type LocalBackupExport, type LocalProfile } from "./local-profiles";
@@ -393,15 +393,6 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     setTimelineAwayAfterSeq(null);
     const roomId = selectedRef;
     if (roomId && timelineOpeningRoom !== roomId && document.visibilityState === "visible" && !historyFocus()) void markRoomRead(roomId);
-  }
-
-  function historyRecoveryError(cause: unknown): string {
-    if (!navigator.onLine) return t("workspace.historyRecovery.error.offline");
-    if (cause instanceof RoomPeerRecoveryError) return operationErrorMessage(cause, t("workspace.historyRecovery.error.invalid"), t);
-    if (cause instanceof ApiError && cause.code === "peer_recovery_source_unavailable") return t("workspace.historyRecovery.error.noSource");
-    if (cause instanceof ApiError && (cause.status === 409 || cause.status === 429)) return t("workspace.historyRecovery.error.busy");
-    if (cause instanceof ApiError && cause.status >= 500) return t("workspace.historyRecovery.error.server");
-    return t("workspace.historyRecovery.error.invalid");
   }
 
   function attachmentReferenceMetadata(ids: readonly string[], sourceIds: readonly string[] = []): ClientEvent["metadata"] {
@@ -1163,7 +1154,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
           tracked.resetRequired = !transient && (sequence?.processed_through_seq ?? tracked.afterSeq) < tracked.throughSeq;
           console.warn(JSON.stringify({ message: "peer recovery target failed", room_id: roomId,
             error: cause instanceof Error ? cause.message : String(cause) }));
-          setHistoryRecoveryState(roomId, { phase: "failed", message: historyRecoveryError(cause) });
+          setHistoryRecoveryState(roomId, { phase: "failed", errorKey: historyRecoveryErrorKey(cause, navigator.onLine) });
         }
       }
     })();
@@ -1198,7 +1189,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const needed = peerRecoveryNeeds.get(roomId);
       if (!peerRecoveryByRoom.has(roomId) && needed) await requestPeerRecovery(roomId, needed.processedThrough, needed.requiredThrough);
       else await processPeerRecoveries();
-    })().catch((cause) => setHistoryRecoveryState(roomId, { phase: "failed", message: historyRecoveryError(cause) }));
+    })().catch((cause) => setHistoryRecoveryState(roomId, { phase: "failed", errorKey: historyRecoveryErrorKey(cause, navigator.onLine) }));
   }
 
   onMount(() => {
@@ -1373,9 +1364,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setHistoryRecoveryState(roomId, { phase: "requesting" });
       setNotice(t("workspace.feedback.historyRecoveryWaiting"));
       void requestPeerRecovery(roomId, detail.processedThrough, detail.requiredThrough).catch((cause) => {
-        const message = historyRecoveryError(cause);
-        setHistoryRecoveryState(roomId, { phase: "failed", message });
-        setNotice(message);
+        const errorKey = historyRecoveryErrorKey(cause, navigator.onLine);
+        setHistoryRecoveryState(roomId, { phase: "failed", errorKey });
+        setNotice(t(errorKey));
       });
     };
     const historyRecoveryComplete = (received: Event) => {
