@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeServerProtocol, serverSupports } from "./index";
+import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeLocalUserId, normalizeServerProtocol, serverSupports } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -11,6 +11,11 @@ describe("federation-ready identifiers", () => {
     expect(isNamespacedEventId("$01234567")).toBe(false);
     expect(isNamespacedMessageId("$01234567:example.com")).toBe(true);
     expect(isNamespacedMessageId("01234567")).toBe(false);
+  });
+  it("normalizes only complete identifiers from the local server", () => {
+    expect(normalizeLocalUserId("  @Alice:Example.COM  ", "example.com")).toBe("@alice:example.com");
+    expect(normalizeLocalUserId("alice", "example.com")).toBeNull();
+    expect(normalizeLocalUserId("@alice:remote.test", "example.com")).toBeNull();
   });
   it("rejects remote traffic in phase one", async () => {
     const transport = new LocalFederationTransport("example.com");

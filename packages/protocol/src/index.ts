@@ -337,6 +337,11 @@ export class LocalFederationTransport implements FederationTransport {
 export function isNamespacedUserId(value: string): value is UserId {
   return /^@[a-z0-9_][a-z0-9_.-]{1,30}:[a-z0-9.-]+$/i.test(value);
 }
+export function normalizeLocalUserId(value: string, localDomain: string): UserId | null {
+  const normalized = value.trim().toLowerCase();
+  if (!isNamespacedUserId(normalized)) return null;
+  return normalized.slice(normalized.lastIndexOf(":") + 1) === localDomain.toLowerCase() ? normalized : null;
+}
 export function isNamespacedRoomId(value: string): value is RoomId {
   return /^![A-Za-z0-9_-]{16,}:[a-z0-9.-]+$/i.test(value);
 }

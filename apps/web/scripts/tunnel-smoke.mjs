@@ -152,8 +152,15 @@ async function main() {
     await register(bobPage, bob);
     console.log(JSON.stringify({ step: "registered", alice: alice.username, bob: bob.username, ambiguousRegistrationVerified: injectAmbiguousRegistration }));
 
+    const fuzzyLookup = await fetch(`${baseUrl}/api/v1/users?q=${encodeURIComponent(bob.username)}`, { headers: { authorization: `Bearer ${alice.accessToken}` } });
+    if (!fuzzyLookup.ok || (await fuzzyLookup.json()).users.length !== 0) throw new Error("nickname lookup exposed the account directory");
+    const exactLookup = await fetch(`${baseUrl}/api/v1/users?q=${encodeURIComponent(bob.userId)}`, { headers: { authorization: `Bearer ${alice.accessToken}` } });
+    const exactUsers = exactLookup.ok ? (await exactLookup.json()).users : [];
+    if (exactUsers.length !== 1 || exactUsers[0].user_id !== bob.userId) throw new Error("exact contact ID lookup failed");
+    console.log(JSON.stringify({ step: "directoryless-exact-contact-resolution" }));
+
     await alicePage.getByLabel("新建对话").click();
-    await alicePage.getByLabel("搜索用户").fill(bob.username);
+    await alicePage.getByLabel("完整用户 ID，例如 @alice:example.com").fill(bob.userId);
     await alicePage.getByRole("button", { name: new RegExp(bob.name) }).click();
     const roomCreation = alicePage.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/rooms", { timeout: 120_000 });
     await alicePage.getByRole("button", { name: "开始对话", exact: true }).click();

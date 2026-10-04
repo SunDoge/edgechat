@@ -81,11 +81,22 @@ describe("RoomSettingsDialog group membership", () => {
   it("lets an owner search only non-members and add one", async () => {
     const props = mount();
     const input = document.querySelector("#member-search") as HTMLInputElement;
-    input.value = "ca"; input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "ca" }));
+    input.value = "@carol:example.com"; input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "@carol:example.com" }));
     await vi.waitFor(() => expect(document.body.textContent).toContain("Carol"), { timeout: 1_000 });
+    expect(props.searchUsers).toHaveBeenCalledWith("@carol:example.com");
     expect(document.body.textContent).not.toContain("Bob添加");
     [...document.querySelectorAll("button")].find((button) => button.textContent === "添加")?.click();
     await vi.waitFor(() => expect(props.onAddMember).toHaveBeenCalledWith("@carol:example.com"));
+  });
+
+  it("does not query the member directory for a nickname", async () => {
+    const searchUsers = vi.fn(async () => []);
+    mount({ searchUsers });
+    const input = document.querySelector("#member-search") as HTMLInputElement;
+    input.value = "Carol"; input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "Carol" }));
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+    expect(searchUsers).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("昵称不可搜索");
   });
 
   it("does not expose membership controls to a non-owner", () => {

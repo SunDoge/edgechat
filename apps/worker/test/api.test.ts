@@ -3166,6 +3166,13 @@ describe("single-server durable delivery", () => {
     const usageAfterDeleteRetry = await SELF.fetch("https://edgechat.test/api/v1/storage", { headers: { authorization: `Bearer ${alice.access_token}` } });
     expect(await usageAfterDeleteRetry.json()).toMatchObject({ attachment_bytes: 0, attachment_objects: 0 });
 
+    expect(await SELF.fetch("https://edgechat.test/api/v1/users?q=Bob", { headers: { authorization: `Bearer ${alice.access_token}` } }).then((response) => response.json())).toEqual({ users: [] });
+    expect(await SELF.fetch("https://edgechat.test/api/v1/users?q=%40bob%3Aremote.test", { headers: { authorization: `Bearer ${alice.access_token}` } }).then((response) => response.json())).toEqual({ users: [] });
+    expect(await SELF.fetch(`https://edgechat.test/api/v1/users?q=${encodeURIComponent(alice.user_id)}`, { headers: { authorization: `Bearer ${alice.access_token}` } }).then((response) => response.json())).toEqual({ users: [] });
+    const exactBob = await SELF.fetch(`https://edgechat.test/api/v1/users?q=${encodeURIComponent(bob.user_id)}`, { headers: { authorization: `Bearer ${alice.access_token}` } }).then((response) => response.json()) as { users: Array<{ user_id: string; display_name: string }> };
+    expect(exactBob.users).toHaveLength(1);
+    expect(exactBob.users[0]).toMatchObject({ user_id: bob.user_id });
+
     const block = await SELF.fetch(`https://edgechat.test/api/v1/users/${encodeURIComponent(bob.user_id)}/block`, { method: "PUT", headers: { authorization: `Bearer ${alice.access_token}` } });
     expect(block.status).toBe(204);
     expect(await env.DB.prepare("SELECT blocker_user_id, blocked_user_id FROM user_blocks").first()).toEqual({ blocker_user_id: alice.user_id, blocked_user_id: bob.user_id });
@@ -3173,8 +3180,8 @@ describe("single-server durable delivery", () => {
     const bobRooms = await SELF.fetch("https://edgechat.test/api/v1/rooms", { headers: { authorization: `Bearer ${bob.access_token}` } }).then((response) => response.json()) as { rooms: Array<{ room_id: string; blocked_by_me: boolean }> };
     expect(aliceRooms.rooms.find((room) => room.room_id === roomId)?.blocked_by_me).toBe(true);
     expect(bobRooms.rooms.find((room) => room.room_id === roomId)?.blocked_by_me).toBe(false);
-    expect(await SELF.fetch("https://edgechat.test/api/v1/users?q=bob", { headers: { authorization: `Bearer ${alice.access_token}` } }).then((response) => response.json())).toEqual({ users: [] });
-    expect(await SELF.fetch("https://edgechat.test/api/v1/users?q=alice", { headers: { authorization: `Bearer ${bob.access_token}` } }).then((response) => response.json())).toEqual({ users: [] });
+    expect(await SELF.fetch(`https://edgechat.test/api/v1/users?q=${encodeURIComponent(bob.user_id)}`, { headers: { authorization: `Bearer ${alice.access_token}` } }).then((response) => response.json())).toEqual({ users: [] });
+    expect(await SELF.fetch(`https://edgechat.test/api/v1/users?q=${encodeURIComponent(alice.user_id)}`, { headers: { authorization: `Bearer ${bob.access_token}` } }).then((response) => response.json())).toEqual({ users: [] });
     const blockedClaim = await SELF.fetch("https://edgechat.test/api/v1/mls/key-packages/claim", { method: "POST", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ user_ids: [alice.user_id], room_id: "!blocked-room-000001:localhost" }) });
     expect(blockedClaim.status).toBe(403);
     expect(await blockedClaim.json()).toMatchObject({ code: "interaction_not_allowed" });

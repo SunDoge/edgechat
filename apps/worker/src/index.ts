@@ -1,4 +1,4 @@
-import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DeviceSessionChallenge, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, normalizeLocalUserId, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DeviceSessionChallenge, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
 import { sql } from "kysely";
 import { authenticate, cleanupExpiredAuthenticationState, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
@@ -5875,18 +5875,26 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   }
   if (path === "/api/v1/users" && request.method === "GET") {
     requireUser(auth);
-    const q = (url.searchParams.get("q") ?? "").trim();
+    const userId = normalizeLocalUserId(url.searchParams.get("q") ?? "", env.SERVER_NAME);
+    if (!userId || userId === auth.userId) return json({ users: [] });
     const db = createDatabase(env.DB);
-    const blockRows = q.length < 2 ? [] : await db.selectFrom("user_blocks").select(["blocker_user_id", "blocked_user_id"])
-      .where((eb) => eb.or([eb("blocker_user_id", "=", auth.userId), eb("blocked_user_id", "=", auth.userId)])).execute();
-    const hidden = new Set(blockRows.map((row) => row.blocker_user_id === auth.userId ? row.blocked_user_id : row.blocker_user_id));
-    let usersQuery = db.selectFrom("users").select(["user_id", "display_name", "avatar_id"]).where("user_id", "!=", auth.userId)
-      .where("deletion_requested_at", "is", null)
-      .where("deleted_at", "is", null)
-      .where((eb) => eb.or([eb("localpart", "like", `${q}%`), eb("display_name", "like", `%${q}%`)]));
-    if (hidden.size) usersQuery = usersQuery.where("user_id", "not in", [...hidden]);
-    const users = q.length < 2 ? [] : (await usersQuery.limit(20).execute()).map(({ avatar_id, ...user }) => ({ ...user, avatar_url: avatarUrl(avatar_id) }));
-    return json({ users });
+    const user = await db.selectFrom("users as candidate")
+      .leftJoin("user_blocks as blocked_by_me", (join) => join
+        .onRef("blocked_by_me.blocked_user_id", "=", "candidate.user_id")
+        .on("blocked_by_me.blocker_user_id", "=", auth.userId))
+      .leftJoin("user_blocks as blocked_me", (join) => join
+        .onRef("blocked_me.blocker_user_id", "=", "candidate.user_id")
+        .on("blocked_me.blocked_user_id", "=", auth.userId))
+      .select(["candidate.user_id as user_id", "candidate.display_name as display_name", "candidate.avatar_id as avatar_id"])
+      .where("candidate.user_id", "=", userId)
+      .where("candidate.deletion_requested_at", "is", null)
+      .where("candidate.deleted_at", "is", null)
+      .where("blocked_by_me.blocker_user_id", "is", null)
+      .where("blocked_me.blocker_user_id", "is", null)
+      .executeTakeFirst();
+    if (!user) return json({ users: [] });
+    const { avatar_id, ...profile } = user;
+    return json({ users: [{ ...profile, avatar_url: avatarUrl(avatar_id) }] });
   }
   if (path === "/api/v1/rooms" && request.method === "GET") return listRooms(env, auth);
   if (path === "/api/v1/rooms" && request.method === "POST") return createRoom(request, env, auth);

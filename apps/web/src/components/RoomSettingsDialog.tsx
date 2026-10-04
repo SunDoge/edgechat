@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { IconDownload, IconPhoto, IconSearch, IconShieldCheck, IconTrash } from "@tabler/icons-solidjs";
 import type { LocalRetentionDays, LocalRoomPreference } from "@edgechat/db";
-import type { MessageExpirySeconds, RoomProfileAvatar } from "@edgechat/protocol";
+import { normalizeLocalUserId, type MessageExpirySeconds, type RoomProfileAvatar } from "@edgechat/protocol";
 import { prepareProfileAvatar } from "../avatar-image";
 import { avatarColor, initials } from "../presenters";
 import { EncryptedRoomAvatar } from "./EncryptedRoomAvatar";
@@ -66,6 +66,8 @@ export function RoomSettingsDialog(props: {
   const [memberSearchBusy, setMemberSearchBusy] = createSignal(false);
   const [leaveBusy, setLeaveBusy] = createSignal(false);
   let memberSearchVersion = 0;
+  const localDomain = props.currentUserId.slice(props.currentUserId.lastIndexOf(":") + 1);
+  const exactMemberUserId = () => normalizeLocalUserId(memberQuery(), localDomain);
   const selectedDays = (): LocalRetentionDays | null => value() === "forever" ? null : Number(value()) as LocalRetentionDays;
   const changed = () => selectedDays() !== props.preference.local_retention_days;
   const selectedExpiry = (): MessageExpirySeconds | null => expiryValue() === "off" ? null : Number(expiryValue()) as MessageExpirySeconds;
@@ -76,10 +78,11 @@ export function RoomSettingsDialog(props: {
   onCleanup(() => { const url = avatarPreview(); if (url) URL.revokeObjectURL(url); });
 
   createEffect(() => {
-    const query = memberQuery().trim(); const version = ++memberSearchVersion;
-    if (!props.canManageMembers || query.length < 2) { setMemberResults([]); setMemberSearchBusy(false); return; }
+    const userId = exactMemberUserId(); const version = ++memberSearchVersion;
+    setMemberResults([]); setMemberSearchBusy(false);
+    if (!props.canManageMembers || !userId || userId === props.currentUserId) return;
     setMemberSearchBusy(true);
-    const timer = window.setTimeout(() => void props.searchUsers(query).then((users) => {
+    const timer = window.setTimeout(() => void props.searchUsers(userId).then((users) => {
       if (version !== memberSearchVersion) return;
       const members = new Set(props.members.map((member) => member.userId));
       setMemberResults(users.filter((user) => user.user_id !== props.currentUserId && !members.has(user.user_id)));
@@ -233,9 +236,9 @@ export function RoomSettingsDialog(props: {
       <p class="mt-2 text-xs/5 text-muted">{t("roomSettings.profile.description")}</p>
       <Show when={!props.roomProfileSupported}><p class="mt-2 text-xs/5 text-muted">{t("roomSettings.profile.unsupported")}</p></Show>
       <label class="relative mt-3 block" for="member-search"><span class="sr-only">{t("roomSettings.members.search")}</span><IconSearch class="pointer-events-none absolute left-3 top-3 size-4 shrink-0 stroke-muted"/><input id="member-search" name="member_search" value={memberQuery()} disabled={anyBusy()} autofocus class="h-10 w-full rounded-lg bg-white pl-9 pr-3 text-base text-ink ring-1 ring-neutral-300 outline-none placeholder:text-neutral-400 focus:ring-2 focus:ring-brand disabled:bg-neutral-50 disabled:text-neutral-400 sm:text-sm" placeholder={t("roomSettings.members.search")} onInput={(event) => setMemberQuery(event.currentTarget.value)}/></label>
-      <Show when={memberQuery().trim().length >= 2}><div class="mt-2 divide-y divide-black/5 rounded-xl ring-1 ring-black/8" aria-live="polite">
+      <Show when={memberQuery().trim()}><div class="mt-2 divide-y divide-black/5 rounded-xl ring-1 ring-black/8" aria-live="polite">
         <For each={memberResults()}>{(person) => <div class="flex min-h-14 items-center gap-3 px-3"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{person.display_name}</strong><small class="block truncate text-xs text-muted">{person.user_id}</small></span><button type="button" disabled={anyBusy()} class="h-10 shrink-0 rounded-lg px-3 text-sm font-semibold text-brand hover:bg-brand-soft disabled:opacity-50" onClick={() => void addMember(person.user_id)}>{props.membershipBusyUserId === person.user_id ? t("roomSettings.members.adding") : t("roomSettings.members.add")}</button></div>}</For>
-        <Show when={!memberSearchBusy() && !memberResults().length}><p class="px-3 py-5 text-center text-sm text-muted">{t("roomSettings.members.none")}</p></Show><Show when={memberSearchBusy()}><p class="px-3 py-5 text-center text-sm text-muted">{t("roomSettings.members.searching")}</p></Show>
+        <Show when={!exactMemberUserId()}><p class="px-3 py-5 text-center text-sm/5 text-muted">{t("roomSettings.members.fullIdHint")}</p></Show><Show when={exactMemberUserId() && !memberSearchBusy() && !memberResults().length}><p class="px-3 py-5 text-center text-sm text-muted">{t("roomSettings.members.none")}</p></Show><Show when={memberSearchBusy()}><p class="px-3 py-5 text-center text-sm text-muted">{t("roomSettings.members.searching")}</p></Show>
       </div></Show>
       <div class="mt-4 divide-y divide-black/5"><div class="flex min-h-14 items-center gap-3"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{t("roomSettings.members.you")}</strong><small class="block truncate text-xs text-muted">{props.currentUserId} · {t("roomSettings.members.owner")}</small></span></div><For each={props.members}>{(member) => <div class="flex min-h-14 items-center gap-2"><span class="min-w-0 flex-1"><strong class="block truncate text-sm font-medium text-ink">{member.displayName}</strong><small class="block truncate text-xs text-muted">{member.userId}{member.role === "owner" ? ` · ${t("roomSettings.members.owner")}` : ""}</small></span><Show when={member.role !== "owner"}><div class="flex shrink-0 items-center gap-1"><button type="button" disabled={anyBusy() || !props.ownershipTransferSupported} class="h-10 rounded-lg px-2.5 text-sm font-semibold text-brand hover:bg-brand-soft disabled:opacity-50" onClick={() => void transferOwnership(member.userId, member.displayName)}>{props.ownershipBusyUserId === member.userId ? t("roomSettings.members.transferring") : t("roomSettings.members.transfer")}</button><button type="button" disabled={anyBusy()} class="h-10 rounded-lg px-2.5 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50" onClick={() => void removeMember(member.userId, member.displayName)}>{props.membershipBusyUserId === member.userId ? t("roomSettings.members.updating") : t("roomSettings.members.remove")}</button></div></Show></div>}</For></div>
       <Show when={!props.ownershipTransferSupported}><p class="mt-2 text-xs/5 text-muted">{t("roomSettings.members.transferUnsupported")}</p></Show>

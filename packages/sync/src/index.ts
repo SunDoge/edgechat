@@ -285,7 +285,7 @@ export class ApiClient {
   requestRoomLeave(roomId: RoomId) { return this.request<{ request_id: string; room_id: RoomId; status: "pending" }>(`/api/v1/rooms/${encodeURIComponent(roomId)}/leave`, { method: "POST" }); }
   cancelRoomLeave(roomId: RoomId) { return this.request<void>(`/api/v1/rooms/${encodeURIComponent(roomId)}/leave`, { method: "DELETE" }); }
   roomLeaveTasks() { return this.request<{ tasks: RoomLeaveTask[] }>("/api/v1/room-leave-tasks"); }
-  users(query: string) { return this.request<{ users: Array<{ user_id: string; display_name: string; avatar_url: string | null }> }>(`/api/v1/users?q=${encodeURIComponent(query)}`); }
+  users(userId: string) { return this.request<{ users: Array<{ user_id: string; display_name: string; avatar_url: string | null }> }>(`/api/v1/users?q=${encodeURIComponent(userId)}`); }
   blockedUsers(cursor?: string, limit = 50) {
     const query = new URLSearchParams({ limit: String(limit) });
     if (cursor) query.set("cursor", cursor);
