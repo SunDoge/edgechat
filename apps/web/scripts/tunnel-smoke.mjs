@@ -7,6 +7,10 @@ const browserUrl = process.env.EDGECHAT_SMOKE_BROWSER_URL ?? baseUrl;
 const attachmentOnly = process.env.EDGECHAT_SMOKE_ATTACHMENT_ONLY === "1";
 const injectAmbiguousRegistration = process.env.EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION === "1";
 const blockWebSocket = process.env.EDGECHAT_SMOKE_BLOCK_WEBSOCKET === "1";
+const textLoadCount = Number(process.env.EDGECHAT_SMOKE_TEXT_LOAD_COUNT ?? "0");
+if (!Number.isSafeInteger(textLoadCount) || textLoadCount < 0 || textLoadCount > 10_000) {
+  throw new Error("EDGECHAT_SMOKE_TEXT_LOAD_COUNT must be an integer from 0 to 10000");
+}
 
 const suffix = Math.random().toString(36).slice(2, 10);
 const alice = { name: `Alice ${suffix}` };
@@ -135,6 +139,77 @@ async function verifyIdempotentAttachment(account, roomId) {
   if (!abandoned.ok || (await abandoned.json()).abandoned !== 1) throw new Error("temporary attachment cleanup failed");
 }
 
+async function accountStorage(account) {
+  const response = await fetch(`${baseUrl}/api/v1/storage`, { headers: { authorization: `Bearer ${account.accessToken}` } });
+  if (!response.ok) throw new Error(`storage usage failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
+  return response.json();
+}
+
+function percentile(values, fraction) {
+  const ordered = [...values].sort((left, right) => left - right);
+  return ordered[Math.max(0, Math.ceil(ordered.length * fraction) - 1)];
+}
+
+async function runTextLoad(alicePage, bobPage, roomId) {
+  const fields = ["attachment_bytes", "archive_bytes", "attachment_objects", "archive_objects"];
+  const before = await accountStorage(alice);
+  const latencies = [];
+  let lastMessage = "";
+  const composer = alicePage.getByRole("textbox", { name: "消息输入", exact: true });
+  const firstLoadMessage = `本地负载消息 ${suffix} 1/${textLoadCount}`;
+  try { await composer.fill(firstLoadMessage, { timeout: 10_000 }); }
+  catch {
+    // The recipient acceptance is durable, but the sender can miss its
+    // realtime projection. Recover through authoritative /sync before the
+    // measured window instead of timing a disabled request-state composer.
+    await alicePage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
+    await alicePage.getByText(bob.name, { exact: true }).first().click();
+    await composer.fill(firstLoadMessage, { timeout: 120_000 });
+  }
+  const loadStartedAt = performance.now();
+  for (let index = 0; index < textLoadCount; index += 1) {
+    lastMessage = `本地负载消息 ${suffix} ${index + 1}/${textLoadCount}`;
+    if (index > 0) await composer.fill(lastMessage, { timeout: 120_000 });
+    const accepted = alicePage.waitForResponse((response) => {
+      if (response.request().method() !== "POST") return false;
+      let pathname;
+      try { pathname = decodeURIComponent(new URL(response.url()).pathname); }
+      catch { return false; }
+      return pathname === `/api/v1/rooms/${roomId}/events`
+        && Boolean(response.request().postData()?.includes('"type":"message.text"'));
+    }, { timeout: 120_000 });
+    const sentAt = performance.now();
+    await alicePage.getByRole("button", { name: "发送", exact: true }).click();
+    const response = await accepted;
+    if (!response.ok()) throw new Error(`load message ${index + 1} failed with ${response.status()}`);
+    latencies.push(performance.now() - sentAt);
+  }
+  await timelineMessage(bobPage, lastMessage).waitFor({ timeout: 120_000 });
+  const elapsedMs = performance.now() - loadStartedAt;
+  const after = await accountStorage(alice);
+  const objectLedgerDelta = Object.fromEntries(fields.map((field) => [field, Number(after[field]) - Number(before[field])]));
+  if (Object.values(objectLedgerDelta).some((value) => value !== 0)) {
+    throw new Error(`text-only load changed the object ledger: ${JSON.stringify(objectLedgerDelta)}`);
+  }
+  const result = {
+    step: "text-load",
+    messages: textLoadCount,
+    elapsed_ms: Math.round(elapsedMs),
+    accepted_per_second: Number((textLoadCount / (elapsedMs / 1_000)).toFixed(2)),
+    acceptance_latency_ms: {
+      p50: Math.round(percentile(latencies, 0.5)),
+      p95: Math.round(percentile(latencies, 0.95)),
+      p99: Math.round(percentile(latencies, 0.99)),
+      max: Math.round(Math.max(...latencies)),
+    },
+    receiver_decrypted_last_message: true,
+    object_ledger_delta: objectLedgerDelta,
+    object_store_probe_requests: 0,
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
 async function main() {
   // Treat each endpoint as a real device process so their browser storage,
   // Wasm runtime, crash lifecycle and resource limits remain independent.
@@ -195,6 +270,13 @@ async function main() {
     await bobPage.getByText("接受后才能回复", { exact: true }).waitFor({ state: "hidden", timeout: 120_000 });
     await timelineMessage(bobPage, firstMessage).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "bob-synced-and-decrypted" }));
+
+    if (textLoadCount) {
+      const load = await runTextLoad(alicePage, bobPage, roomId);
+      assertCleanBrowserRun();
+      console.log(JSON.stringify({ ok: true, suffix, load, failures, optionalModelRequests }));
+      return;
+    }
 
     if (blockWebSocket) {
       await bobPage.getByText("已连接（兼容模式）", { exact: true }).waitFor({ timeout: 30_000 });

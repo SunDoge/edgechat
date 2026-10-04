@@ -21,7 +21,8 @@
     "test:pwa:matrix": "pnpm run test:pwa && pnpm run test:pwa:firefox && pnpm run test:pwa:webkit",
     "smoke:tunnel": "node scripts/tunnel-smoke.mjs",
     "smoke:tunnel:https-fallback": "EDGECHAT_SMOKE_BLOCK_WEBSOCKET=1 EDGECHAT_SMOKE_ATTACHMENT_ONLY=1 node scripts/tunnel-smoke.mjs",
-    "smoke:local": "node scripts/local-messaging-smoke.mjs"
+    "smoke:local": "node scripts/local-messaging-smoke.mjs",
+    "load:local": "node scripts/local-messaging-smoke.mjs --load"
   },
   "dependencies": {
     "@edgechat/db": "workspace:*",

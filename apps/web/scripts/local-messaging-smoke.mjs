@@ -10,6 +10,11 @@ const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(webRoot, "../..");
 const persistenceDirectory = await mkdtemp(join(tmpdir(), "edgechat-messaging-smoke-"));
 const childEnvironment = { ...process.env, CI: "1", WRANGLER_HIDE_BANNER: "true", WRANGLER_SEND_METRICS: "false" };
+const loadMode = process.argv.includes("--load");
+const loadMessages = Number(process.env.EDGECHAT_LOAD_MESSAGES ?? (loadMode ? "100" : "0"));
+if (!Number.isSafeInteger(loadMessages) || loadMessages < 0 || loadMessages > 10_000) {
+  throw new Error("EDGECHAT_LOAD_MESSAGES must be an integer from 0 to 10000");
+}
 let worker;
 let workerSpawnError;
 
@@ -99,13 +104,14 @@ try {
         ...childEnvironment,
         EDGECHAT_SMOKE_URL: baseUrl,
         EDGECHAT_SMOKE_BROWSER_URL: baseUrl,
-        EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION: "1",
+        EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION: loadMessages ? "0" : "1",
+        EDGECHAT_SMOKE_TEXT_LOAD_COUNT: String(loadMessages),
       },
     });
   } catch (cause) {
     throw new Error(`${cause instanceof Error ? cause.message : String(cause)}\nLocal Worker output:\n${commandOutput(workerOutput)}`, { cause });
   }
-  console.log(JSON.stringify({ ok: true, isolated: true, remoteObjectRequests: 0 }));
+  console.log(JSON.stringify({ ok: true, isolated: true, loadMessages, remoteObjectRequests: 0 }));
 } finally {
   await stopWorker();
   await rm(persistenceDirectory, { recursive: true, force: true });

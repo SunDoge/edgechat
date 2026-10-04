@@ -226,6 +226,39 @@ the real zrip/zstd implementation and require the forecast not to undercount the
 result. Override the ratio only when a recorded representative corpus justifies
 it.
 
+### Local encrypted-messaging load drill
+
+Run the isolated browser-to-Worker drill after changing message admission,
+OpenMLS state handling, RoomDO ordering, durable sync, or realtime delivery:
+
+```sh
+EDGECHAT_LOAD_MESSAGES=100 pnpm run load:local
+```
+
+The command builds the real Rust/Wasm core and Solid application, migrates a
+temporary local D1 database, starts Wrangler with temporary local R2 state, and
+drives two independent Chromium profiles through registration, room setup,
+contact-request acceptance, MLS encryption, event admission, realtime receipt,
+and receiver decryption. It reports acceptance throughput plus p50, p95, p99 and
+maximum client-observed admission latency. The run fails unless the receiving
+device decrypts the final message and the sender's authoritative attachment and
+archive byte/object ledger is unchanged.
+
+This is intentionally a text-only correctness and regression baseline. It
+performs no remote Cloudflare, R2, or S3 request and never probes a provider with
+LIST, HEAD, or GET merely to measure usage. It does not prove production
+capacity, geographic latency, concurrent-room behavior, provider billing, or
+Durable Object contention. Record the source revision, host class, message
+count, and emitted JSON alongside every release-candidate run, then complement
+it with an explicitly approved staging load/cost exercise.
+
+The 2026-10-04 development baseline on the local Linux build host accepted 100
+sequential encrypted messages in 15,429 ms (6.48 messages/s), with 144 ms p50,
+190 ms p95, 197 ms p99, and 199 ms maximum admission latency. The receiver
+decrypted the final message; all four attachment/archive ledger deltas were zero
+and the wrapper reported zero remote object-store requests. Treat these numbers
+only as a regression reference for the same host class, not as an SLO.
+
 Normal attachment upload uses one client-chosen 192-bit opaque ID and one
 conditional PUT. D1 binds that ID to the uploader, room, size and ciphertext
 digest. Retrying after an ambiguous response returns the committed D1 row with
