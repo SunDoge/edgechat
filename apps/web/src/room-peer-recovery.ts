@@ -36,9 +36,9 @@ const ERROR_KEYS = {
   invalid_events: "workspace.historyRecovery.error.invalidEvents",
 } as const satisfies Record<RoomPeerRecoveryErrorCode, StaticMessageKey>;
 
-export class RoomPeerRecoveryError extends UserFacingError {
+export class RoomPeerRecoveryError extends UserFacingError<StaticMessageKey> {
   constructor(readonly code: RoomPeerRecoveryErrorCode) {
-    super(ERROR_KEYS[code], ERROR_KEYS[code]);
+    super(ERROR_KEYS[code], {});
     this.name = "RoomPeerRecoveryError";
   }
 }

@@ -24,7 +24,7 @@ export function DeviceLinkApprovalDialog(props: { api: ApiClient; onApprove: (li
     try {
       const linkId = parseDeviceLinkInput(value);
       const next = await props.api.deviceLinkPreview(linkId);
-      if (next.status === "complete" || next.status === "claimed" || next.status === "cancelled") throw new UserFacingError(t("deviceLinkApproval.error.ended"));
+      if (next.status === "complete" || next.status === "claimed" || next.status === "cancelled") throw UserFacingError.localized("deviceLinkApproval.error.ended");
       setPreview(next); setFingerprint(await deviceFingerprint(next.signing_key, next.encryption_key));
     } catch (cause) { setError(operationErrorMessage(cause, t("deviceLinkApproval.error.read"), t)); }
     finally { setBusy(false); }

@@ -10,7 +10,7 @@ export function isRetryableDeviceContinuationError(cause: unknown): boolean {
 }
 
 export function authErrorMessage(cause: unknown, t: Translator = translate, fallback = t("auth.error.localSecurity")): string {
-  if (cause instanceof UserFacingError) return cause.messageKey ? t(cause.messageKey) : cause.message;
+  if (cause instanceof UserFacingError) return cause.localizedMessage(t);
   if (cause instanceof ApiError) {
     switch (cause.code) {
       case "invalid_credentials": return t("auth.error.invalidCredentials");

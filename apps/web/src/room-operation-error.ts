@@ -27,9 +27,9 @@ const MESSAGE_KEYS = {
 } as const satisfies Record<RoomOperationErrorCode, StaticMessageKey>;
 
 /** Expected room state that the user can recover from without exposing MLS internals. */
-export class RoomOperationError extends UserFacingError {
+export class RoomOperationError extends UserFacingError<StaticMessageKey> {
   constructor(readonly code: RoomOperationErrorCode) {
-    super(MESSAGE_KEYS[code], MESSAGE_KEYS[code]);
+    super(MESSAGE_KEYS[code], {});
     this.name = "RoomOperationError";
   }
 }

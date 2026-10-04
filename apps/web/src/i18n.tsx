@@ -1209,7 +1209,7 @@ type PlaceholderNames<Value extends string> =
 export type StaticMessageKey = {
   [Key in MessageKey]: [PlaceholderNames<(typeof zhHansMessages)[Key]>] extends [never] ? Key : never
 }[MessageKey];
-type MessageArguments<Key extends MessageKey> =
+export type MessageArguments<Key extends MessageKey> =
   [PlaceholderNames<(typeof zhHansMessages)[Key]>] extends [never]
     ? []
     : [values: Record<PlaceholderNames<(typeof zhHansMessages)[Key]>, string | number>];

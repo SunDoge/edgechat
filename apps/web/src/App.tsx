@@ -399,7 +399,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (!ids.length) return {};
     const currentSession = session();
     if (!currentSession) throw UserFacingError.localized("send.queueNotReady");
-    if (ids.length > attachmentLimits().max_attachments_per_message) throw new UserFacingError(t("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message }));
+    if (ids.length > attachmentLimits().max_attachments_per_message) throw UserFacingError.localized("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message });
     if (sourceIds.length && sourceIds.length !== ids.length) throw new DiagnosticError("FORWARD_ATTACHMENT_REFERENCES_INCOMPLETE");
     if (serverSupports(currentSession.protocol, "attachments.multi.v1")) {
       return { attachment_ids: [...ids], ...(sourceIds.length ? { forward_source_attachment_ids: [...sourceIds] } : {}) };
@@ -1677,19 +1677,19 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function enqueueNewMessage(room: ServerRoom, text: string, selectedFiles: readonly File[], relation?: MessagePayload["relation"], durationMs?: number | null, imageMode: OutgoingImageMode = "optimized"): Promise<{ optimizedImages: number; unsupportedImages: number; savedBytes: number }> {
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!currentIdentity || !currentSession || !currentMls || !outboxRef) throw new UserFacingError(t("send.queueNotReady"));
+    if (!currentIdentity || !currentSession || !currentMls || !outboxRef) throw UserFacingError.localized("send.queueNotReady");
     mlsProjectionBarrier.assertWritable();
-    if (!text && !selectedFiles.length) throw new UserFacingError(t("send.empty"));
-    if (room.blocked_by_me) throw new UserFacingError(t("send.blocked"));
-    if (room.leave_status === "pending") throw new UserFacingError(t("send.leaving"));
-    if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("send.historyRecovery"));
-    if (text.length > 16_000) throw new UserFacingError(t("send.textTooLong"));
+    if (!text && !selectedFiles.length) throw UserFacingError.localized("send.empty");
+    if (room.blocked_by_me) throw UserFacingError.localized("send.blocked");
+    if (room.leave_status === "pending") throw UserFacingError.localized("send.leaving");
+    if (historyRecoveryRooms().has(room.room_id)) throw UserFacingError.localized("send.historyRecovery");
+    if (text.length > 16_000) throw UserFacingError.localized("send.textTooLong");
     const limits = attachmentLimits();
-    if (selectedFiles.some((file) => !validComposerFile(file))) throw new UserFacingError(t("workspace.composer.invalidFile"));
-    if (selectedFiles.length > limits.max_attachments_per_message) throw new UserFacingError(t("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message }));
-    if (selectedFiles.some((file) => file.size > limits.max_attachment_plaintext_bytes)) throw new UserFacingError(t("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) }));
-    if (selectedFiles.reduce((total, file) => total + file.size, 0) > limits.max_message_attachment_plaintext_bytes) throw new UserFacingError(t("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) }));
-    if (!currentMls.hasGroup(room.room_id)) throw new UserFacingError(t("send.cryptoUnavailable"));
+    if (selectedFiles.some((file) => !validComposerFile(file))) throw UserFacingError.localized("workspace.composer.invalidFile");
+    if (selectedFiles.length > limits.max_attachments_per_message) throw UserFacingError.localized("workspace.composer.tooManyFiles", { count: limits.max_attachments_per_message });
+    if (selectedFiles.some((file) => file.size > limits.max_attachment_plaintext_bytes)) throw UserFacingError.localized("workspace.composer.fileTooLarge", { size: Math.floor(limits.max_attachment_plaintext_bytes / 1024 / 1024) });
+    if (selectedFiles.reduce((total, file) => total + file.size, 0) > limits.max_message_attachment_plaintext_bytes) throw UserFacingError.localized("workspace.composer.filesTooLarge", { size: Math.floor(limits.max_message_attachment_plaintext_bytes / 1024 / 1024) });
+    if (!currentMls.hasGroup(room.room_id)) throw UserFacingError.localized("send.cryptoUnavailable");
     const prepareOutgoingFile = imageMode === "optimized" && hasOptimizableOutgoingImages(selectedFiles)
       ? (await import("./outgoing-media")).prepareOutgoingFile
       : null;
@@ -1780,17 +1780,17 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function sendContactCard(contact: ContactIdentity): Promise<void> {
     const room = selected(); const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new UserFacingError(t("send.queueNotReady"));
+    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw UserFacingError.localized("send.queueNotReady");
     mlsProjectionBarrier.assertWritable();
-    if (!serverSupports(currentSession.protocol, "messages.contact.v1")) throw new UserFacingError(t("contactSend.unsupported"));
-    if (sendBusy()) throw new UserFacingError(t("send.busy"));
-    if (room.blocked_by_me) throw new UserFacingError(t("contactSend.blocked"));
-    if (room.leave_status === "pending") throw new UserFacingError(t("contactSend.leaving"));
-    if (room.request_status === "pending") throw new UserFacingError(t("contactSend.requestPending"));
-    if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("contactSend.historyRecovery"));
+    if (!serverSupports(currentSession.protocol, "messages.contact.v1")) throw UserFacingError.localized("contactSend.unsupported");
+    if (sendBusy()) throw UserFacingError.localized("send.busy");
+    if (room.blocked_by_me) throw UserFacingError.localized("contactSend.blocked");
+    if (room.leave_status === "pending") throw UserFacingError.localized("contactSend.leaving");
+    if (room.request_status === "pending") throw UserFacingError.localized("contactSend.requestPending");
+    if (historyRecoveryRooms().has(room.room_id)) throw UserFacingError.localized("contactSend.historyRecovery");
     const domain = contact.user_id.slice(contact.user_id.lastIndexOf(":") + 1);
-    if (domain !== (currentSession.server_name ?? location.hostname)) throw new UserFacingError(t("contactSend.remoteUnsupported"));
-    if (!currentMls.hasGroup(room.room_id)) throw new UserFacingError(t("send.cryptoUnavailable"));
+    if (domain !== (currentSession.server_name ?? location.hostname)) throw UserFacingError.localized("contactSend.remoteUnsupported");
+    if (!currentMls.hasGroup(room.room_id)) throw UserFacingError.localized("send.cryptoUnavailable");
     const eventId = `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId;
     const payload = createContactMessagePayload(eventId as MessageId, contact);
     setSendBusy(true);
@@ -1828,8 +1828,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function sendIncomingShare(roomId: RoomId, text: string, sharedFiles: File[], imageMode: OutgoingImageMode): Promise<void> {
     const share = incomingShare();
     const room = rooms().find((candidate) => candidate.room_id === roomId);
-    if (!share || !room) throw new UserFacingError(t("shareTarget.error.targetMissing"));
-    if (sendBusy()) throw new UserFacingError(t("shareTarget.error.busy"));
+    if (!share || !room) throw UserFacingError.localized("shareTarget.error.targetMissing");
+    if (sendBusy()) throw UserFacingError.localized("shareTarget.error.busy");
     setSendBusy(true);
     try {
       const media = await enqueueNewMessage(room, text, sharedFiles, undefined, undefined, imageMode);
@@ -1850,16 +1850,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function forwardMessage(source: LocalMessage, targetRoomId: RoomId, successNotice?: string | false, savedFrom?: MessageReference): Promise<void> {
     const targetRoom = rooms().find((room) => room.room_id === targetRoomId);
     const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!targetRoom || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw new UserFacingError(t("send.queueNotReady"));
+    if (!targetRoom || !currentIdentity || !currentSession || !currentMls || !outboxRef) throw UserFacingError.localized("send.queueNotReady");
     mlsProjectionBarrier.assertWritable();
-    if (targetRoom.blocked_by_me) throw new UserFacingError(t("forward.blocked"));
-    if (targetRoom.leave_status === "pending") throw new UserFacingError(t("forward.leaving"));
-    if (historyRecoveryRooms().has(targetRoomId)) throw new UserFacingError(t("forward.historyRecovery"));
-    if (!currentMls.hasGroup(targetRoomId)) throw new UserFacingError(t("send.cryptoUnavailable"));
+    if (targetRoom.blocked_by_me) throw UserFacingError.localized("forward.blocked");
+    if (targetRoom.leave_status === "pending") throw UserFacingError.localized("forward.leaving");
+    if (historyRecoveryRooms().has(targetRoomId)) throw UserFacingError.localized("forward.historyRecovery");
+    if (!currentMls.hasGroup(targetRoomId)) throw UserFacingError.localized("send.cryptoUnavailable");
     const sourcePayload = normalizeMessagePayload((source.payload ?? {}) as MessagePayload, source.event_id);
     const attachments = messageAttachments(sourcePayload);
-    if (messageContacts(sourcePayload).length && !serverSupports(currentSession.protocol, "messages.contact.v1")) throw new UserFacingError(t("contactSend.unsupported"));
-    if (attachments.length > attachmentLimits().max_attachments_per_message) throw new UserFacingError(t("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message }));
+    if (messageContacts(sourcePayload).length && !serverSupports(currentSession.protocol, "messages.contact.v1")) throw UserFacingError.localized("contactSend.unsupported");
+    if (attachments.length > attachmentLimits().max_attachments_per_message) throw UserFacingError.localized("workspace.composer.tooManyFiles", { count: attachmentLimits().max_attachments_per_message });
     const domain = currentSession.server_name ?? location.hostname;
     const eventId = `$${crypto.randomUUID()}:${domain}` as EventId;
     const attachmentAliases = attachments.map(() => encodeBase64Url(crypto.getRandomValues(new Uint8Array(18))));
@@ -1877,7 +1877,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function forwardMessages(sources: LocalMessage[], targetRoomId: RoomId): Promise<void> {
-    if (!sources.some((message) => !message.deleted_at)) throw new UserFacingError(t("forward.none"));
+    if (!sources.some((message) => !message.deleted_at)) throw UserFacingError.localized("forward.none");
     const keepSelectionOnFailure = selectedMessageIds().size > 0;
     let ordered: LocalMessage[];
     try {
@@ -1888,8 +1888,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setForwardingMessages(remaining);
       if (keepSelectionOnFailure) setSelectedMessageIds(new Set(remaining.map((message) => message.message_id)));
       const detail = operationErrorMessage(cause.reason, t("forward.error"), t);
-      if (!cause.completed) throw new UserFacingError(detail);
-      throw new UserFacingError(t("forward.partial", { completed: cause.completed, remaining: remaining.length, detail }));
+      if (!cause.completed) throw cause.reason;
+      throw UserFacingError.localized("forward.partial", { completed: cause.completed, remaining: remaining.length, detail });
     }
     const targetRoom = rooms().find((room) => room.room_id === targetRoomId);
     const currentSession = session();
@@ -1976,7 +1976,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       await loadRooms();
       const saved = rooms().find((room) => room.purpose === "saved");
-      if (!saved) throw new UserFacingError(t("workspace.feedback.savedNotReady"));
+      if (!saved) throw UserFacingError.localized("workspace.feedback.savedNotReady");
       return saved;
     })().finally(() => { savedRoomCreation = null; });
     return savedRoomCreation;
@@ -2065,8 +2065,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     if (historyClearBusy()) return;
     setHistoryClearBusy(true);
     try {
-      if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("workspace.feedback.clearHistoryRecovery"));
-      if ((await db.outbox(room.room_id)).some((item) => visibleMessageTypes.has(item.event.type))) throw new UserFacingError(t("workspace.feedback.clearHistoryOutbox"));
+      if (historyRecoveryRooms().has(room.room_id)) throw UserFacingError.localized("workspace.feedback.clearHistoryRecovery");
+      if ((await db.outbox(room.room_id)).some((item) => visibleMessageTypes.has(item.event.type))) throw UserFacingError.localized("workspace.feedback.clearHistoryOutbox");
       const result = await db.clearRoomHistory(room.room_id, Number(room.current_seq));
       const cacheCleanup = await localCacheCleanup.run();
       if (selectedRef === room.room_id) {
@@ -2085,11 +2085,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function updateMessageExpiry(roomId: RoomId, seconds: MessageExpirySeconds | null): Promise<void> {
     const room = rooms().find((candidate) => candidate.room_id === roomId);
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
-    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new UserFacingError(t("workspace.feedback.roomNotReady"));
-    if (!serverSupports(currentSession.protocol, "messages.expiry.v1")) throw new UserFacingError(t("workspace.feedback.expiryUnsupported"));
-    if (room.blocked_by_me) throw new UserFacingError(t("workspace.feedback.settingBlocked"));
-    if (room.request_status === "pending") throw new UserFacingError(t("workspace.feedback.settingRequestPending"));
-    if (historyRecoveryRooms().has(roomId)) throw new UserFacingError(t("contactSend.historyRecovery"));
+    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw UserFacingError.localized("workspace.feedback.roomNotReady");
+    if (!serverSupports(currentSession.protocol, "messages.expiry.v1")) throw UserFacingError.localized("workspace.feedback.expiryUnsupported");
+    if (room.blocked_by_me) throw UserFacingError.localized("workspace.feedback.settingBlocked");
+    if (room.request_status === "pending") throw UserFacingError.localized("workspace.feedback.settingRequestPending");
+    if (historyRecoveryRooms().has(roomId)) throw UserFacingError.localized("contactSend.historyRecovery");
     const updatedAt = Date.now();
     const payload: MessageExpiryPolicyPayload = { version: 1, kind: "room.message-expiry", expires_in_seconds: seconds, updated_at: updatedAt };
     await mutateMls(async () => {
@@ -2104,11 +2104,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     const room = rooms().find((candidate) => candidate.room_id === roomId);
     const currentIdentity = identityRef; const currentSession = session(); const currentMls = mlsRef;
     const normalizedName = name.trim();
-    if ((!room && !allowUnlistedRoom) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw new UserFacingError(t("workspace.feedback.groupNotReady"));
-    if (!serverSupports(currentSession.protocol, "rooms.profile.v1")) throw new UserFacingError(t("workspace.feedback.roomProfileUnsupported"));
-    if (room && (room.kind !== "group" || room.purpose !== "chat" || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner"))) throw new UserFacingError(t("workspace.feedback.roomProfileOwnerOnly"));
-    if (!normalizedName || normalizedName.length > 100 || /[\u0000-\u001f\u007f]/u.test(normalizedName)) throw new UserFacingError(t("workspace.feedback.roomProfileNameInvalid"));
-    if (!allowUnlistedRoom && historyRecoveryRooms().has(roomId)) throw new UserFacingError(t("workspace.feedback.groupRecovery"));
+    if ((!room && !allowUnlistedRoom) || !currentIdentity || !currentSession || !currentMls || !outboxRef || !currentMls.hasGroup(roomId)) throw UserFacingError.localized("workspace.feedback.groupNotReady");
+    if (!serverSupports(currentSession.protocol, "rooms.profile.v1")) throw UserFacingError.localized("workspace.feedback.roomProfileUnsupported");
+    if (room && (room.kind !== "group" || room.purpose !== "chat" || !room.members.some((member) => member.user_id === currentSession.user_id && member.role === "owner"))) throw UserFacingError.localized("workspace.feedback.roomProfileOwnerOnly");
+    if (!normalizedName || normalizedName.length > 100 || /[\u0000-\u001f\u007f]/u.test(normalizedName)) throw UserFacingError.localized("workspace.feedback.roomProfileNameInvalid");
+    if (!allowUnlistedRoom && historyRecoveryRooms().has(roomId)) throw UserFacingError.localized("workspace.feedback.groupRecovery");
     const acceptedProfile = await db.roomProfile(roomId);
     const pendingProfile = (await db.outbox(roomId)).filter((item) => item.event.type === "control.room.profile" && isRoomProfilePayload(item.payload)).at(-1)?.payload;
     const currentAvatar = isRoomProfilePayload(pendingProfile) ? pendingProfile.avatar : acceptedProfile?.avatar ?? null;
@@ -2169,17 +2169,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function toggleHiddenGroupMember(roomId: RoomId, userId: UserId, hidden: boolean): Promise<void> {
-    try {
-      if (hidden) await api.hideGroupMember(roomId, userId);
-      else await api.showGroupMember(roomId, userId);
-      await loadRooms();
-      if (selectedRef === roomId) await refreshRoomProjection(roomId, true);
-      await refreshUnreadCounts();
-      if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-      setNotice(hidden ? t("workspace.feedback.memberHidden") : t("workspace.feedback.memberShown"));
-    } catch (cause) {
-      throw new UserFacingError(operationErrorMessage(cause, t("workspace.feedback.memberVisibilityError"), t));
-    }
+    if (hidden) await api.hideGroupMember(roomId, userId);
+    else await api.showGroupMember(roomId, userId);
+    await loadRooms();
+    if (selectedRef === roomId) await refreshRoomProjection(roomId, true);
+    await refreshUnreadCounts();
+    if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
+    setNotice(hidden ? t("workspace.feedback.memberHidden") : t("workspace.feedback.memberShown"));
   }
 
   async function toggleRoomBlock(room: ServerRoom): Promise<void> {
@@ -2256,10 +2252,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function enqueueRelationEvent(type: "message.edit" | "message.reaction", target: LocalMessage, payload: MessageEditPayload | MessageReactionPayload): Promise<void> {
     const room = selected(); const currentIdentity = identity(); const currentSession = session(); const currentMls = mls();
-    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || target.room_id !== room.room_id) throw new UserFacingError(t("workspace.feedback.roomNotReady"));
-    if (room.blocked_by_me) throw new UserFacingError(t("workspace.feedback.messageActionBlocked"));
-    if (room.leave_status === "pending") throw new UserFacingError(t("workspace.feedback.messageActionLeaving"));
-    if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("send.historyRecovery"));
+    if (!room || !currentIdentity || !currentSession || !currentMls || !outboxRef || target.room_id !== room.room_id) throw UserFacingError.localized("workspace.feedback.roomNotReady");
+    if (room.blocked_by_me) throw UserFacingError.localized("workspace.feedback.messageActionBlocked");
+    if (room.leave_status === "pending") throw UserFacingError.localized("workspace.feedback.messageActionLeaving");
+    if (historyRecoveryRooms().has(room.room_id)) throw UserFacingError.localized("send.historyRecovery");
     await mutateMls(async () => {
       await enqueueEncryptedEvent({ eventId: `$${crypto.randomUUID()}:${currentSession.server_name ?? location.hostname}` as EventId,
         roomId: room.room_id, type, createdAt: "edited_at" in payload ? payload.edited_at : payload.updated_at,
@@ -2665,10 +2661,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         ? t("workspace.feedback.passwordChangedSessionsRevoked")
         : t("workspace.feedback.passwordChangedSessionsKept"));
     } catch (cause) {
-      if (cause instanceof ApiError && cause.code === "invalid_credentials") throw new UserFacingError(t("workspace.feedback.currentPasswordIncorrect"));
-      if (cause instanceof ApiError && cause.code === "authentication_rate_limited") throw new UserFacingError(t("workspace.feedback.passwordRateLimited"));
-      if (cause instanceof ApiError && cause.code === "weak_password") throw new UserFacingError(t("workspace.feedback.passwordTooShort"));
-      if (cause instanceof ApiError && cause.code === "password_unchanged") throw new UserFacingError(t("passwordChange.same"));
+      if (cause instanceof ApiError && cause.code === "invalid_credentials") throw UserFacingError.localized("workspace.feedback.currentPasswordIncorrect");
+      if (cause instanceof ApiError && cause.code === "authentication_rate_limited") throw UserFacingError.localized("workspace.feedback.passwordRateLimited");
+      if (cause instanceof ApiError && cause.code === "weak_password") throw UserFacingError.localized("workspace.feedback.passwordTooShort");
+      if (cause instanceof ApiError && cause.code === "password_unchanged") throw UserFacingError.localized("passwordChange.same");
       throw cause;
     }
   }
@@ -2851,7 +2847,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function exportPortableBackup(password: string, includeCachedMedia: boolean): Promise<void> {
     const prepared = await mutateMls(async () => {
       const currentSession = session(); const currentMls = mlsRef; const currentIdentity = identityRef;
-      if (!currentSession || !currentIdentity || !currentMls) throw new UserFacingError(t("workspace.feedback.deviceCryptoNotReady"));
+      if (!currentSession || !currentIdentity || !currentMls) throw UserFacingError.localized("workspace.feedback.deviceCryptoNotReady");
       // Drain any already-admitted event before recording the server-side
       // anti-rollback count. New MLS sends cannot overtake this critical section.
       await outboxRef?.kick();
@@ -2892,11 +2888,11 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
             backup = staged.file; stagedCleanup = staged.cleanup;
           } catch (cause) {
             if (!isPortableBackupStorageError(cause)) throw cause;
-            if (!canCreateMemoryPortableBackup(historyBundle.size)) throw new UserFacingError(t("backup.error.saveStorage"));
+            if (!canCreateMemoryPortableBackup(historyBundle.size)) throw UserFacingError.localized("backup.error.saveStorage");
             backup = await createPortableBackupBlob(input);
           }
         } else {
-          if (!canCreateMemoryPortableBackup(historyBundle.size)) throw new UserFacingError(t("backup.error.saveBrowser"));
+          if (!canCreateMemoryPortableBackup(historyBundle.size)) throw UserFacingError.localized("backup.error.saveBrowser");
           backup = await createPortableBackupBlob(input);
         }
         const url = URL.createObjectURL(backup); const anchor = document.createElement("a");
@@ -2917,7 +2913,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     } catch (cause) {
       await writable?.abort(cause).catch(() => undefined);
       await stagedCleanup?.().catch(() => undefined);
-      if (cause instanceof DOMException && cause.name === "AbortError") throw new UserFacingError(t("backup.error.saveCancelled"));
+      if (cause instanceof DOMException && cause.name === "AbortError") throw UserFacingError.localized("backup.error.saveCancelled");
       throw cause;
     }
   }
@@ -2929,10 +2925,10 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       try { stagedBackup = await stagePortableBackupRestore(profileId, file, password, location.origin); }
       catch (cause) {
         if (!isPortableBackupStorageError(cause)) throw cause;
-        if (!canCreateMemoryPortableBackup(file.size)) throw new UserFacingError(t("backup.error.restoreStorage"));
+        if (!canCreateMemoryPortableBackup(file.size)) throw UserFacingError.localized("backup.error.restoreStorage");
       }
     }
-    if (!stagedBackup && !canCreateMemoryPortableBackup(file.size)) throw new UserFacingError(t("backup.error.restoreBrowser"));
+    if (!stagedBackup && !canCreateMemoryPortableBackup(file.size)) throw UserFacingError.localized("backup.error.restoreBrowser");
     const contents = stagedBackup ?? await readPortableBackup(file, password, location.origin);
     try {
       const { openPortableBackupHistory, restorePortableBackupMedia } = await import("./portable-backup-content");
@@ -2940,7 +2936,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       const restoredIdentity = await core.importPortableIdentity(contents.identity);
       let validation: OpenMlsMessagingCore | null = null;
       try { validation = await OpenMlsMessagingCore.create(restoredIdentity.deviceId, restoredIdentity.mlsState); }
-      catch { throw new UserFacingError(t("backup.error.invalidMls")); }
+      catch { throw UserFacingError.localized("backup.error.invalidMls"); }
       finally { validation?.destroy(); }
       const publicKeys = await core.exportPublicIdentity(restoredIdentity);
       await api.checkBackupRestore({
@@ -3520,7 +3516,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
 
   async function requestRoomLeave(room: ServerRoom): Promise<void> {
-    if (!serverSupports(session()?.protocol, "rooms.leave.v1")) throw new UserFacingError(t("workspace.feedback.roomLeaveUnsupported"));
+    if (!serverSupports(session()?.protocol, "rooms.leave.v1")) throw UserFacingError.localized("workspace.feedback.roomLeaveUnsupported");
     if (!confirm(t("workspace.feedback.leaveConfirm", { title: roomTitle(room, session()!.user_id) }))) return;
     stopTyping(room.room_id); flushComposerDraft(room.room_id); cancelComposerMode(); setFiles([]); setVoiceDurationMs(null);
     await api.requestRoomLeave(room.room_id);

@@ -8,9 +8,10 @@ required caller inputs. It contains no language fallback. Pending local-profile
 names are likewise supplied by the catalog before persistence, preventing a
 future locale switch from leaving previously hidden Chinese defaults in the UI.
 Low-level integrity and storage failures use stable, language-neutral diagnostic
-codes. Only explicit catalog-backed `UserFacingError` values may bypass an
-operation's localized fallback, so cryptographic/provider diagnostics never
-become dialog or live-region copy.
+codes. Only a typed catalog key with compile-time-checked interpolation values
+may construct a `UserFacingError`; translation happens at the presentation
+boundary. Arbitrary cryptographic/provider diagnostics therefore cannot become
+dialog or live-region copy.
 
 ## Implemented interaction contract
 

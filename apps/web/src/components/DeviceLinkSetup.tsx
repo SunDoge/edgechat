@@ -87,11 +87,11 @@ export function DeviceLinkSetup(props: {
   }
 
   async function finishLink(current: PendingDeviceLink, nextStatus: DeviceLinkStatus): Promise<void> {
-    if (!identity || !mls || !nextStatus.rooms) throw new UserFacingError(t("deviceLink.error.incomplete"));
+    if (!identity || !mls || !nextStatus.rooms) throw UserFacingError.localized("deviceLink.error.incomplete");
     setStage("joining");
     if (nextStatus.account_mode === "opaque") {
       const transfer = nextStatus.account_credential;
-      if (!transfer) throw new UserFacingError(t("deviceLink.error.accountCredentialMissing"));
+      if (!transfer) throw UserFacingError.localized("deviceLink.error.accountCredentialMissing");
       const accountCredential = await openAccountCredential(transfer.envelope, {
         linkId: current.link_id, sourceDeviceId: transfer.source_device_id, targetDeviceId: current.device_id,
       }, identity);
@@ -101,7 +101,7 @@ export function DeviceLinkSetup(props: {
     for (const room of nextStatus.rooms) {
       if (!room.encrypted_state || mls.hasGroup(room.room_id)) continue;
       const packet = JSON.parse(room.encrypted_state) as { version: number; welcome: string; ratchet_tree: string };
-      if (packet.version !== 1 || !packet.welcome || !packet.ratchet_tree) throw new UserFacingError(t("deviceLink.error.invalidWelcome"));
+      if (packet.version !== 1 || !packet.welcome || !packet.ratchet_tree) throw UserFacingError.localized("deviceLink.error.invalidWelcome");
       mls.joinGroup(packet.welcome, packet.ratchet_tree);
       await persistMlsState();
     }
@@ -118,8 +118,8 @@ export function DeviceLinkSetup(props: {
         const action = deviceHistoryShardResumeAction({
           ready: ready.has(index), acknowledged: acknowledged.has(index), hasLocalPlaintext: Boolean(plaintext),
         });
-        if (action === "local_missing") throw new UserFacingError(t("deviceLink.error.localShardMissing"));
-        if (action === "remote_missing") throw new UserFacingError(t("deviceLink.error.remoteShardMissing"));
+        if (action === "local_missing") throw UserFacingError.localized("deviceLink.error.localShardMissing");
+        if (action === "remote_missing") throw UserFacingError.localized("deviceLink.error.remoteShardMissing");
         if (action === "download_and_acknowledge") {
           const sealed = await props.api.downloadDeviceLinkHistoryShard(current.link_id, current.secret, index);
           plaintext = await openDeviceHistoryShard(sealed, manifest, index, context, identity);
@@ -131,11 +131,11 @@ export function DeviceLinkSetup(props: {
         if (action === "download_and_acknowledge" || action === "acknowledge_local") {
           await props.api.acknowledgeDeviceLinkHistoryShard(current.link_id, current.secret, index);
         }
-        if (!plaintext) throw new UserFacingError(t("deviceLink.error.incompleteHistory"));
+        if (!plaintext) throw UserFacingError.localized("deviceLink.error.incompleteHistory");
         plaintextParts.push(plaintext);
       }
       historySnapshot = new Blob(plaintextParts, { type: "application/gzip" });
-      if (historySnapshot.size !== manifest.plaintext_bytes) throw new UserFacingError(t("deviceLink.error.incompleteHistory"));
+      if (historySnapshot.size !== manifest.plaintext_bytes) throw UserFacingError.localized("deviceLink.error.incompleteHistory");
     }
     const accessToken = current.access_token ?? randomDeviceLinkToken();
     const deviceCredential = current.device_credential ?? randomDeviceLinkToken();
@@ -151,16 +151,16 @@ export function DeviceLinkSetup(props: {
       await props.db.stageLinkedDeviceHistory(bundle.databaseSnapshot, session.user_id);
       for (const attachment of bundle.attachments) {
         const ciphertext = await attachment.ciphertext.arrayBuffer();
-        if (!(await attachmentCache.put(attachment.id, ciphertext))) throw new UserFacingError(t("deviceLink.error.saveAttachment"));
+        if (!(await attachmentCache.put(attachment.id, ciphertext))) throw UserFacingError.localized("deviceLink.error.saveAttachment");
         const acknowledgement = await props.api.acknowledgeAttachmentRetention(attachment.id).catch(() => null);
         if (acknowledgement && acknowledgement.attachment_id !== attachment.id
           && !(await attachmentCache.put(acknowledgement.attachment_id, ciphertext))) {
-          throw new UserFacingError(t("deviceLink.error.saveAttachment"));
+          throw UserFacingError.localized("deviceLink.error.saveAttachment");
         }
       }
       for (const segment of bundle.segments) {
         const ciphertext = await segment.ciphertext.arrayBuffer();
-        if (!(await archiveSegmentCache.put(segment.id, ciphertext))) throw new UserFacingError(t("deviceLink.error.saveSegment"));
+        if (!(await archiveSegmentCache.put(segment.id, ciphertext))) throw UserFacingError.localized("deviceLink.error.saveSegment");
         try { await props.api.acknowledgeArchiveSegmentRetention(segment.id); }
         catch (error) {
           // A 404 can mean the administrator intentionally GC'd the cloud copy.
@@ -191,7 +191,7 @@ export function DeviceLinkSetup(props: {
       else if ((next.status === "complete" || next.status === "claimed") && next.history_transfer
         && !deviceHistoryTransferAvailable(next.history_transfer)) setStage("approved");
       else if (next.status === "complete" || next.status === "claimed") return await finishLink(loadPendingDeviceLink(props.profileId) ?? current, next);
-      else if (next.status === "cancelled") throw new UserFacingError(t("deviceLink.error.cancelled"));
+      else if (next.status === "cancelled") throw UserFacingError.localized("deviceLink.error.cancelled");
       else setStage("waiting");
       timer = window.setTimeout(() => void poll(), 1_500);
     } catch (cause) {

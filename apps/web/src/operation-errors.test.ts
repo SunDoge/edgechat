@@ -2,19 +2,32 @@ import { describe, expect, it } from "vitest";
 import { ApiError, ApiTimeoutError } from "@edgechat/sync";
 import { operationErrorMessage, UserFacingError } from "./operation-errors";
 import { DiagnosticError } from "./diagnostic-error";
+import type { Translator } from "./i18n";
 
 describe("operation error presentation", () => {
   it("preserves only explicitly user-facing validation errors", () => {
-    expect(operationErrorMessage(new UserFacingError("请先恢复此对话"), "发送失败")).toBe("请先恢复此对话");
+    expect(operationErrorMessage(UserFacingError.localized("send.historyRecovery"), "发送失败")).toBe("请先从另一台设备或备份恢复此对话");
+    expect(operationErrorMessage(UserFacingError.localized("workspace.composer.tooManyFiles", { count: 3 }), "发送失败")).toContain("3");
     expect(operationErrorMessage(UserFacingError.localized("backup.error.passwordOrDamage"), "无法恢复备份")).toBe("备份密码错误，或文件已经损坏");
     expect(operationErrorMessage(UserFacingError.localized("avatar.error.invalidDimensions"), "无法处理图片")).toBe("图片尺寸无效");
     expect(operationErrorMessage(UserFacingError.localized("localProfiles.error.cryptoRecovery"), "无法切换本机身份")).toBe("本机加密记录仍在恢复，完成后才能切换身份");
     expect(operationErrorMessage(UserFacingError.localized("workspace.composer.multiAttachmentUnsupported"), "发送失败")).toContain("请分开发送");
     expect(operationErrorMessage(UserFacingError.localized("workspace.feedback.firstUnreadUnavailable"), "无法打开对话")).toBe("无法打开第一条未读消息");
     if (false) {
-      // @ts-expect-error Low-level errors cannot emit a key that needs runtime interpolation.
+      // @ts-expect-error Catalog entries with placeholders require typed interpolation values.
       UserFacingError.localized("deviceLink.rooms");
+      // @ts-expect-error Arbitrary strings cannot be promoted to primary UI errors.
+      new UserFacingError("raw provider diagnostic", {});
     }
+  });
+
+  it("stores catalog data and translates only at the presentation boundary", () => {
+    const error = UserFacingError.localized("workspace.composer.tooManyFiles", { count: 7 });
+    const alternate = ((key: string, values?: Record<string, string | number>) =>
+      `${key}:${values?.count ?? "none"}`) as unknown as Translator;
+
+    expect(error.message).toBe("workspace.composer.tooManyFiles");
+    expect(operationErrorMessage(error, "fallback", alternate)).toBe("workspace.composer.tooManyFiles:7");
   });
 
   it("maps transport, quota, rate and rollout failures without exposing raw diagnostics", () => {

@@ -75,7 +75,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
 
   async function prepareDevice(requireExisting = false) {
     const existing = await loadIdentity(props.profileId);
-    if (requireExisting && !existing) throw new UserFacingError(t("auth.passkey.deviceLinkRequired"));
+    if (requireExisting && !existing) throw UserFacingError.localized("auth.passkey.deviceLinkRequired");
     const identity = existing ?? await props.core.createIdentity();
     const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
     const publicKeys = await props.core.exportPublicIdentity(identity);
@@ -99,7 +99,7 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
       const pending = await props.api.passkeyAuthenticationOptions(username());
       const assertion = await startAuthentication({ optionsJSON: pending.options as unknown as PublicKeyCredentialRequestOptionsJSON });
       const { stored, mls, device } = await prepareDevice(true);
-      if ("backup_checkpoint" in device) throw new UserFacingError(t("auth.passkey.backupPasswordRequired"));
+      if ("backup_checkpoint" in device) throw UserFacingError.localized("auth.passkey.backupPasswordRequired");
       const result = await props.api.loginWithPasskey({
         user_id: username(), challenge_id: pending.challenge_id, challenge: pending.challenge,
         response: assertion, device,

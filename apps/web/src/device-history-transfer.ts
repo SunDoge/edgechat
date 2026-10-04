@@ -37,9 +37,9 @@ const ERROR_KEYS = {
   transfer_limit: "deviceLink.error.historyTransferLimit",
 } as const satisfies Record<DeviceHistoryTransferErrorCode, StaticMessageKey>;
 
-export class DeviceHistoryTransferError extends UserFacingError {
+export class DeviceHistoryTransferError extends UserFacingError<StaticMessageKey> {
   constructor(readonly code: DeviceHistoryTransferErrorCode) {
-    super(ERROR_KEYS[code], ERROR_KEYS[code]);
+    super(ERROR_KEYS[code], {});
     this.name = "DeviceHistoryTransferError";
   }
 }
