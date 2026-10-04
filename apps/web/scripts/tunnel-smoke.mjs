@@ -6,6 +6,7 @@ if (!baseUrl) throw new Error("EDGECHAT_SMOKE_URL is required");
 const browserUrl = process.env.EDGECHAT_SMOKE_BROWSER_URL ?? baseUrl;
 const attachmentOnly = process.env.EDGECHAT_SMOKE_ATTACHMENT_ONLY === "1";
 const injectAmbiguousRegistration = process.env.EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION === "1";
+const blockWebSocket = process.env.EDGECHAT_SMOKE_BLOCK_WEBSOCKET === "1";
 
 const suffix = Math.random().toString(36).slice(2, 10);
 const alice = { name: `Alice ${suffix}` };
@@ -13,6 +14,7 @@ const bob = { name: `Bob ${suffix}` };
 const firstMessage = `公网密文星河 ${suffix}`;
 const reply = `已收到 ${suffix}`;
 const savedMessage = `给自己的备忘 ${suffix}`;
+const fallbackMessage = `HTTPS 兼容同步 ${suffix}`;
 const failures = [];
 const optionalModelRequests = [];
 let ambiguousRegistrationWindow = false;
@@ -146,6 +148,7 @@ async function main() {
   const bobPage = await bobContext.newPage();
   observe(alicePage, "alice"); observe(bobPage, "bob");
   try {
+    if (blockWebSocket) await bobPage.routeWebSocket(/\/api\/v1\/ws(?:\?|$)/, (socket) => void socket.close({ code: 1013, reason: "simulated WebSocket blocking" }));
     const verifyAmbiguousRegistration = await interceptCommittedRegistration(alicePage);
     await register(alicePage, alice);
     await verifyAmbiguousRegistration({ user_id: alice.userId });
@@ -193,11 +196,28 @@ async function main() {
     await timelineMessage(bobPage, firstMessage).waitFor({ timeout: 120_000 });
     console.log(JSON.stringify({ step: "bob-synced-and-decrypted" }));
 
+    if (blockWebSocket) {
+      await bobPage.getByText("已连接（兼容模式）", { exact: true }).waitFor({ timeout: 30_000 });
+      const aliceComposer = alicePage.getByRole("textbox", { name: "消息输入", exact: true });
+      try { await aliceComposer.fill(fallbackMessage, { timeout: 10_000 }); }
+      catch {
+        // Acceptance is durable, but the sender can miss its realtime
+        // projection. Recover it through the authoritative /sync path so this
+        // transport test does not depend on an unrelated UI timing race.
+        await alicePage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
+        await alicePage.getByText(bob.name, { exact: true }).first().click();
+        await alicePage.getByRole("textbox", { name: "消息输入", exact: true }).fill(fallbackMessage, { timeout: 120_000 });
+      }
+      await alicePage.getByRole("button", { name: "发送", exact: true }).click();
+      await timelineMessage(bobPage, fallbackMessage).waitFor({ timeout: 30_000 });
+      console.log(JSON.stringify({ step: "websocket-blocked-https-fallback" }));
+    }
+
     await verifyIdempotentAttachment(alice, roomId);
     console.log(JSON.stringify({ step: "idempotent-attachment-upload-and-cleanup" }));
     if (attachmentOnly) {
       assertCleanBrowserRun();
-      console.log(JSON.stringify({ ok: true, suffix, attachmentOnly: true, failures, optionalModelRequests }));
+      console.log(JSON.stringify({ ok: true, suffix, attachmentOnly: true, blockWebSocket, failures, optionalModelRequests }));
       return;
     }
 

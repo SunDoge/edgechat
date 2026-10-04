@@ -786,6 +786,16 @@ export function reconnectDelay(attempt: number): number {
 }
 
 export const STABLE_SOCKET_RESET_MS = 30_000;
+export const WEBSOCKET_FAILURES_BEFORE_HTTPS_FALLBACK = 3;
+export const HTTPS_FALLBACK_POLL_MIN_MS = 4_000;
+export const HTTPS_FALLBACK_POLL_MAX_MS = 7_000;
+export const HTTPS_FALLBACK_WEBSOCKET_PROBE_POLLS = 10;
+
+function httpsFallbackPollDelay(): number {
+  const spread = HTTPS_FALLBACK_POLL_MAX_MS - HTTPS_FALLBACK_POLL_MIN_MS + 1;
+  const random = crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
+  return HTTPS_FALLBACK_POLL_MIN_MS + random % spread;
+}
 
 export class RoomSequenceGapError extends Error {
   constructor(public readonly roomId: RoomId, public readonly processedThrough: number, public readonly receivedSeq: number) {
@@ -828,6 +838,10 @@ export class SyncEngine extends EventTarget {
   private reconnects = new Map<RoomId, number>();
   private reconnectTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
   private stableSocketTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
+  private httpsFallbackRooms = new Set<RoomId>();
+  private httpsFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private httpsFallbackTask: Promise<void> | null = null;
+  private httpsFallbackPolls = 0;
   private connecting = new Map<RoomId, Promise<void>>();
   private desiredRooms = new Set<RoomId>();
   private disconnectedRooms = new Set<RoomId>();
@@ -896,12 +910,12 @@ export class SyncEngine extends EventTarget {
   /** True while this tab may still mutate durable sync or MLS projection state. */
   isBusy(): boolean {
     return this.startTask !== null || this.catchUpTask !== null || this.resumeTask !== null
-      || this.connecting.size > 0 || this.pendingIngests > 0;
+      || this.httpsFallbackTask !== null || this.connecting.size > 0 || this.pendingIngests > 0;
   }
 
   /** Stop new work and wait until every already-admitted state write has settled. */
   async quiesce(): Promise<void> {
-    const pending = [this.startTask, this.catchUpTask, this.resumeTask, ...this.connecting.values()]
+    const pending = [this.startTask, this.catchUpTask, this.resumeTask, this.httpsFallbackTask, ...this.connecting.values()]
       .filter((task): task is Promise<void> => task !== null);
     this.stop();
     await Promise.allSettled(pending);
@@ -915,6 +929,8 @@ export class SyncEngine extends EventTarget {
     this.reconnectTimers.clear();
     for (const timer of this.stableSocketTimers.values()) clearTimeout(timer);
     this.stableSocketTimers.clear();
+    if (this.httpsFallbackTimer) clearTimeout(this.httpsFallbackTimer);
+    this.httpsFallbackTimer = null; this.httpsFallbackRooms.clear(); this.httpsFallbackPolls = 0;
     for (const timer of this.projectionRetryTimers.values()) clearTimeout(timer);
     this.projectionRetryTimers.clear();
     this.projectionRetryAttempts.clear();
@@ -963,6 +979,7 @@ export class SyncEngine extends EventTarget {
     if (this.historyBlockedRooms.has(roomId)) return;
     this.desiredRooms.add(roomId);
     this.disconnectedRooms.delete(roomId);
+    if (this.httpsFallbackRooms.has(roomId)) { this.scheduleHttpsFallbackPoll(); return; }
     const timer = this.reconnectTimers.get(roomId);
     if (timer) clearTimeout(timer);
     this.reconnectTimers.delete(roomId);
@@ -989,6 +1006,7 @@ export class SyncEngine extends EventTarget {
       const socket = new WebSocket(url);
       this.sockets.set(roomId, socket);
       socket.onopen = () => {
+        this.leaveHttpsFallback(roomId);
         const previous = this.stableSocketTimers.get(roomId);
         if (previous) clearTimeout(previous);
         const stable = setTimeout(() => {
@@ -996,6 +1014,7 @@ export class SyncEngine extends EventTarget {
           if (this.stableSocketTimers.get(roomId) === stable) this.stableSocketTimers.delete(roomId);
         }, STABLE_SOCKET_RESET_MS);
         this.stableSocketTimers.set(roomId, stable);
+        this.dispatchEvent(new CustomEvent("transport", { detail: { mode: this.httpsFallbackRooms.size ? "https" : "websocket", connected: true } }));
         this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: true } }));
       };
       socket.onmessage = (message) => {
@@ -1042,6 +1061,11 @@ export class SyncEngine extends EventTarget {
     if (!this.running || this.historyBlockedRooms.has(roomId) || this.disconnectedRooms.has(roomId) || !this.desiredRooms.has(roomId) || this.reconnectTimers.has(roomId)) return;
     const attempt = (this.reconnects.get(roomId) ?? 0) + 1;
     this.reconnects.set(roomId, attempt);
+    if (attempt >= WEBSOCKET_FAILURES_BEFORE_HTTPS_FALLBACK) {
+      this.httpsFallbackRooms.add(roomId);
+      this.scheduleHttpsFallbackPoll(0);
+      return;
+    }
     const timer = setTimeout(() => {
       this.reconnectTimers.delete(roomId);
       if (!this.running || this.disconnectedRooms.has(roomId) || this.sockets.has(roomId)) return;
@@ -1050,12 +1074,51 @@ export class SyncEngine extends EventTarget {
     this.reconnectTimers.set(roomId, timer);
   }
 
+  private scheduleHttpsFallbackPoll(delay = httpsFallbackPollDelay()): void {
+    if (!this.running || !this.httpsFallbackRooms.size || this.httpsFallbackTimer || this.httpsFallbackTask) return;
+    this.httpsFallbackTimer = setTimeout(() => {
+      this.httpsFallbackTimer = null;
+      const task = this.runHttpsFallbackPoll().finally(() => {
+        if (this.httpsFallbackTask === task) this.httpsFallbackTask = null;
+        this.scheduleHttpsFallbackPoll();
+      });
+      this.httpsFallbackTask = task;
+    }, delay);
+  }
+
+  private async runHttpsFallbackPoll(): Promise<void> {
+    if (!this.running || !this.httpsFallbackRooms.size) return;
+    try {
+      await this.catchUp();
+      if (!this.running) return;
+      this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "https", connected: true } }));
+      this.httpsFallbackPolls += 1;
+      if (this.httpsFallbackPolls % HTTPS_FALLBACK_WEBSOCKET_PROBE_POLLS === 0) await this.probeHttpsFallbackRooms();
+    } catch (error) { this.connectionError(error); }
+  }
+
+  private async probeHttpsFallbackRooms(): Promise<void> {
+    const rooms = [...this.httpsFallbackRooms].filter((roomId) => this.desiredRooms.has(roomId) && !this.connecting.has(roomId));
+    await Promise.all(rooms.map(async (roomId) => {
+      const task = this.openRoom(roomId).finally(() => { if (this.connecting.get(roomId) === task) this.connecting.delete(roomId); });
+      this.connecting.set(roomId, task);
+      await task;
+    }));
+  }
+
+  private leaveHttpsFallback(roomId: RoomId): void {
+    if (!this.httpsFallbackRooms.delete(roomId) || this.httpsFallbackRooms.size) return;
+    if (this.httpsFallbackTimer) clearTimeout(this.httpsFallbackTimer);
+    this.httpsFallbackTimer = null; this.httpsFallbackPolls = 0;
+  }
+
   private async recover(): Promise<void> {
     if (!this.running) return;
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
     try {
       await this.catchUp();
+      if (this.httpsFallbackRooms.size) await this.probeHttpsFallbackRooms();
       await Promise.all([...this.desiredRooms].map((roomId) => this.connectRoom(roomId)));
     } catch (error) {
       this.connectionError(error);
@@ -1198,6 +1261,7 @@ export class SyncEngine extends EventTarget {
     this.desiredRooms.delete(roomId);
     this.disconnectedRooms.add(roomId);
     this.reconnects.delete(roomId);
+    this.leaveHttpsFallback(roomId);
     const timer = this.reconnectTimers.get(roomId);
     if (timer) clearTimeout(timer);
     this.reconnectTimers.delete(roomId);
@@ -1207,6 +1271,9 @@ export class SyncEngine extends EventTarget {
     const socket = this.sockets.get(roomId);
     this.sockets.delete(roomId);
     socket?.close(1000, "room disconnected");
+    if (!this.httpsFallbackRooms.size && [...this.sockets.values()].some((candidate) => candidate.readyState === 1)) {
+      this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "websocket", connected: true } }));
+    }
   }
 
   sendTyping(roomId: RoomId, active: boolean): boolean {

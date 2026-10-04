@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
+import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, HTTPS_FALLBACK_POLL_MAX_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -778,6 +778,40 @@ describe("SyncEngine event ingestion", () => {
     expect(cursor).toBe(7);
     expect(sync).toHaveBeenCalledTimes(2);
     expect(wsTicket).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces WebSocket-blocked rooms into one HTTPS sync poller", async () => {
+    vi.useFakeTimers();
+    let cursor = 0;
+    const sync = vi.fn(async () => ({ next_cursor: ++cursor, has_more: false, items: [] }));
+    const wsTicket = vi.fn(async () => ({ ticket: `ticket-${wsTicket.mock.calls.length}` }));
+    class BlockedSocket { constructor() { throw new TypeError("WebSocket upgrade blocked"); } }
+    vi.stubGlobal("WebSocket", BlockedSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient, db, async () => null, undefined, null);
+    const transports: string[] = [];
+    engine.addEventListener("transport", (event) => transports.push((event as CustomEvent<{ mode: string }>).detail.mode));
+
+    try {
+      await engine.start();
+      await Promise.all([
+        engine.connectRoom("!fallback-room-0001:example.com"),
+        engine.connectRoom("!fallback-room-0002:example.com"),
+      ]);
+      await vi.advanceTimersByTimeAsync(reconnectDelay(1));
+      await vi.advanceTimersByTimeAsync(reconnectDelay(2) + 1);
+      expect(transports).toContain("https");
+
+      const beforeSharedPoll = sync.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(sync.mock.calls.length - beforeSharedPoll).toBe(1);
+      expect(wsTicket).toHaveBeenCalledTimes(6);
+      for (let poll = 0; poll < 8; poll += 1) await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(wsTicket).toHaveBeenCalledTimes(8);
+    } finally {
+      engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+    }
   });
 
   it("keeps responsive room sockets when a suspended PWA resumes", async () => {

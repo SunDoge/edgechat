@@ -48,6 +48,8 @@ export const zhHansMessages = {
   "workspace.archived.show": "已归档",
   "workspace.connection.recovering": "本机存储恢复中",
   "workspace.connection.online": "已连接",
+  "workspace.connection.httpsFallback": "已连接（兼容模式）",
+  "workspace.connection.httpsFallbackHint": "实时连接不可用，消息会通过 HTTPS 定时同步；输入状态和在线状态可能延迟。",
   "workspace.connection.syncing": "正在同步",
   "workspace.connection.offline": "离线，可查看和发送",
   "workspace.presence.direct": "在线",

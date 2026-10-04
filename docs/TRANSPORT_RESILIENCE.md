@@ -1,0 +1,83 @@
+# Transport resilience and censorship pressure
+
+EdgeChat separates the MLS messaging protocol from its network transport. This improves reachability when a network blocks a particular realtime mechanism, but it is not an anonymity system and cannot guarantee availability against a determined censor.
+
+## What a network can still observe
+
+TLS protects HTTP paths, headers and bodies from an ordinary network observer. It does not necessarily hide the destination IP address, DNS activity, connection timing, byte counts, TLS/QUIC fingerprints, or the server name when ECH is unavailable. Application padding cannot hide those facts, and a browser PWA cannot replace the browser's TLS fingerprint or open arbitrary raw TCP/UDP tunnels.
+
+Cloudflare ECH can hide the specific hostname from intermediaries when the zone, DNS resolver, browser and network all support it. Cloudflare documents that ECH is enabled by default on Free zones, but also documents how a network can disable discovery of ECH configuration. It is therefore useful defense in depth, not a bootstrap or availability guarantee: <https://developers.cloudflare.com/ssl/edge-certificates/ech/>.
+
+## PWA transport policy
+
+The durable source of delivery remains the monotonic `/api/v1/sync` log. WebSocket is only a latency optimization.
+
+1. A room initially uses an authenticated one-time ticket and WSS on port 443.
+2. After three consecutive WebSocket failures, the client keeps the room usable through ordinary authenticated HTTPS sync.
+3. All affected rooms share one account-level poller. It waits a randomized 4–7 seconds between cursor reads instead of multiplying one reconnect/sync loop per room.
+4. Every ten successful HTTPS polls, the client makes one low-frequency WSS recovery probe per affected room. A successful upgrade restores realtime delivery.
+5. The UI labels this as **兼容模式** and explains that messages still sync while typing and presence may be delayed.
+
+This path performs bounded D1 cursor reads only. It never reads, writes, lists, heads, copies, pads, or duplicates an R2/S3 object. Message sends continue through their ordinary HTTPS endpoint, and missing events retain the same signature, MLS and sequence validation as WebSocket delivery.
+
+Cloudflare supports inbound HTTP/HTTPS, HTTP/3 and WebSockets, but HTTP/3 uses QUIC and may fail on networks where HTTP/2 over TCP still works. Deployments may enable HTTP/3 for performance, but the application must not require it. Cloudflare's current protocol support is documented at <https://developers.cloudflare.com/workers/reference/protocols/> and <https://developers.cloudflare.com/speed/optimization/protocol/http3/>.
+
+## Padding and cover traffic
+
+If traffic-analysis padding is added, it belongs to a versioned transport-record wrapper outside the signed event and MLS payload:
+
+```text
+transport record
+├── encoded application frame length
+├── encoded application frame
+└── random padding to a bounded size bucket
+```
+
+The receiver removes and validates the wrapper before ordinary protocol decoding. Padding must never enter `room_events`, archive chunks, attachment objects, portable backups, peer-recovery bundles, or local search. This prevents storage amplification and keeps forwarding/repair hashes canonical. It should be opt-in, capped, and measured because it consumes network bandwidth even though it consumes no object storage.
+
+Constant cover traffic is not enabled by default. It has high battery and bandwidth cost, can itself become a stable fingerprint, and cannot conceal the destination. A future implementation should prefer small bounded size buckets for already-required control frames and modest timing jitter rather than continuous dummy messages.
+
+## Native-client boundary
+
+A future native app may add a pluggable transport that uses an OS proxy or a standards-based tunnel such as MASQUE without changing message IDs, MLS state, room ordering, sync cursors, or archive objects. MASQUE CONNECT-UDP is standardized by RFC 9298, but the browser Fetch/WebSocket APIs do not expose an arbitrary CONNECT-UDP client, so it is not a PWA transport: <https://www.rfc-editor.org/rfc/rfc9298.html>.
+
+### VLESS / Xray
+
+VLESS can be supported by a future native client, but only as an outer network route—not as the EdgeChat event format, sync protocol, or encryption layer. The preferred order is:
+
+1. use a user-configured system proxy or VPN and carry ordinary EdgeChat HTTPS/WSS through it;
+2. optionally provide a separately packaged native adapter that exposes the same `fetch` and realtime operations through VLESS;
+3. always retain direct HTTPS and durable `/sync` as protocol-level paths.
+
+VLESS does not replace MLS. Xray describes it as a stateless, lightweight proxy protocol and requires an appropriate outer security layer unless a deliberately configured VLESS Encryption mode is used: <https://xtls.github.io/en/config/outbounds/vless.html>.
+
+VLESS-over-WebSocket is not a useful answer when the network specifically blocks WebSocket, because it merely nests traffic inside the same blocked mechanism. XHTTP's separated upload/download and padding ideas may inform a native adapter, but should not be copied into the PWA's signed event or archive format. Xray's supported transport families are documented at <https://xtls.github.io/en/config/transports/index.html>.
+
+REALITY is also a native/direct-server option, not a Cloudflare Worker feature. It depends on controlling the raw TLS endpoint and client TLS fingerprint behavior; Cloudflare terminates TLS before a Worker, while a browser PWA cannot select uTLS fingerprints or open raw sockets. A REALITY/VLESS access point would therefore be a separately operated direct server or local proxy, carrying the normal EdgeChat HTTPS API rather than becoming a second message protocol.
+
+Proxy URLs, UUIDs, keys, and REALITY parameters are device secrets. They must stay in OS-protected local storage where available and must not be uploaded to D1/R2, synced through room events, included in portable backups by default, or exposed to web content. The adapter boundary can remain small:
+
+```ts
+interface NativeNetworkRoute {
+  kind: "direct" | "system-proxy" | "vless";
+  fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
+  openRealtime(url: URL, protocols?: string[]): NativeRealtimeSocket;
+}
+```
+
+This is intentionally a native-app extension point. The PWA continues to use browser-managed HTTPS/WSS plus HTTPS polling fallback.
+
+WebTransport is not the fallback baseline. Its browser API and HTTP/2/HTTP/3 mappings are still evolving, and QUIC-only reachability would be a regression on networks that permit only ordinary HTTPS over TCP: <https://www.w3.org/TR/webtransport/>.
+
+Transport adapters must preserve these invariants:
+
+- no plaintext or room keys enter the transport adapter;
+- the durable sync cursor remains authoritative;
+- a transport cannot bypass authentication, block ACLs, membership, event signatures, MLS validation, or room sequencing;
+- transport-only padding and retry metadata are never persisted as message history;
+- endpoint lists or alternate domains must be signed/pinned rather than accepted from an unauthenticated network response;
+- domain fronting and imitation of unrelated protocols are not dependencies.
+
+## Deployment guidance
+
+Production should use a normal custom domain on a Cloudflare zone rather than a Quick Tunnel, enable TLS 1.3/ECH where policy permits, retain both HTTP/2 and HTTP/3, and test WSS-blocked and QUIC-blocked networks separately. Operators should publish more than one independently hosted access point only after a signed endpoint-discovery and key-pinning design exists; DNS aliases alone do not help when the underlying Cloudflare IP range is blocked.
