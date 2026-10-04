@@ -252,6 +252,15 @@ Durable Object contention. Record the source revision, host class, message
 count, and emitted JSON alongside every release-candidate run, then complement
 it with an explicitly approved staging load/cost exercise.
 
+The Worker test suite separately exercises admission races without browser
+startup noise. It submits 64 calls concurrently to one RoomDO and 16 calls each
+to four RoomDOs concurrently, then requires gap-free room-local sequences,
+unique D1 `(room_id, seq)` projections, the expected per-member sync rows, and
+an empty emulated object bucket. The final bucket inspection is a local
+Miniflare assertion only; production code still has no object-store LIST path.
+This test proves serialization and isolation invariants, not throughput or a
+production contention ceiling.
+
 The 2026-10-04 development baseline on the local Linux build host accepted 100
 sequential encrypted messages in 15,429 ms (6.48 messages/s), with 144 ms p50,
 190 ms p95, 197 ms p99, and 199 ms maximum admission latency. The receiver

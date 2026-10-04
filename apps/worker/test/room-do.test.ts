@@ -22,8 +22,8 @@ function eventId(id: string): EventId {
   return `$test-event-${id}:localhost`;
 }
 
-function event(id: string, sender = alice, epoch = 1): ClientEvent {
-  return { event_id: eventId(id), room_id: roomId, sender, device_id: "device-a", type: "message.text", created_at: Date.now(), ciphertext: "opaque-ciphertext", metadata: { mls_epoch: epoch }, signature: "signature" };
+function event(id: string, sender = alice, epoch = 1, targetRoomId = roomId): ClientEvent {
+  return { event_id: eventId(id), room_id: targetRoomId, sender, device_id: "device-a", type: "message.text", created_at: Date.now(), ciphertext: "opaque-ciphertext", metadata: { mls_epoch: epoch }, signature: "signature" };
 }
 
 describe("RoomDurableObject", () => {
@@ -47,6 +47,60 @@ describe("RoomDurableObject", () => {
     expect(await verifyAcceptanceReceipt(env, first.event, first.event.acceptance_receipt)).toBe(true);
     expect(await verifyAcceptanceReceipt(env, { ...first.event, ciphertext: "tampered" }, first.event.acceptance_receipt)).toBe(false);
     expect(await room.retentionState()).toEqual({ floor_seq: 0, generation: 1, current_seq: 2 });
+  });
+
+  it("serializes concurrent admission in one room without sequence collisions", async () => {
+    const room = env.ROOMS.getByName(roomId);
+    await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());
+    const count = 64;
+    const results = await Promise.all(Array.from({ length: count }, (_, index) =>
+      room.appendEvent(event(`same-room-concurrent-${index}`), 1)));
+    expect(results.every((result) => result.ok)).toBe(true);
+    const sequences = results.flatMap((result) => result.ok ? [result.event.seq] : []).sort((left, right) => left - right);
+    expect(sequences).toEqual(Array.from({ length: count }, (_, index) => index + 1));
+    expect((await room.getEvents(null, 200)).map((stored) => stored.seq)).toEqual(sequences);
+    expect(await room.retentionState()).toEqual({ floor_seq: 0, generation: 1, current_seq: count });
+    expect(await env.DB.prepare("SELECT count(*) AS count, count(DISTINCT seq) AS distinct_seq FROM room_events WHERE room_id = ?")
+      .bind(roomId).first<{ count: number; distinct_seq: number }>()).toEqual({ count, distinct_seq: count });
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM sync_log WHERE room_id = ?")
+      .bind(roomId).first<{ count: number }>()).toEqual({ count: count * 2 });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+  });
+
+  it("keeps sequence spaces isolated while independent RoomDOs admit events concurrently", async () => {
+    const roomCount = 4;
+    const eventsPerRoom = 16;
+    const now = Date.now();
+    const roomIds = Array.from({ length: roomCount }, (_, index) =>
+      `!concurrent${String(index).padStart(2, "0")}0123456789:localhost` as RoomId);
+    await env.DB.batch(roomIds.flatMap((targetRoomId) => [
+      env.DB.prepare("INSERT INTO rooms (room_id, home_server, kind, name, current_seq, created_by, created_at, mls_epoch) VALUES (?, 'localhost', 'direct', NULL, 0, ?, ?, 1)").bind(targetRoomId, alice, now),
+      env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'owner', ?, NULL)").bind(targetRoomId, alice, now),
+      env.DB.prepare("INSERT INTO room_members VALUES (?, ?, 'member', ?, NULL)").bind(targetRoomId, bob, now),
+    ]));
+    const rooms = roomIds.map((targetRoomId) => env.ROOMS.getByName(targetRoomId));
+    await Promise.all(rooms.map((room, index) => room.initialize(
+      roomIds[index], [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], now,
+    )));
+
+    const results = await Promise.all(rooms.flatMap((room, roomIndex) =>
+      Array.from({ length: eventsPerRoom }, (_, eventIndex) => room.appendEvent(
+        event(`cross-room-${roomIndex}-${eventIndex}`, alice, 1, roomIds[roomIndex]), 1,
+      ))));
+    expect(results.every((result) => result.ok)).toBe(true);
+    await Promise.all(rooms.map(async (room, roomIndex) => {
+      const history = await room.getEvents(null, 200);
+      expect(history.map((stored) => stored.seq)).toEqual(Array.from({ length: eventsPerRoom }, (_, index) => index + 1));
+      expect(history.every((stored) => stored.room_id === roomIds[roomIndex])).toBe(true);
+      expect(await room.retentionState()).toEqual({ floor_seq: 0, generation: 1, current_seq: eventsPerRoom });
+    }));
+    const totalEvents = roomCount * eventsPerRoom;
+    expect(await env.DB.prepare(`SELECT count(*) AS count, count(DISTINCT room_id || ':' || seq) AS distinct_room_seq
+      FROM room_events WHERE room_id IN (${roomIds.map(() => "?").join(",")})`)
+      .bind(...roomIds).first<{ count: number; distinct_room_seq: number }>()).toEqual({ count: totalEvents, distinct_room_seq: totalEvents });
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM sync_log WHERE room_id IN (${roomIds.map(() => "?").join(",")})`)
+      .bind(...roomIds).first<{ count: number }>()).toEqual({ count: totalEvents * 2 });
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
   });
 
   it("checks membership and persists ciphertext only", async () => {
