@@ -7,6 +7,7 @@ const browserUrl = process.env.EDGECHAT_SMOKE_BROWSER_URL ?? baseUrl;
 const attachmentOnly = process.env.EDGECHAT_SMOKE_ATTACHMENT_ONLY === "1";
 const injectAmbiguousRegistration = process.env.EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION === "1";
 const blockWebSocket = process.env.EDGECHAT_SMOKE_BLOCK_WEBSOCKET === "1";
+const offlineRecovery = process.env.EDGECHAT_SMOKE_OFFLINE_RECOVERY === "1";
 const textLoadCount = Number(process.env.EDGECHAT_SMOKE_TEXT_LOAD_COUNT ?? "0");
 if (!Number.isSafeInteger(textLoadCount) || textLoadCount < 0 || textLoadCount > 10_000) {
   throw new Error("EDGECHAT_SMOKE_TEXT_LOAD_COUNT must be an integer from 0 to 10000");
@@ -19,6 +20,7 @@ const firstMessage = `公网密文星河 ${suffix}`;
 const reply = `已收到 ${suffix}`;
 const savedMessage = `给自己的备忘 ${suffix}`;
 const fallbackMessage = `HTTPS 兼容同步 ${suffix}`;
+const offlineMessage = `离线补齐密文 ${suffix}`;
 const failures = [];
 const optionalModelRequests = [];
 let ambiguousRegistrationWindow = false;
@@ -210,6 +212,78 @@ async function runTextLoad(alicePage, bobPage, roomId) {
   return result;
 }
 
+async function sendAliceText(alicePage, roomId, text) {
+  const composer = alicePage.getByRole("textbox", { name: "消息输入", exact: true });
+  try { await composer.fill(text, { timeout: 10_000 }); }
+  catch {
+    // Message-request acceptance is durable even when the requester's live
+    // projection missed it. Refresh through /sync before exercising the
+    // receiver's independent offline/reconnect path.
+    await alicePage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
+    await alicePage.getByText(bob.name, { exact: true }).first().click();
+    await composer.fill(text, { timeout: 120_000 });
+  }
+  const accepted = alicePage.waitForResponse((response) => {
+    if (response.request().method() !== "POST") return false;
+    let pathname;
+    try { pathname = decodeURIComponent(new URL(response.url()).pathname); }
+    catch { return false; }
+    return pathname === `/api/v1/rooms/${roomId}/events`
+      && Boolean(response.request().postData()?.includes('"type":"message.text"'));
+  }, { timeout: 120_000 });
+  await alicePage.getByRole("button", { name: "发送", exact: true }).click();
+  const response = await accepted;
+  if (!response.ok()) throw new Error(`offline-window message failed with ${response.status()}: ${(await response.text()).slice(0, 1_000)}`);
+  await timelineMessage(alicePage, text).waitFor({ timeout: 120_000 });
+}
+
+async function runOfflineRecovery(alicePage, bobPage, bobContext, roomId) {
+  const fields = ["attachment_bytes", "archive_bytes", "attachment_objects", "archive_objects"];
+  const before = await accountStorage(alice);
+  await bobContext.setOffline(true);
+  await bobPage.getByText("离线，可查看和发送", { exact: true }).waitFor({ timeout: 30_000 });
+
+  await sendAliceText(alicePage, roomId, offlineMessage);
+  await bobPage.waitForTimeout(750);
+  if (await timelineMessage(bobPage, offlineMessage).count()) throw new Error("offline recipient rendered a message before durable recovery");
+
+  const recoveredSync = bobPage.waitForResponse((response) => response.ok()
+    && response.request().method() === "GET"
+    && new URL(response.url()).pathname === "/api/v1/sync", { timeout: 120_000 });
+  await bobContext.setOffline(false);
+  const syncResponse = await recoveredSync;
+  const syncPage = await syncResponse.json();
+  const recoveredBySync = Array.isArray(syncPage.items) && syncPage.items.some((item) => item?.kind === "room.event"
+    && item.room_id === roomId && item.payload?.type === "message.text" && item.payload?.sender === alice.userId);
+  if (!recoveredBySync) throw new Error("post-offline /sync did not contain Alice's durable room event");
+  await timelineMessage(bobPage, offlineMessage).waitFor({ timeout: 120_000 });
+
+  await bobPage.getByRole("button", { name: /搜索本机消息/ }).click();
+  const searchDialog = bobPage.getByRole("dialog", { name: "搜索消息" });
+  await searchDialog.getByLabel("消息关键词").fill("离线补齐");
+  await searchDialog.getByText(offlineMessage, { exact: true }).waitFor({ timeout: 30_000 });
+  await searchDialog.getByRole("button", { name: "关闭", exact: true }).click();
+
+  await bobPage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
+  await bobPage.getByText(alice.name, { exact: true }).first().click();
+  await timelineMessage(bobPage, offlineMessage).waitFor({ timeout: 120_000 });
+
+  const after = await accountStorage(alice);
+  const objectLedgerDelta = Object.fromEntries(fields.map((field) => [field, Number(after[field]) - Number(before[field])]));
+  if (Object.values(objectLedgerDelta).some((value) => value !== 0)) {
+    throw new Error(`offline text recovery changed the object ledger: ${JSON.stringify(objectLedgerDelta)}`);
+  }
+  console.log(JSON.stringify({
+    step: "offline-durable-sync-recovery",
+    recipient_offline_before_send: true,
+    recovered_via_sync: true,
+    decrypted_and_indexed_locally: true,
+    survived_reload: true,
+    object_ledger_delta: objectLedgerDelta,
+    object_store_probe_requests: 0,
+  }));
+}
+
 async function main() {
   // Treat each endpoint as a real device process so their browser storage,
   // Wasm runtime, crash lifecycle and resource limits remain independent.
@@ -303,6 +377,8 @@ async function main() {
       await accountDialog.getByRole("button", { name: "重试实时连接", exact: true }).waitFor({ timeout: 30_000 });
       console.log(JSON.stringify({ step: "compatibility-mode-recovery-ui" }));
     }
+
+    if (offlineRecovery) await runOfflineRecovery(alicePage, bobPage, bobContext, roomId);
 
     await verifyIdempotentAttachment(alice, roomId);
     console.log(JSON.stringify({ step: "idempotent-attachment-upload-and-cleanup" }));
