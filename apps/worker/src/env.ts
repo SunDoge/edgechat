@@ -11,6 +11,7 @@ export type Env = {
   VAPID_PUBLIC_KEY: string;
   ARCHIVE_COMPACTION_ENABLED: string;
   OBJECT_STORE_PROVIDER?: string;
+  OBJECT_STORE_OPERATION_LOGGING?: string;
   S3_ENDPOINT?: string;
   S3_REGION?: string;
   S3_BUCKET?: string;

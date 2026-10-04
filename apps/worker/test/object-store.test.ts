@@ -1,7 +1,10 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
-import { ObjectStoreChecksumMismatchError, ObjectStoreRequestError, S3ObjectStore, objectStore } from "../src/object-store";
+import {
+  InstrumentedObjectStore, ObjectStoreChecksumMismatchError, ObjectStoreRequestError, S3ObjectStore, objectStore,
+  type ObjectStore, type ObjectStoreOperationMetric,
+} from "../src/object-store";
 
 function store() {
   return objectStore(env as unknown as Env);
@@ -159,5 +162,68 @@ describe("SigV4 S3 object-store contract", () => {
     const store = new S3ObjectStore(s3Config, async () => new Response("<Code>XAmzContentSHA256Mismatch</Code>", { status: 400 }));
     await expect(store.put("bad.bin", new Uint8Array([1]), { checksumSha256: new Uint8Array(32) }))
       .rejects.toBeInstanceOf(ObjectStoreChecksumMismatchError);
+  });
+});
+
+describe("object-store operation telemetry", () => {
+  it("counts provider calls without exposing object keys or metadata", async () => {
+    const secretKey = "rooms/secret-room/private-object.bin";
+    const metrics: ObjectStoreOperationMetric[] = [];
+    const base: ObjectStore = {
+      async put(key, body) {
+        return { key, size: body instanceof Uint8Array ? body.byteLength : 0, entityTag: '"etag"', metadata: { private: "value" } };
+      },
+      async get(key) {
+        return { key, size: 8, entityTag: '"etag"', metadata: { private: "value" },
+          body: new Blob([new Uint8Array([2, 3])]).stream(), range: { offset: 2, length: 2 } };
+      },
+      async head() { return null; },
+      async delete() {},
+    };
+    let tick = 100;
+    const store = new InstrumentedObjectStore("s3", base, (metric) => metrics.push(metric), () => tick++);
+
+    await store.put(secretKey, new Uint8Array([1, 2, 3]), { metadata: { private: "value" } });
+    await store.get(secretKey, { rangeHeader: "bytes=2-3" });
+    await store.head(secretKey);
+    await store.delete(Array.from({ length: 1_001 }, (_, index) => `${secretKey}.${index}`));
+    await store.delete([]);
+
+    expect(metrics).toEqual([
+      { event: "object_store.operation", provider: "s3", operation: "put", outcome: "stored", duration_ms: 1,
+        request_count: 1, object_count: 1, bytes: 3, ranged: false },
+      { event: "object_store.operation", provider: "s3", operation: "get", outcome: "hit", duration_ms: 1,
+        request_count: 1, object_count: 1, bytes: 2, ranged: true },
+      { event: "object_store.operation", provider: "s3", operation: "head", outcome: "miss", duration_ms: 1,
+        request_count: 1, object_count: 1, bytes: 0, ranged: false },
+      { event: "object_store.operation", provider: "s3", operation: "delete", outcome: "deleted", duration_ms: 1,
+        request_count: 2, object_count: 1_001, bytes: 0, ranged: false },
+      { event: "object_store.operation", provider: "s3", operation: "delete", outcome: "skipped", duration_ms: 1,
+        request_count: 0, object_count: 0, bytes: 0, ranged: false },
+    ]);
+    expect(JSON.stringify(metrics)).not.toContain(secretKey);
+    expect(JSON.stringify(metrics)).not.toContain("private");
+  });
+
+  it("reports sanitized failures without changing storage behavior", async () => {
+    const metrics: ObjectStoreOperationMetric[] = [];
+    const failure = new ObjectStoreRequestError("get", 503, "provider response contained a private detail");
+    const base: ObjectStore = {
+      async put() { throw new Error("unused"); },
+      async get() { throw failure; },
+      async head() { return null; },
+      async delete() {},
+    };
+    const store = new InstrumentedObjectStore("r2", base, (metric) => metrics.push(metric), () => 10);
+
+    await expect(store.get("private-key")).rejects.toBe(failure);
+    expect(metrics).toEqual([{
+      event: "object_store.operation", provider: "r2", operation: "get", outcome: "error", duration_ms: 0,
+      request_count: null, object_count: 1, bytes: null, ranged: false, status: 503,
+    }]);
+    expect(JSON.stringify(metrics)).not.toContain("private");
+
+    const observerFailure = new InstrumentedObjectStore("r2", base, () => { throw new Error("logger unavailable"); }, () => 10);
+    expect(await observerFailure.head("still-private")).toBeNull();
   });
 });

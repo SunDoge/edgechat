@@ -7,6 +7,7 @@
   "vars": {
     "SERVER_NAME": "localhost",
     "OBJECT_STORE_PROVIDER": "r2",
+    "OBJECT_STORE_OPERATION_LOGGING": "false",
     "USER_OBJECT_QUOTA_BYTES": "2147483648",
     "USER_OBJECT_LIMIT": "100000",
     "ARCHIVE_COMPACTION_ENABLED": "false",

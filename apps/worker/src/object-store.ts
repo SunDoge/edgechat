@@ -41,6 +41,23 @@ export interface ObjectStore {
   delete(keys: string | readonly string[]): Promise<void>;
 }
 
+export type ObjectStoreOperationMetric = Readonly<{
+  event: "object_store.operation";
+  provider: "r2" | "s3";
+  operation: "put" | "get" | "head" | "delete";
+  outcome: "stored" | "conflict" | "hit" | "miss" | "deleted" | "skipped" | "error";
+  duration_ms: number;
+  /** Provider calls on success; null when a failed multi-request operation may have partially completed. */
+  request_count: number | null;
+  object_count: number;
+  /** Logical ciphertext object bytes requested or returned, not provider-billed transfer bytes. */
+  bytes: number | null;
+  ranged: boolean;
+  status?: number;
+}>;
+
+export type ObjectStoreOperationObserver = (metric: ObjectStoreOperationMetric) => void;
+
 export class ObjectStoreChecksumMismatchError extends Error {
   constructor(options?: ErrorOptions) {
     super("Object-store checksum did not match", options);
@@ -140,7 +157,9 @@ export class R2ObjectStore implements ObjectStore {
   }
 
   async delete(keys: string | readonly string[]): Promise<void> {
-    await this.bucket.delete(typeof keys === "string" ? keys : [...keys]);
+    const exactKeys = typeof keys === "string" ? [keys] : [...keys];
+    if (!exactKeys.length) return;
+    await this.bucket.delete(exactKeys.length === 1 ? exactKeys[0] : exactKeys);
   }
 }
 
@@ -365,6 +384,104 @@ export class S3ObjectStore implements ObjectStore {
   }
 }
 
+/**
+ * Optional, content-free operation telemetry around the provider-neutral store.
+ * It must never log object keys, identities, metadata, ciphertext, or provider
+ * error bodies, and observer failures must never affect storage correctness.
+ */
+export class InstrumentedObjectStore implements ObjectStore {
+  constructor(
+    private readonly provider: ObjectStoreOperationMetric["provider"],
+    private readonly inner: ObjectStore,
+    private readonly observer: ObjectStoreOperationObserver,
+    private readonly now: () => number = () => performance.now(),
+  ) {}
+
+  private emit(startedAt: number, metric: Omit<ObjectStoreOperationMetric, "event" | "provider" | "duration_ms">): void {
+    const duration = Math.max(0, Math.round(this.now() - startedAt));
+    try {
+      this.observer({ event: "object_store.operation", provider: this.provider, duration_ms: duration, ...metric });
+    } catch {
+      // Observability is best-effort and must not change object-store behavior.
+    }
+  }
+
+  private emitError(startedAt: number, operation: ObjectStoreOperationMetric["operation"], error: unknown,
+    options: Pick<ObjectStoreOperationMetric, "object_count" | "ranged">): void {
+    this.emit(startedAt, {
+      operation, outcome: "error", request_count: null, bytes: null, ...options,
+      ...(error instanceof ObjectStoreRequestError ? { status: error.status } : {}),
+    });
+  }
+
+  async put(key: string, body: ObjectStoreBody, options: ObjectStorePutOptions = {}): Promise<ObjectStoreObject | null> {
+    const startedAt = this.now();
+    try {
+      const stored = await this.inner.put(key, body, options);
+      this.emit(startedAt, {
+        operation: "put", outcome: stored ? "stored" : "conflict", request_count: 1,
+        object_count: 1, bytes: options.expectedSize ?? inferredBodySize(body), ranged: false,
+      });
+      return stored;
+    } catch (error) {
+      this.emitError(startedAt, "put", error, { object_count: 1, ranged: false });
+      throw error;
+    }
+  }
+
+  async get(key: string, options: { rangeHeader?: string } = {}): Promise<ObjectStoreBodyObject | null> {
+    const startedAt = this.now();
+    try {
+      const stored = await this.inner.get(key, options);
+      this.emit(startedAt, {
+        operation: "get", outcome: stored ? "hit" : "miss", request_count: 1,
+        object_count: 1, bytes: stored ? (stored.range?.length ?? stored.size) : 0,
+        ranged: options.rangeHeader !== undefined,
+      });
+      return stored;
+    } catch (error) {
+      this.emitError(startedAt, "get", error, { object_count: 1, ranged: options.rangeHeader !== undefined });
+      throw error;
+    }
+  }
+
+  async head(key: string): Promise<ObjectStoreObject | null> {
+    const startedAt = this.now();
+    try {
+      const stored = await this.inner.head(key);
+      this.emit(startedAt, {
+        operation: "head", outcome: stored ? "hit" : "miss", request_count: 1,
+        object_count: 1, bytes: 0, ranged: false,
+      });
+      return stored;
+    } catch (error) {
+      this.emitError(startedAt, "head", error, { object_count: 1, ranged: false });
+      throw error;
+    }
+  }
+
+  async delete(keys: string | readonly string[]): Promise<void> {
+    const startedAt = this.now();
+    const objectCount = typeof keys === "string" ? 1 : keys.length;
+    if (objectCount === 0) {
+      this.emit(startedAt, { operation: "delete", outcome: "skipped", request_count: 0,
+        object_count: 0, bytes: 0, ranged: false });
+      return;
+    }
+    try {
+      await this.inner.delete(keys);
+      this.emit(startedAt, {
+        operation: "delete", outcome: "deleted",
+        request_count: this.provider === "s3" ? Math.ceil(objectCount / 1_000) : 1,
+        object_count: objectCount, bytes: 0, ranged: false,
+      });
+    } catch (error) {
+      this.emitError(startedAt, "delete", error, { object_count: objectCount, ranged: false });
+      throw error;
+    }
+  }
+}
+
 const stores = new WeakMap<object, ObjectStore>();
 
 function required(value: string | undefined, name: string): string {
@@ -388,6 +505,9 @@ export function objectStore(env: Env): ObjectStore {
     });
   } else {
     throw new Error(`Unsupported OBJECT_STORE_PROVIDER: ${provider}`);
+  }
+  if (env.OBJECT_STORE_OPERATION_LOGGING === "true") {
+    store = new InstrumentedObjectStore(provider, store, (metric) => console.log(metric));
   }
   stores.set(env, store);
   return store;

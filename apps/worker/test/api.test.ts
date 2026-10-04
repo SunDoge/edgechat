@@ -214,7 +214,7 @@ it("reports D1-ledger readiness and stale background work without touching R2", 
   expect(healthy.status, await healthy.clone().text()).toBe(200);
   expect(await healthy.json()).toMatchObject({
     status: "healthy", degraded_reasons: [], storage_source: "d1_ledger",
-    object_store: { provider: "r2", probed: false },
+    object_store: { provider: "r2", probed: false, operation_logging: false },
     inventory: { active_users: 1, active_devices: 1, rooms: 0, ledger_bytes: 0, ledger_objects: 0 },
     queues: { pending_writes: { count: 0, oldest_age_ms: null } },
   });

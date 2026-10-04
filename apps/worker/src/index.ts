@@ -595,7 +595,11 @@ async function operatorReadiness(env: Env): Promise<Response> {
       pending_appeals: { count: Number(row.pending_appeals), oldest_age_ms: ages.pending_appeals },
     },
     slo_ms: { write_intent: READINESS_WRITE_INTENT_SLO_MS, background_work: READINESS_BACKGROUND_WORK_SLO_MS, pending_appeal: READINESS_APPEAL_SLO_MS },
-    object_store: { provider: env.OBJECT_STORE_PROVIDER ?? "r2", probed: false },
+    object_store: {
+      provider: env.OBJECT_STORE_PROVIDER ?? "r2",
+      probed: false,
+      operation_logging: env.OBJECT_STORE_OPERATION_LOGGING === "true",
+    },
     storage_source: "d1_ledger",
   });
 }

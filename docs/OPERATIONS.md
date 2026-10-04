@@ -73,6 +73,29 @@ Cloudflare recommends structured JSON for searchable Workers Logs. Sampling and
 retention are Cloudflare account policy; exporting logs to R2/S3 is not required
 by EdgeChat and should not be enabled merely to build this dashboard.
 
+## Object-store operation measurement
+
+`OBJECT_STORE_OPERATION_LOGGING` defaults to `"false"`. Enable it only for a
+bounded staging load or cost exercise, redeploy, and keep Workers Logs head
+sampling at `1` for the measurement window. Filter structured logs by
+`event = object_store.operation`, then aggregate `operation`, `outcome`,
+`request_count`, `object_count`, `bytes`, `ranged`, and `duration_ms`.
+
+The event deliberately contains no object key, user/device/room ID, metadata,
+filename, token, ciphertext, plaintext, or arbitrary error string. `bytes` is
+the logical ciphertext-object size requested or returned, not provider-billed
+network transfer. Successful S3 multi-object deletion reports one request per
+1,000-key page; successful R2 deletion reports one binding call. A failed
+operation reports a null request count because a multi-page operation may have
+partially completed before failure. Reconcile totals with the provider's bill
+or usage dashboard, which remains authoritative if Workers Logs are sampled,
+dropped, retained for a limited period, or charged separately.
+
+The decorator observes calls already made through the exact-key `ObjectStore`
+boundary. It performs no D1 query, bucket listing, probe, or additional
+R2/S3 operation. Disable it after the exercise. Readiness reports whether it is
+enabled but continues to return `probed: false`.
+
 ## Before a schema or protocol rollout
 
 1. Install the pinned non-Chromium browser runtimes once with
