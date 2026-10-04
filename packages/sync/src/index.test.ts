@@ -867,6 +867,163 @@ describe("SyncEngine event ingestion", () => {
     }
   });
 
+  it("starts in user-selected HTTPS-only mode without requesting a WebSocket ticket", async () => {
+    vi.useFakeTimers();
+    let cursor = 0;
+    const sync = vi.fn(async () => ({ next_cursor: ++cursor, has_more: false, items: [] }));
+    const wsTicket = vi.fn(async () => ({ ticket: "unused" }));
+    const sockets: unknown[] = [];
+    class FakeSocket { constructor() { sockets.push(this); } }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine(
+      { baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient,
+      db,
+      async () => null,
+      undefined,
+      null,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      true,
+    );
+    const transports: string[] = [];
+    engine.addEventListener("transport", (event) => transports.push((event as CustomEvent<{ mode: string }>).detail.mode));
+
+    try {
+      await engine.start();
+      await Promise.all([
+        engine.connectRoom("!https-only-room-01:example.com"),
+        engine.connectRoom("!https-only-room-02:example.com"),
+      ]);
+      expect(transports).toContain("https");
+      expect(wsTicket).not.toHaveBeenCalled();
+      expect(sockets).toHaveLength(0);
+      expect(engine.sendTyping("!https-only-room-01:example.com", true)).toBe(false);
+
+      const beforePoll = sync.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(sync.mock.calls.length - beforePoll).toBe(1);
+      expect(wsTicket).not.toHaveBeenCalled();
+    } finally {
+      engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+    }
+  });
+
+  it("switches an active room between realtime and HTTPS-only transport", async () => {
+    let cursor = 0;
+    const sync = vi.fn(async () => ({ next_cursor: ++cursor, has_more: false, items: [] }));
+    const wsTicket = vi.fn(async () => ({ ticket: `ticket-${wsTicket.mock.calls.length}` }));
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      constructor() { sockets.push(this); queueMicrotask(() => { this.readyState = 1; this.onopen?.(); }); }
+      close(): void { this.readyState = 3; }
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient, db, async () => null, undefined, null);
+    const roomId = "!transport-switch-01:example.com" as const;
+
+    try {
+      await engine.start();
+      await engine.connectRoom(roomId);
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      expect(sockets[0].readyState).toBe(1);
+
+      const ticketsBeforeHttps = wsTicket.mock.calls.length;
+      await engine.setHttpsOnly(true);
+      expect(sockets[0].readyState).toBe(3);
+      expect(engine.sendTyping(roomId, true)).toBe(false);
+      expect(wsTicket).toHaveBeenCalledTimes(ticketsBeforeHttps);
+
+      await engine.setHttpsOnly(false);
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      expect(wsTicket).toHaveBeenCalledTimes(ticketsBeforeHttps + 1);
+    } finally {
+      engine.stop(); vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not open a socket when HTTPS-only mode wins an in-flight ticket race", async () => {
+    let releaseTicket!: (value: { ticket: string }) => void;
+    const ticket = new Promise<{ ticket: string }>((resolve) => { releaseTicket = resolve; });
+    const wsTicket = vi.fn(() => ticket);
+    const sockets: unknown[] = [];
+    class FakeSocket { constructor() { sockets.push(this); } }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket } as unknown as ApiClient;
+    const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
+    const engine = new SyncEngine(api, db, async () => null, undefined, null);
+
+    try {
+      await engine.start();
+      const connecting = engine.connectRoom("!ticket-race-room-01:example.com");
+      await vi.waitFor(() => expect(wsTicket).toHaveBeenCalledOnce());
+      await engine.setHttpsOnly(true);
+      releaseTicket({ ticket: "too-late" });
+      await connecting;
+      expect(sockets).toHaveLength(0);
+    } finally {
+      engine.stop(); vi.unstubAllGlobals();
+    }
+  });
+
+  it("waits for an admitted HTTPS poll before restoring realtime", async () => {
+    vi.useFakeTimers();
+    let cursor = 0; let releasePoll!: () => void;
+    const pollGate = new Promise<void>((resolve) => { releasePoll = resolve; });
+    const sync = vi.fn(async () => {
+      if (sync.mock.calls.length === 2) await pollGate;
+      return { next_cursor: ++cursor, has_more: false, items: [] };
+    });
+    const wsTicket = vi.fn(async () => ({ ticket: "ticket" }));
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      constructor() { sockets.push(this); queueMicrotask(() => { this.readyState = 1; this.onopen?.(); }); }
+      close(): void { this.readyState = 3; }
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine(
+      { baseUrl: "https://chat.example.com", sync, wsTicket } as unknown as ApiClient,
+      db, async () => null, undefined, null, undefined, false, undefined, undefined, true,
+    );
+    const modes: string[] = [];
+    engine.addEventListener("transport", (event) => modes.push((event as CustomEvent<{ mode: string }>).detail.mode));
+
+    try {
+      await engine.start();
+      await engine.connectRoom("!admitted-poll-room:example.com");
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      await vi.waitFor(() => expect(sync).toHaveBeenCalledTimes(2));
+      const switching = engine.setHttpsOnly(false);
+      await Promise.resolve();
+      expect(sockets).toHaveLength(0);
+      releasePoll();
+      await switching;
+      await Promise.resolve();
+      expect(sockets).toHaveLength(1);
+      expect(modes.at(-1)).toBe("websocket");
+    } finally {
+      engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+    }
+  });
+
   it("returns a manual realtime retry failure after scheduling normal recovery", async () => {
     const failure = new TypeError("network unavailable");
     const sync = vi.fn(async () => { throw failure; });

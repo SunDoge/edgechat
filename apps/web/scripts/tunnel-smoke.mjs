@@ -8,6 +8,7 @@ const attachmentOnly = process.env.EDGECHAT_SMOKE_ATTACHMENT_ONLY === "1";
 const injectAmbiguousRegistration = process.env.EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION === "1";
 const blockWebSocket = process.env.EDGECHAT_SMOKE_BLOCK_WEBSOCKET === "1";
 const offlineRecovery = process.env.EDGECHAT_SMOKE_OFFLINE_RECOVERY === "1";
+const manualHttps = process.env.EDGECHAT_SMOKE_MANUAL_HTTPS === "1";
 const textLoadCount = Number(process.env.EDGECHAT_SMOKE_TEXT_LOAD_COUNT ?? "0");
 if (!Number.isSafeInteger(textLoadCount) || textLoadCount < 0 || textLoadCount > 10_000) {
   throw new Error("EDGECHAT_SMOKE_TEXT_LOAD_COUNT must be an integer from 0 to 10000");
@@ -21,6 +22,7 @@ const reply = `已收到 ${suffix}`;
 const savedMessage = `给自己的备忘 ${suffix}`;
 const fallbackMessage = `HTTPS 兼容同步 ${suffix}`;
 const offlineMessage = `离线补齐密文 ${suffix}`;
+const manualHttpsMessage = `主动兼容同步 ${suffix}`;
 const failures = [];
 const optionalModelRequests = [];
 let ambiguousRegistrationWindow = false;
@@ -95,6 +97,15 @@ function assertCleanBrowserRun() {
 
 function timelineMessage(page, text) {
   return page.getByRole("list", { name: "消息", exact: true }).getByText(text, { exact: true });
+}
+
+async function waitForNetworkEvidence(page, evidence, predicate, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate(evidence)) return;
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`network evidence did not reach the expected state: ${JSON.stringify(evidence)}`);
 }
 
 async function register(page, account) {
@@ -233,7 +244,7 @@ async function sendAliceText(alicePage, roomId, text) {
   }, { timeout: 120_000 });
   await alicePage.getByRole("button", { name: "发送", exact: true }).click();
   const response = await accepted;
-  if (!response.ok()) throw new Error(`offline-window message failed with ${response.status()}: ${(await response.text()).slice(0, 1_000)}`);
+  if (!response.ok()) throw new Error(`text message failed with ${response.status()}: ${(await response.text()).slice(0, 1_000)}`);
   await timelineMessage(alicePage, text).waitFor({ timeout: 120_000 });
 }
 
@@ -284,6 +295,53 @@ async function runOfflineRecovery(alicePage, bobPage, bobContext, roomId) {
   }));
 }
 
+async function runManualHttpsMode(alicePage, bobPage, roomId, evidence) {
+  const fields = ["attachment_bytes", "archive_bytes", "attachment_objects", "archive_objects"];
+  const before = await accountStorage(alice);
+  await bobPage.getByText("已连接", { exact: true }).waitFor({ timeout: 30_000 });
+  await bobPage.waitForTimeout(250);
+  await bobPage.getByRole("button", { name: /设备与账户/ }).click();
+  let accountDialog = bobPage.getByRole("dialog", { name: "设备与账户" });
+  const preference = accountDialog.getByRole("switch", { name: "始终使用 HTTPS 兼容模式" });
+  const ticketsBefore = evidence.wsTickets;
+  const socketsBefore = evidence.webSockets;
+  await preference.click();
+  await accountDialog.getByText("已按这台设备的设置停用实时连接；消息仍会通过 HTTPS 可靠同步。", { exact: true }).waitFor({ timeout: 30_000 });
+  if (await preference.getAttribute("aria-checked") !== "true") throw new Error("HTTPS-only preference did not become active");
+
+  await sendAliceText(alicePage, roomId, manualHttpsMessage);
+  await timelineMessage(bobPage, manualHttpsMessage).waitFor({ timeout: 30_000 });
+  if (evidence.wsTickets !== ticketsBefore || evidence.webSockets !== socketsBefore) {
+    throw new Error(`HTTPS-only delivery attempted realtime: ${JSON.stringify({ ticketsBefore, ticketsAfter: evidence.wsTickets, socketsBefore, socketsAfter: evidence.webSockets })}`);
+  }
+
+  await accountDialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await bobPage.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
+  await bobPage.getByText(alice.name, { exact: true }).first().click();
+  await timelineMessage(bobPage, manualHttpsMessage).waitFor({ timeout: 120_000 });
+  if (evidence.wsTickets !== ticketsBefore || evidence.webSockets !== socketsBefore) throw new Error("reloaded HTTPS-only profile attempted realtime");
+
+  await bobPage.getByRole("button", { name: /设备与账户/ }).click();
+  accountDialog = bobPage.getByRole("dialog", { name: "设备与账户" });
+  const persistedPreference = accountDialog.getByRole("switch", { name: "始终使用 HTTPS 兼容模式" });
+  if (await persistedPreference.getAttribute("aria-checked") !== "true") throw new Error("HTTPS-only preference did not survive reload");
+  await persistedPreference.click();
+  await waitForNetworkEvidence(bobPage, evidence, (current) => current.wsTickets > ticketsBefore && current.webSockets > socketsBefore);
+  await accountDialog.getByRole("button", { name: "关闭", exact: true }).click();
+
+  const after = await accountStorage(alice);
+  const objectLedgerDelta = Object.fromEntries(fields.map((field) => [field, Number(after[field]) - Number(before[field])]));
+  if (Object.values(objectLedgerDelta).some((value) => value !== 0)) throw new Error(`manual HTTPS mode changed the object ledger: ${JSON.stringify(objectLedgerDelta)}`);
+  console.log(JSON.stringify({
+    step: "manual-https-compatibility",
+    delivered_without_realtime: true,
+    preference_survived_reload: true,
+    realtime_restored_after_opt_out: true,
+    object_ledger_delta: objectLedgerDelta,
+    object_store_probe_requests: 0,
+  }));
+}
+
 async function main() {
   // Treat each endpoint as a real device process so their browser storage,
   // Wasm runtime, crash lifecycle and resource limits remain independent.
@@ -295,6 +353,13 @@ async function main() {
   const bobContext = await bobBrowser.newContext({ serviceWorkers: "block" });
   const alicePage = await aliceContext.newPage();
   const bobPage = await bobContext.newPage();
+  const bobNetworkEvidence = { wsTickets: 0, webSockets: 0 };
+  bobPage.on("request", (request) => {
+    try { if (new URL(request.url()).pathname === "/api/v1/ws-ticket") bobNetworkEvidence.wsTickets += 1; } catch { /* ignore malformed URLs */ }
+  });
+  bobPage.on("websocket", (socket) => {
+    try { if (new URL(socket.url()).pathname === "/api/v1/ws") bobNetworkEvidence.webSockets += 1; } catch { /* ignore malformed URLs */ }
+  });
   observe(alicePage, "alice"); observe(bobPage, "bob");
   try {
     if (blockWebSocket) await bobPage.routeWebSocket(/\/api\/v1\/ws(?:\?|$)/, (socket) => void socket.close({ code: 1013, reason: "simulated WebSocket blocking" }));
@@ -379,6 +444,7 @@ async function main() {
     }
 
     if (offlineRecovery) await runOfflineRecovery(alicePage, bobPage, bobContext, roomId);
+    if (manualHttps) await runManualHttpsMode(alicePage, bobPage, roomId, bobNetworkEvidence);
 
     await verifyIdempotentAttachment(alice, roomId);
     console.log(JSON.stringify({ step: "idempotent-attachment-upload-and-cleanup" }));

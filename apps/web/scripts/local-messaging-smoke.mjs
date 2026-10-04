@@ -107,6 +107,7 @@ try {
         EDGECHAT_SMOKE_AMBIGUOUS_REGISTRATION: loadMessages ? "0" : "1",
         EDGECHAT_SMOKE_TEXT_LOAD_COUNT: String(loadMessages),
         EDGECHAT_SMOKE_OFFLINE_RECOVERY: loadMessages ? "0" : "1",
+        EDGECHAT_SMOKE_MANUAL_HTTPS: loadMessages ? "0" : "1",
       },
     });
   } catch (cause) {

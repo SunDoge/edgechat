@@ -874,6 +874,7 @@ export class SyncEngine extends EventTarget {
     private sharePresence = false,
     archiveMetadataCache?: ArchiveMetadataCache,
     archiveCiphertextSource?: ArchiveCiphertextSource,
+    private httpsOnly = false,
   ) {
     super();
     this.archiveCatchUp = archiveKeyResolver
@@ -909,7 +910,10 @@ export class SyncEngine extends EventTarget {
         const state = await this.db.roomSequenceState(roomId);
         this.blockRoom(new RoomHistoryTransferRequiredError(roomId, state?.processed_through_seq ?? 0));
       }
-      if (this.running) await this.catchUp();
+      if (this.running) {
+        await this.catchUp();
+        if (this.httpsOnly) this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "https", connected: true } }));
+      }
     }
     catch (error) { this.connectionError(error); }
   }
@@ -987,6 +991,11 @@ export class SyncEngine extends EventTarget {
     if (this.historyBlockedRooms.has(roomId)) return;
     this.desiredRooms.add(roomId);
     this.disconnectedRooms.delete(roomId);
+    if (this.httpsOnly) {
+      this.httpsFallbackRooms.add(roomId);
+      this.scheduleHttpsFallbackPoll();
+      return;
+    }
     if (this.httpsFallbackRooms.has(roomId)) { this.scheduleHttpsFallbackPoll(); return; }
     const timer = this.reconnectTimers.get(roomId);
     if (timer) clearTimeout(timer);
@@ -1001,9 +1010,10 @@ export class SyncEngine extends EventTarget {
   }
 
   private async openRoom(roomId: RoomId): Promise<void> {
+    if (this.httpsOnly) return;
     try {
       const { ticket } = await this.api.wsTicket();
-      if (!this.running || this.disconnectedRooms.has(roomId) || !this.desiredRooms.has(roomId)) return;
+      if (this.httpsOnly || !this.running || this.disconnectedRooms.has(roomId) || !this.desiredRooms.has(roomId)) return;
       this.sockets.get(roomId)?.close(1000, "replaced");
       const base = this.api.baseUrl || location.origin;
       const url = new URL("/api/v1/ws", base);
@@ -1015,6 +1025,11 @@ export class SyncEngine extends EventTarget {
       const socket = new WebSocket(url);
       this.sockets.set(roomId, socket);
       socket.onopen = () => {
+        if (this.httpsOnly || !this.running || this.sockets.get(roomId) !== socket) {
+          this.sockets.delete(roomId);
+          try { socket.close(1000, "HTTPS compatibility selected"); } catch { /* already terminal */ }
+          return;
+        }
         this.leaveHttpsFallback(roomId);
         const previous = this.stableSocketTimers.get(roomId);
         if (previous) clearTimeout(previous);
@@ -1066,11 +1081,16 @@ export class SyncEngine extends EventTarget {
       return;
     }
     if (code === 4003 || code === 4005) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("room-unavailable", { detail: { roomId } })); return; }
+    if (this.httpsOnly) {
+      this.httpsFallbackRooms.add(roomId);
+      this.scheduleHttpsFallbackPoll();
+      return;
+    }
     this.scheduleReconnect(roomId);
   }
 
   private scheduleReconnect(roomId: RoomId): void {
-    if (!this.running || this.historyBlockedRooms.has(roomId) || this.disconnectedRooms.has(roomId) || !this.desiredRooms.has(roomId) || this.reconnectTimers.has(roomId)) return;
+    if (this.httpsOnly || !this.running || this.historyBlockedRooms.has(roomId) || this.disconnectedRooms.has(roomId) || !this.desiredRooms.has(roomId) || this.reconnectTimers.has(roomId)) return;
     const attempt = (this.reconnects.get(roomId) ?? 0) + 1;
     this.reconnects.set(roomId, attempt);
     if (attempt >= WEBSOCKET_FAILURES_BEFORE_HTTPS_FALLBACK) {
@@ -1114,6 +1134,7 @@ export class SyncEngine extends EventTarget {
   }
 
   private async probeHttpsFallbackRooms(): Promise<void> {
+    if (this.httpsOnly) return;
     const rooms = [...this.httpsFallbackRooms].filter((roomId) => this.desiredRooms.has(roomId) && !this.connecting.has(roomId));
     await Promise.all(rooms.map(async (roomId) => {
       const task = this.openRoom(roomId).finally(() => { if (this.connecting.get(roomId) === task) this.connecting.delete(roomId); });
@@ -1140,6 +1161,56 @@ export class SyncEngine extends EventTarget {
     this.scheduleHttpsFallbackPoll();
   }
 
+  /**
+   * Select a browser-safe HTTPS-only transport without changing durable sync
+   * semantics. The preference is owned by the caller so it can remain scoped
+   * to one local profile rather than becoming server/account state.
+   */
+  async setHttpsOnly(enabled: boolean): Promise<void> {
+    if (this.httpsOnly === enabled) return;
+    this.httpsOnly = enabled;
+    this.reconnects.clear();
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
+    this.reconnectTimers.clear();
+    for (const timer of this.stableSocketTimers.values()) clearTimeout(timer);
+    this.stableSocketTimers.clear();
+
+    if (enabled) {
+      for (const roomId of this.desiredRooms) this.httpsFallbackRooms.add(roomId);
+      for (const [roomId, probe] of [...this.socketProbes]) this.finishSocketProbe(roomId, probe.socket, false);
+      const sockets = [...this.sockets];
+      this.sockets.clear();
+      this.paddedSockets.clear();
+      for (const [roomId, socket] of sockets) {
+        this.dispatchEvent(new CustomEvent("presence-reset", { detail: { room_id: roomId } }));
+        try { socket.close(1000, "HTTPS compatibility selected"); } catch { /* already terminal */ }
+      }
+      this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "https", connected: false } }));
+      if (!this.running) return;
+      try {
+        await this.catchUp();
+        this.httpsFallbackFailures = 0;
+        this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "https", connected: true } }));
+      } catch (error) {
+        this.httpsFallbackFailures += 1;
+        this.connectionError(error);
+      }
+      this.scheduleHttpsFallbackPoll();
+      return;
+    }
+
+    if (this.httpsFallbackTimer) clearTimeout(this.httpsFallbackTimer);
+    this.httpsFallbackTimer = null;
+    this.httpsFallbackRooms.clear();
+    this.httpsFallbackPolls = 0;
+    this.httpsFallbackFailures = 0;
+    const pendingFallback = this.httpsFallbackTask;
+    if (pendingFallback) await pendingFallback;
+    if (this.httpsOnly) return;
+    this.httpsFallbackRooms.clear();
+    if (this.running) await this.recover();
+  }
+
   private async recover(rethrow = false): Promise<void> {
     if (!this.running) return;
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
@@ -1147,6 +1218,12 @@ export class SyncEngine extends EventTarget {
     try {
       await this.catchUp();
       this.httpsFallbackFailures = 0;
+      if (this.httpsOnly) {
+        for (const roomId of this.desiredRooms) this.httpsFallbackRooms.add(roomId);
+        this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "https", connected: true } }));
+        this.scheduleHttpsFallbackPoll();
+        return;
+      }
       if (this.httpsFallbackRooms.size) await this.probeHttpsFallbackRooms();
       await Promise.all([...this.desiredRooms].map((roomId) => this.connectRoom(roomId)));
     } catch (error) {
@@ -1174,6 +1251,18 @@ export class SyncEngine extends EventTarget {
   }
 
   private async resumeOnce(): Promise<void> {
+    if (this.httpsOnly) {
+      try {
+        await this.catchUp();
+        if (this.running) this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "https", connected: true } }));
+      } catch (error) {
+        this.connectionError(error);
+        throw error;
+      } finally {
+        this.scheduleHttpsFallbackPoll();
+      }
+      return;
+    }
     const targets = [...this.desiredRooms]
       .filter((roomId) => !this.disconnectedRooms.has(roomId) && !this.historyBlockedRooms.has(roomId))
       .map((roomId) => ({ roomId, socket: this.sockets.get(roomId) ?? null }));
