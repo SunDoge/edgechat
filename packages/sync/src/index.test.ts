@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
-import type { RoomEvent } from "@edgechat/protocol";
+import { decodeTransportRecord, encodeTransportRecord, type RoomEvent } from "@edgechat/protocol";
 import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, HTTPS_FALLBACK_ERROR_MAX_MS, HTTPS_FALLBACK_POLL_MAX_MS, HTTPS_FALLBACK_POLL_MIN_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, httpsFallbackPollDelay, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
 import { buildSegment } from "./archive";
 
@@ -628,6 +628,34 @@ describe("SyncEngine event ingestion", () => {
     expect(engine.sendTyping(roomId, true)).toBe(true);
     expect(send).toHaveBeenCalledWith(JSON.stringify({ type: "typing", active: true }));
     expect(engine.sendTyping("!offline-room-0000:example.com", true)).toBe(false);
+  });
+
+  it("negotiates padded realtime frames before padding client typing", async () => {
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      sent: string[] = [];
+      constructor(public url: string) { sockets.push(this); queueMicrotask(() => { this.readyState = 1; this.onopen?.(); }); }
+      close(): void { this.readyState = 3; }
+      send(value: string): void { this.sent.push(value); }
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const api = { baseUrl: "https://chat.example.com", sync: async () => ({ next_cursor: 0, has_more: false, items: [] }), wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient;
+    const db = { getCursor: async () => 0, setCursor: async () => undefined } as unknown as LocalDatabase;
+    const engine = new SyncEngine(api, db, async () => null, undefined, null);
+    const roomId = "!padding-room-00001:example.com" as const;
+
+    await engine.start(); await engine.connectRoom(roomId); await Promise.resolve();
+    expect(new URL(sockets[0].url).searchParams.get("padding")).toBe("v1");
+    sockets[0].onmessage?.({ data: encodeTransportRecord({ type: "ready", room_id: roomId, current_seq: 0 }) } as MessageEvent);
+    expect(engine.sendTyping(roomId, true)).toBe(true);
+    expect(decodeTransportRecord(sockets[0].sent[0])).toEqual({ frame: { type: "typing", active: true }, padded: true });
+
+    engine.stop(); vi.unstubAllGlobals();
   });
 
   it("opts into presence per device and clears room presence when its socket closes", async () => {

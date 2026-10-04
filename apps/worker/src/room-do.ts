@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import type { ClientEvent, ClientSocketFrame, PresenceSocketFrame, RoomEvent, RoomId, TypingSocketFrame, UserId } from "@edgechat/protocol";
+import { decodeTransportRecord, encodeTransportRecord, MAX_PADDED_TRANSPORT_RECORD_BYTES } from "@edgechat/protocol";
+import type { ClientEvent, ClientSocketFrame, PresenceSocketFrame, RoomEvent, RoomId, SocketFrame, TypingSocketFrame, UserId } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
 import { sql } from "kysely";
 import type { Env } from "./env";
@@ -10,10 +11,11 @@ type MemberRow = { user_id: UserId; role: "owner" | "member"; removed_at: number
 type EventRow = { event_json: string; accepted_at: number };
 type CompactionLeaseRow = { token: string; device_id: string; segment_id: string; start_seq: number; end_seq: number; expires_at: number };
 type RepairLeaseRow = { token_hash: string; device_id: string; start_seq: number; end_seq: number; generation: number; expires_at: number };
-type SocketAttachment = { userId: UserId; deviceId: string; connectionId: string; typingActive: boolean; lastTypingAt: number; allowTyping: boolean; sharePresence: boolean };
+type SocketAttachment = { userId: UserId; deviceId: string; connectionId: string; typingActive: boolean; lastTypingAt: number; allowTyping: boolean; sharePresence: boolean; transportPadding: boolean };
 export type AppendEventResult = { ok: true; event: RoomEvent } | { ok: false; code: "stale_epoch" | "invalid_epoch" | "event_id_conflict" | "owner_conflict" };
 export type RepairRangeState = { floor_seq: number; generation: number; current_seq: number; missing_sequences: number[] };
 export type RetentionAdvanceResult = { floor_seq: number; generation: number; current_seq: number; deleted_events: number; advanced: boolean };
+const utf8Encoder = new TextEncoder();
 
 export class RoomDurableObject extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -457,24 +459,26 @@ export class RoomDurableObject extends DurableObject<Env> {
     const wasPresent = this.presentUsers().includes(userId);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    server.serializeAttachment({ userId, deviceId, connectionId: crypto.randomUUID(), typingActive: false, lastTypingAt: 0, allowTyping: request.headers.get("x-edgechat-allow-typing") !== "false", sharePresence } satisfies SocketAttachment);
+    server.serializeAttachment({ userId, deviceId, connectionId: crypto.randomUUID(), typingActive: false, lastTypingAt: 0, allowTyping: request.headers.get("x-edgechat-allow-typing") !== "false", sharePresence, transportPadding: request.headers.get("x-edgechat-transport-padding") === "v1" } satisfies SocketAttachment);
     this.ctx.acceptWebSocket(server);
     const meta = this.ctx.storage.sql.exec<{ room_id: RoomId; current_seq: number }>("SELECT room_id, current_seq FROM room_meta LIMIT 1").one();
-    server.send(JSON.stringify({ type: "ready", room_id: meta.room_id, current_seq: meta.current_seq }));
-    server.send(JSON.stringify({ type: "presence.snapshot", room_id: meta.room_id, user_ids: this.presentUsers() }));
+    this.sendSocketFrame(server, { type: "ready", room_id: meta.room_id, current_seq: meta.current_seq });
+    this.sendSocketFrame(server, { type: "presence.snapshot", room_id: meta.room_id, user_ids: this.presentUsers() });
     if (sharePresence && !wasPresent) this.broadcastPresence(meta.room_id, userId, true);
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (typeof message !== "string" || message.length > 1_024) { ws.close(1009, "frame too large"); return; }
+    if (typeof message !== "string" || utf8Encoder.encode(message).byteLength > MAX_PADDED_TRANSPORT_RECORD_BYTES) { ws.close(1009, "frame too large"); return; }
     try {
-      const frame = JSON.parse(message) as Partial<ClientSocketFrame>;
-      if (frame.type === "ping") { ws.send(JSON.stringify({ type: "ping", at: Date.now() })); return; }
-      if (frame.type !== "typing" || typeof frame.active !== "boolean") { ws.send(JSON.stringify({ type: "error", code: "invalid_frame" })); return; }
+      const decoded = decodeTransportRecord<Partial<ClientSocketFrame>>(message);
+      if (!decoded.padded && message.length > 1_024) { ws.close(1009, "frame too large"); return; }
+      const frame = decoded.frame;
+      if (frame.type === "ping") { this.sendSocketFrame(ws, { type: "ping", at: Date.now() }); return; }
+      if (frame.type !== "typing" || typeof frame.active !== "boolean") { this.sendSocketFrame(ws, { type: "error", code: "invalid_frame" }); return; }
       const attachment = ws.deserializeAttachment() as SocketAttachment | null;
       if (!attachment?.userId || !attachment.connectionId) { ws.close(1008, "missing socket identity"); return; }
-      if (!attachment.allowTyping) { ws.send(JSON.stringify({ type: "error", code: "message_request_pending" })); return; }
+      if (!attachment.allowTyping) { this.sendSocketFrame(ws, { type: "error", code: "message_request_pending" }); return; }
       const now = Date.now();
       // Refresh an active indicator at most every 2.5 s. State transitions are
       // always accepted so blur/send can clear immediately.
@@ -482,7 +486,7 @@ export class RoomDurableObject extends DurableObject<Env> {
       const next = { ...attachment, typingActive: frame.active, lastTypingAt: now };
       ws.serializeAttachment(next);
       this.broadcastTyping(next, frame.active, now);
-    } catch { ws.send(JSON.stringify({ type: "error", code: "invalid_frame" })); }
+    } catch { this.sendSocketFrame(ws, { type: "error", code: "invalid_frame" }); }
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
@@ -522,10 +526,20 @@ export class RoomDurableObject extends DurableObject<Env> {
     await batch(this.env.DB, queries);
   }
 
-  private broadcast(frame: unknown): void {
-    const payload = JSON.stringify(frame);
+  private sendSocketFrame(ws: WebSocket, frame: SocketFrame): void {
+    const attachment = ws.deserializeAttachment() as Partial<SocketAttachment> | null;
+    ws.send(attachment?.transportPadding ? encodeTransportRecord(frame) : JSON.stringify(frame));
+  }
+
+  private broadcast(frame: SocketFrame): void {
+    const rawPayload = JSON.stringify(frame);
+    let paddedPayload: string | null = null;
     for (const ws of this.ctx.getWebSockets()) {
-      try { ws.send(payload); } catch (error) {
+      try {
+        const attachment = ws.deserializeAttachment() as Partial<SocketAttachment> | null;
+        if (attachment?.transportPadding) paddedPayload ??= encodeTransportRecord(frame);
+        ws.send(attachment?.transportPadding ? paddedPayload! : rawPayload);
+      } catch (error) {
         console.warn(JSON.stringify({ message: "websocket broadcast failed", error: error instanceof Error ? error.message : String(error) }));
       }
     }

@@ -6043,6 +6043,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     const headers = new Headers(request.headers); headers.set("x-edgechat-user", auth.userId); headers.set("x-edgechat-device", auth.deviceId);
     if (requestState?.status === "pending") headers.set("x-edgechat-allow-typing", "false");
     if (requestState?.status !== "pending" && url.searchParams.get("presence") === "1") headers.set("x-edgechat-share-presence", "true");
+    if (url.searchParams.get("padding") === "v1") headers.set("x-edgechat-transport-padding", "v1");
     return env.ROOMS.getByName(roomId).fetch(new Request(request, { headers }));
   }
   throw new HttpError(404, "Not found", "not_found");

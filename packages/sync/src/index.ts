@@ -1,5 +1,5 @@
 import type { LocalDatabase } from "@edgechat/db";
-import { assertCompatibleServerProtocol, isMlsMembershipCommitEventType, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DeviceSessionChallenge, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserId, type UserProfile } from "@edgechat/protocol";
+import { assertCompatibleServerProtocol, decodeTransportRecord, encodeTransportRecord, isMlsMembershipCommitEventType, isRoomEventEnvelope, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION, type ClientEvent, type ClientSocketFrame, type DeviceSessionChallenge, type DraftEnvelope, type DraftEnvelopeRecord, type PresenceSnapshotSocketFrame, type PresenceSocketFrame, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type SocketFrame, type SyncResponse, type UserId, type UserProfile } from "@edgechat/protocol";
 import { decodeSegmentChunk, decodeSegmentHeader, decodeSegmentIndex, rangesForSequences, SEGMENT_HEADER_BYTES } from "./archive";
 
 export class ApiError extends Error {
@@ -839,6 +839,7 @@ export class SyncEngine extends EventTarget {
   private running = false;
   private startTask: Promise<void> | null = null;
   private sockets = new Map<RoomId, WebSocket>();
+  private paddedSockets = new Set<RoomId>();
   private reconnects = new Map<RoomId, number>();
   private reconnectTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
   private stableSocketTimers = new Map<RoomId, ReturnType<typeof setTimeout>>();
@@ -945,6 +946,7 @@ export class SyncEngine extends EventTarget {
     for (const [roomId, probe] of [...this.socketProbes]) this.finishSocketProbe(roomId, probe.socket, false);
     for (const socket of this.sockets.values()) socket.close(1000, "client stopped");
     this.sockets.clear();
+    this.paddedSockets.clear();
   }
 
   async catchUp(): Promise<void> {
@@ -1008,6 +1010,7 @@ export class SyncEngine extends EventTarget {
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("room_id", roomId);
       url.searchParams.set("ticket", ticket);
+      url.searchParams.set("padding", "v1");
       if (this.sharePresence) url.searchParams.set("presence", "1");
       const socket = new WebSocket(url);
       this.sockets.set(roomId, socket);
@@ -1026,7 +1029,9 @@ export class SyncEngine extends EventTarget {
       socket.onmessage = (message) => {
         if (!this.running || this.sockets.get(roomId) !== socket) return;
         try {
-          const frame = JSON.parse(String(message.data)) as SocketFrame;
+          const decoded = decodeTransportRecord<SocketFrame>(String(message.data));
+          const frame = decoded.frame;
+          if (decoded.padded) this.paddedSockets.add(roomId);
           if (frame.type === "room.event") void this.ingest(frame.event).catch((error) => this.connectionError(error));
           else if (frame.type === "ping") this.finishSocketProbe(roomId, socket, true);
           else if (frame.type === "typing" && frame.room_id === roomId) this.dispatchEvent(new CustomEvent("typing", { detail: frame }));
@@ -1051,6 +1056,7 @@ export class SyncEngine extends EventTarget {
     if (stable) clearTimeout(stable);
     this.stableSocketTimers.delete(roomId);
     this.sockets.delete(roomId);
+    this.paddedSockets.delete(roomId);
     this.dispatchEvent(new CustomEvent("presence-reset", { detail: { room_id: roomId } }));
     this.dispatchEvent(new CustomEvent("realtime", { detail: { roomId, connected: false } }));
     if (code === 4006) { this.desiredRooms.delete(roomId); this.dispatchEvent(new CustomEvent("account-deletion", { detail: { roomId } })); return; }
@@ -1184,6 +1190,7 @@ export class SyncEngine extends EventTarget {
       if (alive) continue;
       if (socket && this.sockets.get(roomId) === socket) {
         this.sockets.delete(roomId);
+        this.paddedSockets.delete(roomId);
         try { socket.close(1000, "heartbeat timeout"); } catch { /* already terminal */ }
       }
       await this.connectRoom(roomId);
@@ -1200,7 +1207,7 @@ export class SyncEngine extends EventTarget {
     const promise = new Promise<boolean>((resolve) => { settle = resolve; });
     const timer = setTimeout(() => this.finishSocketProbe(roomId, socket, false), 3_000);
     this.socketProbes.set(roomId, { socket, timer, promise, resolve: settle });
-    try { socket.send(JSON.stringify({ type: "ping" } satisfies ClientSocketFrame)); }
+    try { socket.send(this.encodeClientSocketFrame(roomId, { type: "ping" })); }
     catch { this.finishSocketProbe(roomId, socket, false); }
     return promise;
   }
@@ -1299,6 +1306,7 @@ export class SyncEngine extends EventTarget {
     this.stableSocketTimers.delete(roomId);
     const socket = this.sockets.get(roomId);
     this.sockets.delete(roomId);
+    this.paddedSockets.delete(roomId);
     socket?.close(1000, "room disconnected");
     if (!this.httpsFallbackRooms.size && [...this.sockets.values()].some((candidate) => candidate.readyState === 1)) {
       this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "websocket", connected: true } }));
@@ -1309,8 +1317,12 @@ export class SyncEngine extends EventTarget {
     const socket = this.sockets.get(roomId);
     if (!socket || socket.readyState !== 1) return false;
     const frame: ClientSocketFrame = { type: "typing", active };
-    socket.send(JSON.stringify(frame));
+    socket.send(this.encodeClientSocketFrame(roomId, frame));
     return true;
+  }
+
+  private encodeClientSocketFrame(roomId: RoomId, frame: ClientSocketFrame): string {
+    return this.paddedSockets.has(roomId) ? encodeTransportRecord(frame) : JSON.stringify(frame);
   }
 
   private ingest(event: RoomEvent): Promise<void> {

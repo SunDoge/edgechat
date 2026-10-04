@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ClientEvent, EventId, RoomId, UserId } from "@edgechat/protocol";
+import { decodeTransportRecord, encodeTransportRecord, TRANSPORT_PADDING_BUCKETS, type ClientEvent, type EventId, type RoomId, type UserId } from "@edgechat/protocol";
 import { verifyAcceptanceReceipt } from "../src/receipt";
 
 const roomId = "!0123456789abcdef:localhost" as RoomId;
@@ -152,6 +152,33 @@ describe("RoomDurableObject", () => {
     expect((await env.DB.prepare("SELECT count(*) AS count FROM room_events WHERE room_id = ?").bind(roomId).first<{ count: number }>())?.count).toBe(0);
     expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
     socket.close(1000, "done");
+  });
+
+  it("negotiates bounded padding per socket without persistence", async () => {
+    const room = env.ROOMS.getByName(roomId);
+    await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());
+    const paddedResponse = await room.fetch(new Request("https://room.test/socket", { headers: { upgrade: "websocket", "x-edgechat-user": alice, "x-edgechat-device": "device-a", "x-edgechat-transport-padding": "v1" } }));
+    const rawResponse = await room.fetch(new Request("https://room.test/socket", { headers: { upgrade: "websocket", "x-edgechat-user": bob, "x-edgechat-device": "device-b" } }));
+    const padded = paddedResponse.webSocket!; const raw = rawResponse.webSocket!;
+    const paddedFrames: string[] = []; const rawFrames: string[] = [];
+    padded.addEventListener("message", (message) => { paddedFrames.push(String(message.data)); });
+    raw.addEventListener("message", (message) => { rawFrames.push(String(message.data)); });
+    padded.accept(); raw.accept();
+    await vi.waitFor(() => expect(paddedFrames).toHaveLength(2));
+    await vi.waitFor(() => expect(rawFrames).toHaveLength(2));
+    expect(TRANSPORT_PADDING_BUCKETS).toContain(new TextEncoder().encode(paddedFrames[0]).byteLength);
+    expect(decodeTransportRecord(paddedFrames[0])).toMatchObject({ frame: { type: "ready" }, padded: true });
+    expect(JSON.parse(rawFrames[0])).toMatchObject({ type: "ready" });
+
+    const rawTyping = new Promise<Record<string, unknown>>((resolve) => raw.addEventListener("message", (message) => {
+      const frame = JSON.parse(String(message.data)) as Record<string, unknown>;
+      if (frame.type === "typing") resolve(frame);
+    }));
+    padded.send(encodeTransportRecord({ type: "typing", active: true }));
+    await expect(rawTyping).resolves.toMatchObject({ type: "typing", user_id: alice, active: true });
+    expect((await env.DB.prepare("SELECT count(*) AS count FROM room_events WHERE room_id = ?").bind(roomId).first<{ count: number }>())?.count).toBe(0);
+    expect((await env.ARCHIVE.list()).objects).toHaveLength(0);
+    padded.close(1000, "done"); raw.close(1000, "done");
   });
 
   it("closes only another device's live socket after a password change", async () => {

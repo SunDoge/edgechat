@@ -25,18 +25,20 @@ This path performs bounded D1 cursor reads only. It never reads, writes, lists, 
 
 Cloudflare supports inbound HTTP/HTTPS, HTTP/3 and WebSockets, but HTTP/3 uses QUIC and may fail on networks where HTTP/2 over TCP still works. Deployments may enable HTTP/3 for performance, but the application must not require it. Cloudflare's current protocol support is documented at <https://developers.cloudflare.com/workers/reference/protocols/> and <https://developers.cloudflare.com/speed/optimization/protocol/http3/>.
 
-## Padding and cover traffic
+## Negotiated realtime padding and cover traffic
 
-If traffic-analysis padding is added, it belongs to a versioned transport-record wrapper outside the signed event and MLS payload:
+The PWA and RoomDO implement a versioned transport-record wrapper outside the signed event and MLS payload:
 
 ```text
 transport record
-├── encoded application frame length
-├── encoded application frame
+├── wrapper version
+├── application frame
 └── random padding to a bounded size bucket
 ```
 
-The receiver removes and validates the wrapper before ordinary protocol decoding. Padding must never enter `room_events`, archive chunks, attachment objects, portable backups, peer-recovery bundles, or local search. This prevents storage amplification and keeps forwarding/repair hashes canonical. It should be opt-in, capped, and measured because it consumes network bandwidth even though it consumes no object storage.
+The client requests `padding=v1` during its authenticated room WebSocket upgrade. The Worker records that capability only in the connection's hibernation attachment, and RoomDO starts with a padded `ready` frame. The client sends padded typing and heartbeat frames only after observing a valid padded server frame, so an older server that ignores the query continues to receive legacy JSON. A single RoomDO may fan out raw and padded frames to old and new clients at the same time.
+
+Small records are padded with WebCrypto randomness to the first fitting UTF-8 bucket among 256, 512, 1024, 2048 and 4096 bytes. Records that do not fit remain raw instead of causing unbounded amplification. The receiver checks the wrapper version, shape, alphabet and exact bucket size before ordinary protocol decoding; TLS remains responsible for transport authentication. Padding never enters `room_events`, archive chunks, attachment objects, portable backups, peer-recovery bundles, or local search. It consumes network bandwidth but performs no D1 write or R2/S3 read, write, list, head, copy or delete.
 
 Constant cover traffic is not enabled by default. It has high battery and bandwidth cost, can itself become a stable fingerprint, and cannot conceal the destination. A future implementation should prefer small bounded size buckets for already-required control frames and modest timing jitter rather than continuous dummy messages.
 

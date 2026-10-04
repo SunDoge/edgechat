@@ -317,6 +317,55 @@ export type SocketFrame =
   | { type: "ping"; at: number }
   | { type: "error"; code: string };
 
+export const TRANSPORT_PADDING_VERSION = 1 as const;
+export const TRANSPORT_PADDING_BUCKETS = [256, 512, 1_024, 2_048, 4_096] as const;
+export const MAX_PADDED_TRANSPORT_RECORD_BYTES = TRANSPORT_PADDING_BUCKETS[TRANSPORT_PADDING_BUCKETS.length - 1];
+
+type TransportRecord<T> = {
+  type: "transport.record";
+  version: typeof TRANSPORT_PADDING_VERSION;
+  frame: T;
+  padding: string;
+};
+
+const transportEncoder = new TextEncoder();
+const TRANSPORT_PADDING_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/**
+ * Hide the exact byte length of small realtime frames without changing the
+ * signed event or ciphertext. Frames too large for the bounded buckets remain
+ * in the legacy raw representation.
+ */
+export function encodeTransportRecord<T>(frame: T): string {
+  const raw = JSON.stringify(frame);
+  const empty = JSON.stringify({ type: "transport.record", version: TRANSPORT_PADDING_VERSION, frame, padding: "" } satisfies TransportRecord<T>);
+  const emptyBytes = transportEncoder.encode(empty).byteLength;
+  const bucket = TRANSPORT_PADDING_BUCKETS.find((size) => size >= emptyBytes);
+  if (!bucket) return raw;
+  const paddingLength = bucket - emptyBytes;
+  const random = new Uint8Array(paddingLength);
+  crypto.getRandomValues(random);
+  let padding = "";
+  for (const value of random) padding += TRANSPORT_PADDING_ALPHABET[value & 63];
+  return JSON.stringify({ type: "transport.record", version: TRANSPORT_PADDING_VERSION, frame, padding } satisfies TransportRecord<T>);
+}
+
+export function decodeTransportRecord<T>(serialized: string): { frame: T; padded: boolean } {
+  const parsed = JSON.parse(serialized) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid transport frame");
+  const candidate = parsed as Record<string, unknown>;
+  if (candidate.type !== "transport.record") return { frame: parsed as T, padded: false };
+  if (candidate.version !== TRANSPORT_PADDING_VERSION
+    || Object.keys(candidate).length !== 4
+    || !candidate.frame || typeof candidate.frame !== "object" || Array.isArray(candidate.frame)
+    || (candidate.frame as Record<string, unknown>).type === "transport.record"
+    || typeof candidate.padding !== "string" || !/^[A-Za-z0-9_-]*$/.test(candidate.padding)
+    || !TRANSPORT_PADDING_BUCKETS.includes(transportEncoder.encode(serialized).byteLength as typeof TRANSPORT_PADDING_BUCKETS[number])) {
+    throw new Error("Invalid padded transport record");
+  }
+  return { frame: candidate.frame as T, padded: true };
+}
+
 export interface FederationTransport {
   sendRoomEvent(event: RoomEvent): Promise<void>;
   sendControlEvent(event: RoomEvent): Promise<void>;

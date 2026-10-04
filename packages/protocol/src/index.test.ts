@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeLocalUserId, normalizeServerProtocol, serverSupports } from "./index";
+import { acceptedEventMatchesClientEvent, assertCompatibleServerProtocol, canonicalAcceptanceReceiptBytes, canonicalSignedEventBytes, currentServerProtocol, decodeTransportRecord, deviceSessionProofBytes, encodeTransportRecord, isClientEventEnvelope, isDeliveryReceiptPayload, isMessageDeletePayload, isMessageEditPayload, isMessageExpiryPolicyPayload, isMessageReactionPayload, isMlsMembershipCommitEventType, isNamespacedEventId, isNamespacedMessageId, isNamespacedRoomId, isNamespacedUserId, isReadReceiptPayload, isRoomEventEnvelope, isRoomOwnerTransferPayload, isRoomProfilePayload, LocalFederationTransport, MAX_EVENT_CIPHERTEXT_LENGTH, normalizeLocalUserId, normalizeServerProtocol, serverSupports, TRANSPORT_PADDING_BUCKETS } from "./index";
 import type { ClientEvent } from "./index";
 
 describe("federation-ready identifiers", () => {
@@ -108,6 +108,29 @@ describe("federation-ready identifiers", () => {
     expect(isMlsMembershipCommitEventType("control.device.revoke")).toBe(true);
     expect(isMlsMembershipCommitEventType("control.room.profile")).toBe(false);
     expect(isMlsMembershipCommitEventType("message.text")).toBe(false);
+  });
+});
+
+describe("realtime transport padding", () => {
+  it("pads small frames to a bounded protocol bucket and decodes them", () => {
+    const frame = { type: "typing", active: true } as const;
+    const encoded = encodeTransportRecord(frame);
+    expect(TRANSPORT_PADDING_BUCKETS).toContain(new TextEncoder().encode(encoded).byteLength);
+    expect(decodeTransportRecord(encoded)).toEqual({ frame, padded: true });
+    expect(encoded).not.toContain('"padding":""');
+  });
+
+  it("accepts legacy raw frames and leaves oversized frames raw", () => {
+    expect(decodeTransportRecord<{ type: string }>('{"type":"ping"}')).toEqual({ frame: { type: "ping" }, padded: false });
+    const frame = { type: "room.event", ciphertext: "x".repeat(5_000) };
+    expect(decodeTransportRecord(encodeTransportRecord(frame))).toEqual({ frame, padded: false });
+  });
+
+  it("rejects malformed padded records", () => {
+    const encoded = encodeTransportRecord({ type: "ping" });
+    const malformed = encoded.replace('"version":1', '"version":2');
+    expect(() => decodeTransportRecord(malformed)).toThrow("Invalid padded transport record");
+    expect(() => decodeTransportRecord('{"type":"transport.record","version":1,"frame":{"type":"ping"},"padding":"!"}')).toThrow("Invalid padded transport record");
   });
 });
 
