@@ -182,6 +182,44 @@ request. This prevents case-insensitive S3/B2 headers from changing a key such
 as `roomId` during HEAD and breaking exact crash recovery while native R2 still
 appears to work.
 
+### Forecasting the object-storage budget
+
+Run the offline capacity planner before changing quotas, retention, attachment
+limits, or expected deployment size. It models the archive policy implemented by
+the Worker: at most 500 events, a 1 MiB minimum input threshold, a 6 MiB target,
+a 32-event recent tail, and 128 KiB independently encrypted chunks. It also
+separates cold archive lookups (header + envelope/index + chunks), warm lookups
+(cached authenticated metadata + chunks), and full attachment reads.
+
+```sh
+pnpm run plan:capacity -- \
+  --days 365 \
+  --rooms 100 \
+  --events-per-room-per-day 20 \
+  --attachment-rate 0.03 \
+  --attachment-bytes 2097152 \
+  --max-stored-objects 100000
+```
+
+The JSON result reports stored ciphertext bytes, object count, successful-path
+PUTs, Range GETs, attachment GETs, and uncompacted D1 events. Optional
+`--max-object-writes`, `--max-object-reads`, `--max-stored-objects`, and
+`--max-stored-bytes` limits make the command exit with status 2 when exceeded,
+so an operator can version a deployment scenario in CI. The planner performs no
+network, D1, R2, S3, or LIST request.
+
+`--attachment-rate` is the average number of attachment objects per accepted
+event, not merely the fraction of messages containing media; use a value above
+one when albums make that appropriate. `--attachment-bytes` is average encrypted
+object size and cannot exceed the negotiated 25 MiB plaintext limit plus its
+AEAD tag.
+
+Prices are deliberately not embedded. Feed the reported operation/byte counts
+into the current provider price sheet, record the date and provider, then compare
+them with deployed metrics. The forecast excludes retries, repair, deletion and
+temporary device-transfer objects and labels that limitation in its output; it
+is a planning gate, not a substitute for a production load/cost measurement.
+
 Normal attachment upload uses one client-chosen 192-bit opaque ID and one
 conditional PUT. D1 binds that ID to the uploader, room, size and ciphertext
 digest. Retrying after an ambiguous response returns the committed D1 row with

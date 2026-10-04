@@ -1,0 +1,17 @@
+{
+  "name": "@edgechat/capacity-plan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "edgechat-capacity-plan": "./src/cli.mjs"
+  },
+  "scripts": {
+    "build": "node --check src/model.mjs && node --check src/cli.mjs",
+    "typecheck": "node --check src/model.mjs && node --check src/cli.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
