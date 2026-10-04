@@ -17,8 +17,10 @@ The durable source of delivery remains the monotonic `/api/v1/sync` log. WebSock
 3. All affected rooms share one account-level poller. It waits a randomized 4–7 seconds between cursor reads instead of multiplying one reconnect/sync loop per room.
 4. Every ten successful HTTPS polls, the client makes one low-frequency WSS recovery probe per affected room. A successful upgrade restores realtime delivery.
 5. The UI labels this as **兼容模式** and explains that messages still sync while typing and presence may be delayed.
+6. A backgrounded document pauses compatibility polling and relies on Web Push for notification hints; foreground resume performs an immediate durable catch-up. This avoids hidden-tab D1 polling without treating Push as delivery.
+7. Consecutive HTTPS failures exponentially back off the next poll to a 60-second ceiling. The first successful cursor read restores the normal 4–7 second interval.
 
-This path performs bounded D1 cursor reads only. It never reads, writes, lists, heads, copies, pads, or duplicates an R2/S3 object. Message sends continue through their ordinary HTTPS endpoint, and missing events retain the same signature, MLS and sequence validation as WebSocket delivery.
+This path performs bounded D1 cursor reads only. It never reads, writes, lists, heads, copies, pads, or duplicates an R2/S3 object. Message sends continue through their ordinary HTTPS endpoint, and missing events retain the same signature, MLS and sequence validation as WebSocket delivery. Web Push remains only a content-free wake-up hint: foreground `/sync` is still the durable recovery mechanism.
 
 Cloudflare supports inbound HTTP/HTTPS, HTTP/3 and WebSockets, but HTTP/3 uses QUIC and may fail on networks where HTTP/2 over TCP still works. Deployments may enable HTTP/3 for performance, but the application must not require it. Cloudflare's current protocol support is documented at <https://developers.cloudflare.com/workers/reference/protocols/> and <https://developers.cloudflare.com/speed/optimization/protocol/http3/>.
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
 import type { RoomEvent } from "@edgechat/protocol";
-import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, HTTPS_FALLBACK_POLL_MAX_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
+import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, HTTPS_FALLBACK_ERROR_MAX_MS, HTTPS_FALLBACK_POLL_MAX_MS, HTTPS_FALLBACK_POLL_MIN_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, httpsFallbackPollDelay, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer } from "./index";
 import { buildSegment } from "./archive";
 
 function repairEvent(seq: number, generation = 3): RoomEvent {
@@ -809,6 +809,80 @@ describe("SyncEngine event ingestion", () => {
       expect(wsTicket).toHaveBeenCalledTimes(6);
       for (let poll = 0; poll < 8; poll += 1) await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
       expect(wsTicket).toHaveBeenCalledTimes(8);
+    } finally {
+      engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+    }
+  });
+
+  it("pauses compatibility polling in the background and resumes without room amplification", async () => {
+    vi.useFakeTimers();
+    let cursor = 0;
+    const sync = vi.fn(async () => ({ next_cursor: ++cursor, has_more: false, items: [] }));
+    class BlockedSocket { constructor() { throw new TypeError("WebSocket upgrade blocked"); } }
+    vi.stubGlobal("WebSocket", BlockedSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient, db, async () => null, undefined, null);
+
+    try {
+      await engine.start();
+      await engine.connectRoom("!background-room-01:example.com");
+      await vi.advanceTimersByTimeAsync(reconnectDelay(1));
+      await vi.advanceTimersByTimeAsync(reconnectDelay(2) + 1);
+
+      engine.setForeground(false);
+      const backgroundCalls = sync.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_ERROR_MAX_MS * 2);
+      expect(sync).toHaveBeenCalledTimes(backgroundCalls);
+
+      engine.setForeground(true);
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(sync).toHaveBeenCalledTimes(backgroundCalls + 1);
+    } finally {
+      engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds exponential compatibility-read backoff", () => {
+    for (let sample = 0; sample < 20; sample += 1) {
+      expect(httpsFallbackPollDelay(0)).toBeGreaterThanOrEqual(HTTPS_FALLBACK_POLL_MIN_MS);
+      expect(httpsFallbackPollDelay(0)).toBeLessThanOrEqual(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(httpsFallbackPollDelay(1)).toBeGreaterThanOrEqual(HTTPS_FALLBACK_POLL_MIN_MS * 2);
+      expect(httpsFallbackPollDelay(1)).toBeLessThanOrEqual(HTTPS_FALLBACK_POLL_MAX_MS * 2);
+    }
+    expect(httpsFallbackPollDelay(99)).toBe(HTTPS_FALLBACK_ERROR_MAX_MS);
+  });
+
+  it("resets compatibility-read backoff after the first successful recovery", async () => {
+    vi.useFakeTimers();
+    let cursor = 0; let failFallback = false;
+    const sync = vi.fn(async () => {
+      if (failFallback) throw new TypeError("HTTPS unavailable");
+      return { next_cursor: ++cursor, has_more: false, items: [] };
+    });
+    class BlockedSocket { constructor() { throw new TypeError("WebSocket upgrade blocked"); } }
+    vi.stubGlobal("WebSocket", BlockedSocket);
+    vi.stubGlobal("location", { origin: "https://chat.example.com" });
+    const db = { getCursor: async () => cursor, setCursor: async (value: number) => { cursor = value; } } as unknown as LocalDatabase;
+    const engine = new SyncEngine({ baseUrl: "https://chat.example.com", sync, wsTicket: async () => ({ ticket: "ticket" }) } as unknown as ApiClient, db, async () => null, undefined, null);
+
+    try {
+      await engine.start();
+      await engine.connectRoom("!backoff-room-0001:example.com");
+      await vi.advanceTimersByTimeAsync(reconnectDelay(1));
+      failFallback = true;
+      await vi.advanceTimersByTimeAsync(reconnectDelay(2) + 1);
+      const failedCalls = sync.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(sync).toHaveBeenCalledTimes(failedCalls);
+
+      failFallback = false;
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(sync.mock.calls.length).toBeGreaterThan(failedCalls);
+      const recoveredCalls = sync.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(HTTPS_FALLBACK_POLL_MAX_MS);
+      expect(sync.mock.calls.length).toBeGreaterThan(recoveredCalls);
     } finally {
       engine.stop(); vi.useRealTimers(); vi.unstubAllGlobals();
     }

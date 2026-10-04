@@ -1428,7 +1428,9 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       setErrorNotice(t("workspace.feedback.eventQuarantined"));
     });
     const resumeVisibleSession = () => {
-      if (document.visibilityState !== "visible" || !navigator.onLine || foregroundResumePending) return;
+      const visible = document.visibilityState === "visible";
+      engine.setForeground(visible);
+      if (!visible || !navigator.onLine || foregroundResumePending) return;
       foregroundResumePending = true;
       setConnectionState("syncing");
       void engine.resume()
@@ -1437,6 +1439,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         .finally(() => { foregroundResumePending = false; });
     };
     const resumePersistedPage = (event: PageTransitionEvent) => { if (event.persisted) resumeVisibleSession(); };
+    engine.setForeground(document.visibilityState === "visible");
     document.addEventListener("visibilitychange", resumeVisibleSession);
     window.addEventListener("pageshow", resumePersistedPage);
     void engine.start();

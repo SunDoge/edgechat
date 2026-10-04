@@ -789,12 +789,16 @@ export const STABLE_SOCKET_RESET_MS = 30_000;
 export const WEBSOCKET_FAILURES_BEFORE_HTTPS_FALLBACK = 3;
 export const HTTPS_FALLBACK_POLL_MIN_MS = 4_000;
 export const HTTPS_FALLBACK_POLL_MAX_MS = 7_000;
+export const HTTPS_FALLBACK_ERROR_MAX_MS = 60_000;
 export const HTTPS_FALLBACK_WEBSOCKET_PROBE_POLLS = 10;
 
-function httpsFallbackPollDelay(): number {
-  const spread = HTTPS_FALLBACK_POLL_MAX_MS - HTTPS_FALLBACK_POLL_MIN_MS + 1;
+export function httpsFallbackPollDelay(failures = 0): number {
+  const multiplier = 2 ** Math.min(Math.max(0, failures), 4);
+  const minimum = Math.min(HTTPS_FALLBACK_ERROR_MAX_MS, HTTPS_FALLBACK_POLL_MIN_MS * multiplier);
+  const maximum = Math.min(HTTPS_FALLBACK_ERROR_MAX_MS, HTTPS_FALLBACK_POLL_MAX_MS * multiplier);
+  const spread = maximum - minimum + 1;
   const random = crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
-  return HTTPS_FALLBACK_POLL_MIN_MS + random % spread;
+  return minimum + random % spread;
 }
 
 export class RoomSequenceGapError extends Error {
@@ -842,6 +846,8 @@ export class SyncEngine extends EventTarget {
   private httpsFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private httpsFallbackTask: Promise<void> | null = null;
   private httpsFallbackPolls = 0;
+  private httpsFallbackFailures = 0;
+  private foreground = true;
   private connecting = new Map<RoomId, Promise<void>>();
   private desiredRooms = new Set<RoomId>();
   private disconnectedRooms = new Set<RoomId>();
@@ -930,7 +936,7 @@ export class SyncEngine extends EventTarget {
     for (const timer of this.stableSocketTimers.values()) clearTimeout(timer);
     this.stableSocketTimers.clear();
     if (this.httpsFallbackTimer) clearTimeout(this.httpsFallbackTimer);
-    this.httpsFallbackTimer = null; this.httpsFallbackRooms.clear(); this.httpsFallbackPolls = 0;
+    this.httpsFallbackTimer = null; this.httpsFallbackRooms.clear(); this.httpsFallbackPolls = 0; this.httpsFallbackFailures = 0;
     for (const timer of this.projectionRetryTimers.values()) clearTimeout(timer);
     this.projectionRetryTimers.clear();
     this.projectionRetryAttempts.clear();
@@ -1074,8 +1080,8 @@ export class SyncEngine extends EventTarget {
     this.reconnectTimers.set(roomId, timer);
   }
 
-  private scheduleHttpsFallbackPoll(delay = httpsFallbackPollDelay()): void {
-    if (!this.running || !this.httpsFallbackRooms.size || this.httpsFallbackTimer || this.httpsFallbackTask) return;
+  private scheduleHttpsFallbackPoll(delay = httpsFallbackPollDelay(this.httpsFallbackFailures)): void {
+    if (!this.running || !this.foreground || !this.httpsFallbackRooms.size || this.httpsFallbackTimer || this.httpsFallbackTask) return;
     this.httpsFallbackTimer = setTimeout(() => {
       this.httpsFallbackTimer = null;
       const task = this.runHttpsFallbackPoll().finally(() => {
@@ -1091,10 +1097,14 @@ export class SyncEngine extends EventTarget {
     try {
       await this.catchUp();
       if (!this.running) return;
+      this.httpsFallbackFailures = 0;
       this.dispatchEvent(new CustomEvent("transport", { detail: { mode: "https", connected: true } }));
       this.httpsFallbackPolls += 1;
       if (this.httpsFallbackPolls % HTTPS_FALLBACK_WEBSOCKET_PROBE_POLLS === 0) await this.probeHttpsFallbackRooms();
-    } catch (error) { this.connectionError(error); }
+    } catch (error) {
+      this.httpsFallbackFailures += 1;
+      this.connectionError(error);
+    }
   }
 
   private async probeHttpsFallbackRooms(): Promise<void> {
@@ -1109,7 +1119,19 @@ export class SyncEngine extends EventTarget {
   private leaveHttpsFallback(roomId: RoomId): void {
     if (!this.httpsFallbackRooms.delete(roomId) || this.httpsFallbackRooms.size) return;
     if (this.httpsFallbackTimer) clearTimeout(this.httpsFallbackTimer);
-    this.httpsFallbackTimer = null; this.httpsFallbackPolls = 0;
+    this.httpsFallbackTimer = null; this.httpsFallbackPolls = 0; this.httpsFallbackFailures = 0;
+  }
+
+  /** Pause compatibility polling while the document is backgrounded. */
+  setForeground(foreground: boolean): void {
+    if (this.foreground === foreground) return;
+    this.foreground = foreground;
+    if (!foreground) {
+      if (this.httpsFallbackTimer) clearTimeout(this.httpsFallbackTimer);
+      this.httpsFallbackTimer = null;
+      return;
+    }
+    this.scheduleHttpsFallbackPoll();
   }
 
   private async recover(): Promise<void> {
@@ -1118,6 +1140,7 @@ export class SyncEngine extends EventTarget {
     this.reconnectTimers.clear();
     try {
       await this.catchUp();
+      this.httpsFallbackFailures = 0;
       if (this.httpsFallbackRooms.size) await this.probeHttpsFallbackRooms();
       await Promise.all([...this.desiredRooms].map((roomId) => this.connectRoom(roomId)));
     } catch (error) {
