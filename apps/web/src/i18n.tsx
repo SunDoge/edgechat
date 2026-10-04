@@ -165,6 +165,8 @@ export const zhHansMessages = {
   "workspace.feedback.installUnavailable": "请通过 HTTPS 打开后再安装",
   "workspace.feedback.expiredMessagesPurged": "已从这台设备清理 {count} 条到期消息",
   "workspace.feedback.retentionMessagesPurged": "已从这台设备移除 {count} 条到期消息",
+  "workspace.feedback.expiredMessagesPurgedWithCacheWarning": "已移除 {count} 条到期消息；部分本机媒体将在下次打开时继续清理",
+  "workspace.feedback.localCacheCleanupPending": "部分已删除消息的本机媒体将在下次打开时继续清理",
   "workspace.feedback.expiryPolicyUpdated": "这段对话的自动消失设置已更新",
   "workspace.feedback.roomProfileUpdated": "群聊资料已更新",
   "workspace.feedback.roomOwnerUpdated": "群主已变更",

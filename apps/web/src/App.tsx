@@ -78,6 +78,7 @@ import { persistBeforeTabHandoff, PREPARE_TAB_HANDOFF_EVENT, TAB_HANDOFF_CANCEL_
 import { localRetentionCoverage } from "./retention-coverage";
 import { verifyRoomEventSignature } from "./event-authentication";
 import { AttachmentCiphertextCache } from "./attachment-cache";
+import { LocalCacheCleanupCoordinator } from "./local-cache-cleanup";
 import { AttachmentSendCleanupCoordinator } from "./attachment-send-cleanup";
 import { AttachmentCiphertextLoader } from "./attachment-loader";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
@@ -155,6 +156,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
     async (id) => (await api.acknowledgeAttachmentRetention(id)).attachment_id,
   );
   const archiveSegmentCache = new ArchiveSegmentCiphertextCache(profileId);
+  const localCacheCleanup = new LocalCacheCleanupCoordinator(db, attachmentCache, archiveSegmentCache);
   const deviceHistoryStaging = deviceHistoryStagingFor(profileId);
   const initialNotice = sessionStorage.getItem("edgechat.local-profile-notice") ?? "";
   sessionStorage.removeItem("edgechat.local-profile-notice");
@@ -420,7 +422,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       || deviceLinkOpen() || backupOpen() || passwordChangeOpen() || passkeysOpen() || accountDeletionOpen() || pendingMlsMutations > 0 || mlsProjectionBarrier.isBlocked()
       || Boolean(roomMembershipRun || accountRemovalRun || savedRoomCreation || keyPackageRefill || retentionRun || messageExpiryRun
         || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun || peerRecoveryRun || draftSyncRun)
-      || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
+      || localCacheCleanup.isBusy() || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
       || Boolean(syncRef?.isBusy() || outboxRef?.isBusy() || archiveRef?.isBusy());
   }
 
@@ -1025,11 +1027,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function enforceLocalRetention(showNotice = false): Promise<number> {
     if (retentionRun) return retentionRun;
     retentionRun = db.enforceLocalRetention().then(async (deleted) => {
+      const cacheCleanup = await localCacheCleanup.run();
       if (deleted > 0) {
         if (selectedRef) await refreshRoomProjection(selectedRef);
         await Promise.all([refreshUnreadCounts(), refreshRoomListActivities()]);
         if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-        if (showNotice) setNotice(t("workspace.feedback.expiredMessagesPurged", { count: deleted }));
+        if (showNotice) setNotice(cacheCleanup.failed || cacheCleanup.pending
+          ? t("workspace.feedback.expiredMessagesPurgedWithCacheWarning", { count: deleted })
+          : t("workspace.feedback.expiredMessagesPurged", { count: deleted }));
+      } else if (showNotice && (cacheCleanup.failed || cacheCleanup.pending)) {
+        setNotice(t("workspace.feedback.localCacheCleanupPending"));
       }
       return deleted;
     }).finally(() => { retentionRun = null; });
@@ -1039,11 +1046,16 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   async function enforceMessageExpiry(showNotice = false): Promise<number> {
     if (messageExpiryRun) return messageExpiryRun;
     messageExpiryRun = db.purgeExpiredMessages().then(async (deleted) => {
+      const cacheCleanup = await localCacheCleanup.run();
       if (deleted > 0) {
         if (selectedRef) await refreshRoomProjection(selectedRef);
         await Promise.all([refreshUnreadCounts(), refreshRoomListActivities()]);
         if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-        if (showNotice) setNotice(t("workspace.feedback.retentionMessagesPurged", { count: deleted }));
+        if (showNotice) setNotice(cacheCleanup.failed || cacheCleanup.pending
+          ? t("workspace.feedback.expiredMessagesPurgedWithCacheWarning", { count: deleted })
+          : t("workspace.feedback.retentionMessagesPurged", { count: deleted }));
+      } else if (showNotice && (cacheCleanup.failed || cacheCleanup.pending)) {
+        setNotice(t("workspace.feedback.localCacheCleanupPending"));
       }
       return deleted;
     }).finally(() => { messageExpiryRun = null; });
@@ -2042,12 +2054,15 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function updateLocalRetention(roomId: RoomId, days: LocalRetentionDays | null): Promise<number> {
     const { preference, deleted } = await db.setLocalRetention(roomId, days);
+    const cacheCleanup = await localCacheCleanup.run();
     setRoomPreferences((value) => ({ ...value, [roomId]: preference }));
     if (selectedRef === roomId) await refreshRoomProjection(roomId);
     await refreshUnreadCounts();
     const coverage = await db.coverage(roomId); setCoverageComplete(coverage.history_complete);
     if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-    setNotice(days === null
+    setNotice(cacheCleanup.failed || cacheCleanup.pending
+      ? deleted ? t("workspace.feedback.expiredMessagesPurgedWithCacheWarning", { count: deleted }) : t("workspace.feedback.localCacheCleanupPending")
+      : days === null
       ? t("workspace.feedback.retentionForever")
       : deleted
         ? t("workspace.feedback.retentionSetAndPurged", { days, count: deleted })
@@ -2062,10 +2077,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       if (historyRecoveryRooms().has(room.room_id)) throw new UserFacingError(t("workspace.feedback.clearHistoryRecovery"));
       if ((await db.outbox(room.room_id)).some((item) => visibleMessageTypes.has(item.event.type))) throw new UserFacingError(t("workspace.feedback.clearHistoryOutbox"));
       const result = await db.clearRoomHistory(room.room_id, Number(room.current_seq));
-      const cacheCleanup = await Promise.allSettled([
-        ...result.attachment_ids.map((id) => attachmentCache.remove(id)),
-        ...result.segment_ids.map((id) => archiveSegmentCache.remove(id)),
-      ]);
+      const cacheCleanup = await localCacheCleanup.run();
       if (selectedRef === room.room_id) {
         setHistoryFocus(null); setUnreadBoundary(null); setTimelineAwayAfterSeq(null); setTimelineNearBottom(true);
         await refreshRoomProjection(room.room_id, true);
@@ -2073,7 +2085,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       }
       await Promise.all([refreshUnreadCounts(), refreshRoomPreferences(), refreshRoomListActivities()]);
       if (searchOpen() && searchQuery().trim()) await runSearch(searchQuery());
-      setNotice(cacheCleanup.some((item) => item.status === "rejected")
+      setNotice(cacheCleanup.failed || cacheCleanup.pending
         ? t("workspace.feedback.localHistoryClearedWithCacheWarning", { count: result.deleted })
         : t("workspace.feedback.localHistoryCleared", { count: result.deleted }));
     } finally { setHistoryClearBusy(false); }
@@ -3666,7 +3678,7 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       || Object.values(deviceRevocations()).some((progress) => progress.status === "working")
       || Boolean(roomMembershipRun || accountRemovalRun || deviceRevocationRun || savedRoomCreation || keyPackageRefill || retentionRun || messageExpiryRun
         || retentionCoverageRun || historyRepairRun || attachmentRepairRun || archiveRepairRun || peerRecoveryRun || draftSyncRun)
-      || Boolean(syncRef?.isBusy() || outboxRef?.isBusy() || archiveRef?.isBusy());
+      || localCacheCleanup.isBusy() || Boolean(syncRef?.isBusy() || outboxRef?.isBusy() || archiveRef?.isBusy());
   }
 
   async function prepareProfileChange(): Promise<void> {

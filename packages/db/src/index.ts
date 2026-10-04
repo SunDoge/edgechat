@@ -5,7 +5,7 @@ import { messageExpiryAt } from "./expiry";
 import type { LocalHistoryClearResult } from "./local-history";
 
 type Pending = { resolve: (value: DbResponse) => void; reject: (error: Error) => void };
-type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb"; startup?: "runtime-loading" | "runtime-ready"; startupError?: string };
+type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb"; startup?: "runtime-loading" | "runtime-ready" | "storage-opening" | "schema-migrating"; startupError?: string };
 
 const LOCAL_CONFIG_DB = "edgechat-local-config";
 export const LOCAL_DATABASE_STARTUP_TIMEOUT_MS = 60_000;
@@ -344,6 +344,7 @@ export type LocalRoomListActivity = {
   payload: Record<string, unknown>; deleted_at: number | null; outbox_status: OutboxStatus | null;
 };
 export type LocalMessageExpiryPolicy = { room_id: RoomId; event_id: string; effective_after_seq: number; expires_in_seconds: MessageExpirySeconds | null; updated_by: string; updated_at: number };
+export type LocalCacheCleanupJob = { cache_kind: "attachment" | "archive_segment"; cache_id: string; created_at: number; attempts: number; last_error: string | null };
 export type LocalRoomProfile = { room_id: RoomId; event_id: string; event_seq: number; name: string; avatar: RoomProfileAvatar | null; updated_by: string; updated_at: number };
 export type LocalComposerDraft = { room_id: RoomId; text_content: string; mode: "message" | "reply" | "quote" | "edit"; target_message_id: string | null; quote_text: string | null; updated_at: number };
 export type LocalComposerDraftOutbox = { room_id: RoomId; draft: LocalComposerDraft | null; client_updated_at: number; attempts: number; next_attempt_at: number | null; last_error: string | null };
@@ -1383,8 +1384,8 @@ export class LocalDatabase {
     return { preference, deleted };
   }
 
-  async purgeRoomBefore(roomId: RoomId, cutoff: number): Promise<number> {
-    const response = await this.request({ kind: "purge-room", roomId, cutoff });
+  async purgeRoomBefore(roomId: RoomId, cutoff: number, now = Date.now()): Promise<number> {
+    const response = await this.request({ kind: "purge-room", roomId, cutoff, now });
     return Number((response.rows?.[0] as { deleted?: number } | undefined)?.deleted ?? 0);
   }
 
@@ -1393,7 +1394,7 @@ export class LocalDatabase {
     for (const preference of await this.roomPreferences()) {
       const days = Number(preference.local_retention_days);
       if (preference.local_retention_days !== null && isLocalRetentionDays(days)) {
-        deleted += await this.purgeRoomBefore(preference.room_id, now - days * 86_400_000);
+        deleted += await this.purgeRoomBefore(preference.room_id, now - days * 86_400_000, now);
       }
     }
     return deleted;
@@ -1402,6 +1403,26 @@ export class LocalDatabase {
   async purgeExpiredMessages(now = Date.now()): Promise<number> {
     const response = await this.request({ kind: "purge-expired-messages", now });
     return Number((response.rows?.[0] as { deleted?: number } | undefined)?.deleted ?? 0);
+  }
+
+  async pendingLocalCacheCleanup(limit = 500): Promise<LocalCacheCleanupJob[]> {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = await this.query<LocalCacheCleanupJob>(
+      "SELECT cache_kind,cache_id,created_at,attempts,last_error FROM local_cache_cleanup ORDER BY created_at,cache_kind,cache_id LIMIT $1",
+      [safeLimit],
+    );
+    return rows.map((row) => ({ ...row, created_at: Number(row.created_at), attempts: Number(row.attempts) }));
+  }
+
+  async completeLocalCacheCleanup(kind: LocalCacheCleanupJob["cache_kind"], id: string): Promise<void> {
+    await this.query("DELETE FROM local_cache_cleanup WHERE cache_kind = $1 AND cache_id = $2", [kind, id]);
+  }
+
+  async failLocalCacheCleanup(kind: LocalCacheCleanupJob["cache_kind"], id: string, error: string): Promise<void> {
+    await this.query(
+      "UPDATE local_cache_cleanup SET attempts = attempts + 1, last_error = $3 WHERE cache_kind = $1 AND cache_id = $2",
+      [kind, id, error.slice(0, 500)],
+    );
   }
 
   async latestQueuedReadReceiptSeq(roomId: RoomId): Promise<number> {

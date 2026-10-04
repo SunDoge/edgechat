@@ -10,7 +10,7 @@ type ProfileRequest = { id: number; profileId: string };
 type DbRequest = ProfileRequest & (
   | { kind?: "query"; sql: string; params?: unknown[]; exec?: boolean }
   | { kind: "dump" }
-  | { kind: "purge-room"; roomId: string; cutoff: number }
+  | { kind: "purge-room"; roomId: string; cutoff: number; now: number }
   | { kind: "set-room-retention"; roomId: string; days: LocalRetentionDays | null; now: number }
   | { kind: "purge-expired-messages"; now: number }
   | { kind: "clear-room-history"; roomId: string; throughSeq: number; now: number }
@@ -19,13 +19,18 @@ type DbRequest = ProfileRequest & (
   | { kind: "restore" | "restore-device-history"; snapshot: Blob; expectedUserId: string; restoreId: string }
   | { kind: "verify-restore"; restoreId: string }
 );
-type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb" };
+type StartupPhase = "storage-opening" | "schema-migrating";
+type DbResponse = { id: number; rows?: unknown[]; blob?: Blob; restored?: boolean; destroyReady?: boolean; error?: string; storage?: "opfs" | "indexeddb"; startup?: StartupPhase };
 
 let storage: "opfs" | "indexeddb" = "opfs";
 const CONFIG_DB = "edgechat-local-config";
 const PROFILE_ID = /^[0-9a-f-]{36}$/i;
 let openedProfileId: string | null = null;
 let database: Promise<PGlite> | null = null;
+
+function reportStartup(phase: StartupPhase): void {
+  self.postMessage({ id: 0, startup: phase } satisfies DbResponse);
+}
 
 function configDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -166,40 +171,49 @@ function databaseFor(profileId: string): Promise<PGlite> {
   if (openedProfileId && openedProfileId !== normalized) throw new Error("Database worker cannot cross local profile boundaries");
   openedProfileId = normalized;
   database ??= (async () => {
-    const configured = await activeDataDir(normalized);
-    await cleanupStaleDataDirs(normalized, configured);
-    if (configured) {
-      storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
-      const db = new PGlite(configured);
-      await db.waitReady;
-      await migrateLocalSchema(db);
-      return db;
-    }
-    let db: PGlite;
-    const slot = `edgechat-local-${normalized}`;
+    let phase: StartupPhase = "storage-opening";
+    reportStartup(phase);
+    const heartbeat = setInterval(() => reportStartup(phase), 10_000);
     try {
-      db = new PGlite(`opfs-ahp://${slot}`);
-      await db.waitReady;
-    } catch (opfsError) {
-      await db!.close().catch(() => undefined);
-      storage = "indexeddb";
-      try {
-        db = new PGlite(`idb://${slot}`);
+      const configured = await activeDataDir(normalized);
+      await cleanupStaleDataDirs(normalized, configured);
+      if (configured) {
+        storage = configured.startsWith("opfs-ahp://") ? "opfs" : "indexeddb";
+        const db = new PGlite(configured);
         await db.waitReady;
-      } catch (indexedDbError) {
-        await db!.close().catch(() => undefined);
-        const opfsDetail = opfsError instanceof Error ? opfsError.message : String(opfsError);
-        const indexedDbDetail = indexedDbError instanceof Error ? indexedDbError.message : String(indexedDbError);
-        throw new Error(`Unable to open local database (OPFS: ${opfsDetail}; IndexedDB: ${indexedDbDetail})`);
+        phase = "schema-migrating"; reportStartup(phase);
+        await migrateLocalSchema(db);
+        return db;
       }
+      let db: PGlite;
+      const slot = `edgechat-local-${normalized}`;
+      try {
+        db = new PGlite(`opfs-ahp://${slot}`);
+        await db.waitReady;
+      } catch (opfsError) {
+        await db!.close().catch(() => undefined);
+        storage = "indexeddb";
+        try {
+          db = new PGlite(`idb://${slot}`);
+          await db.waitReady;
+        } catch (indexedDbError) {
+          await db!.close().catch(() => undefined);
+          const opfsDetail = opfsError instanceof Error ? opfsError.message : String(opfsError);
+          const indexedDbDetail = indexedDbError instanceof Error ? indexedDbError.message : String(indexedDbError);
+          throw new Error(`Unable to open local database (OPFS: ${opfsDetail}; IndexedDB: ${indexedDbDetail})`);
+        }
+      }
+      phase = "schema-migrating"; reportStartup(phase);
+      try {
+        await migrateLocalSchema(db);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Unable to migrate local database: ${detail}`, { cause: error });
+      }
+      return db;
+    } finally {
+      clearInterval(heartbeat);
     }
-    try {
-      await migrateLocalSchema(db);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Unable to migrate local database: ${detail}`, { cause: error });
-    }
-    return db;
   })();
   return database;
 }
@@ -293,7 +307,7 @@ self.onmessage = async (event: MessageEvent<DbRequest>) => {
       return;
     }
     if (request.kind === "purge-room") {
-      const deleted = await purgeRoomBefore(db, request.roomId, request.cutoff);
+      const deleted = await purgeRoomBefore(db, request.roomId, request.cutoff, request.now);
       self.postMessage({ id: request.id, rows: [{ deleted }], storage } satisfies DbResponse);
       return;
     }

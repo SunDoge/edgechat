@@ -13,6 +13,12 @@ async function purgeExpiredTransaction(tx: Transaction, now: number): Promise<nu
     [now],
   );
   await tx.query(
+    `INSERT INTO local_cache_cleanup (cache_kind,cache_id,created_at)
+     SELECT 'attachment',a.attachment_id,$1 FROM attachments a JOIN messages m ON m.message_id = a.message_id
+     WHERE m.expires_at IS NOT NULL AND m.expires_at <= $1
+     ON CONFLICT (cache_kind,cache_id) DO NOTHING`, [now],
+  );
+  await tx.query(
     `INSERT INTO expired_messages (message_id, room_id, expired_at)
      SELECT message_id, room_id, expires_at FROM messages WHERE expires_at IS NOT NULL AND expires_at <= $1
      ON CONFLICT (message_id) DO UPDATE SET expired_at = LEAST(expired_messages.expired_at, EXCLUDED.expired_at)`, [now],

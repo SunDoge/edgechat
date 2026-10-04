@@ -23,7 +23,22 @@ async function clearRoomHistoryTransaction(tx: Transaction, roomId: string, thro
     `SELECT segment_id FROM archive_keys WHERE room_id = $1 AND end_seq <= $2
      UNION SELECT segment_id FROM archive_segment_metadata WHERE room_id = $1 AND end_seq <= $2
      UNION SELECT segment_id FROM compaction_jobs WHERE room_id = $1 AND end_seq <= $2
-     ORDER BY segment_id`, [roomId, floor],
+    ORDER BY segment_id`, [roomId, floor],
+  );
+  await tx.query(
+    `INSERT INTO local_cache_cleanup (cache_kind,cache_id,created_at)
+     SELECT 'attachment',a.attachment_id,$3 FROM attachments a JOIN messages m ON m.message_id = a.message_id
+     WHERE m.room_id = $1 AND m.seq <= $2
+     ON CONFLICT (cache_kind,cache_id) DO NOTHING`, [roomId, floor, now],
+  );
+  await tx.query(
+    `INSERT INTO local_cache_cleanup (cache_kind,cache_id,created_at)
+     SELECT 'archive_segment',segment_id,$3 FROM (
+       SELECT segment_id FROM archive_keys WHERE room_id = $1 AND end_seq <= $2
+       UNION SELECT segment_id FROM archive_segment_metadata WHERE room_id = $1 AND end_seq <= $2
+       UNION SELECT segment_id FROM compaction_jobs WHERE room_id = $1 AND end_seq <= $2
+     ) queued
+     ON CONFLICT (cache_kind,cache_id) DO NOTHING`, [roomId, floor, now],
   );
   await tx.query(`DELETE FROM image_embeddings WHERE attachment_id IN (
     SELECT a.attachment_id FROM attachments a JOIN messages m ON m.message_id = a.message_id WHERE m.room_id = $1 AND m.seq <= $2)`, [roomId, floor]);

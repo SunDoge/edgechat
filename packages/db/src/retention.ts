@@ -7,10 +7,16 @@ export function isLocalRetentionDays(value: unknown): value is LocalRetentionDay
   return typeof value === "number" && LOCAL_RETENTION_DAY_OPTIONS.includes(value as LocalRetentionDays);
 }
 
-async function purgeRoomBeforeTransaction(tx: Transaction, roomId: string, cutoff: number): Promise<number> {
+async function purgeRoomBeforeTransaction(tx: Transaction, roomId: string, cutoff: number, now: number): Promise<number> {
   const count = await tx.query<{ deleted: number | string }>(
     "SELECT count(*)::int AS deleted FROM messages WHERE room_id = $1 AND created_at < $2",
     [roomId, cutoff],
+  );
+  await tx.query(
+    `INSERT INTO local_cache_cleanup (cache_kind,cache_id,created_at)
+     SELECT 'attachment',a.attachment_id,$3 FROM attachments a JOIN messages m ON m.message_id = a.message_id
+     WHERE m.room_id = $1 AND m.created_at < $2
+     ON CONFLICT (cache_kind,cache_id) DO NOTHING`, [roomId, cutoff, now],
   );
   await tx.query(
     `DELETE FROM image_embeddings WHERE attachment_id IN (
@@ -51,9 +57,9 @@ async function purgeRoomBeforeTransaction(tx: Transaction, roomId: string, cutof
   return Number(count.rows[0]?.deleted ?? 0);
 }
 
-export async function purgeRoomBefore(database: Pick<PGlite, "transaction">, roomId: string, cutoff: number): Promise<number> {
-  if (!roomId || !Number.isSafeInteger(cutoff) || cutoff < 0) throw new Error("Invalid local retention request");
-  return database.transaction((tx) => purgeRoomBeforeTransaction(tx, roomId, cutoff));
+export async function purgeRoomBefore(database: Pick<PGlite, "transaction">, roomId: string, cutoff: number, now = Date.now()): Promise<number> {
+  if (!roomId || !Number.isSafeInteger(cutoff) || cutoff < 0 || !Number.isSafeInteger(now) || now < 0) throw new Error("Invalid local retention request");
+  return database.transaction((tx) => purgeRoomBeforeTransaction(tx, roomId, cutoff, now));
 }
 
 export async function setRoomRetention(database: Pick<PGlite, "transaction">, roomId: string, days: LocalRetentionDays | null, now: number): Promise<number> {
@@ -65,6 +71,6 @@ export async function setRoomRetention(database: Pick<PGlite, "transaction">, ro
        ON CONFLICT (room_id) DO UPDATE SET local_retention_days = EXCLUDED.local_retention_days, updated_at = EXCLUDED.updated_at`,
       [roomId, days, now],
     );
-    return days === null ? 0 : purgeRoomBeforeTransaction(tx, roomId, now - days * 86_400_000);
+    return days === null ? 0 : purgeRoomBeforeTransaction(tx, roomId, now - days * 86_400_000, now);
   });
 }

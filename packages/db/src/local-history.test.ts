@@ -37,6 +37,10 @@ describe("device-local room history clear", () => {
       .toEqual([{ indexed_until_seq: 3, oldest_local_seq: 3, newest_local_seq: 3, history_complete: true }]);
     expect((await db.query("SELECT last_read_seq FROM room_read_state WHERE room_id=$1", [room])).rows).toEqual([{ last_read_seq: 2 }]);
     expect((await db.query("SELECT manually_unread FROM room_preferences WHERE room_id=$1", [room])).rows).toEqual([{ manually_unread: false }]);
+    expect((await db.query("SELECT cache_kind,cache_id FROM local_cache_cleanup ORDER BY cache_kind,cache_id")).rows).toEqual([
+      { cache_kind: "archive_segment", cache_id: "segment-old" },
+      { cache_kind: "attachment", cache_id: "attachment-clear" },
+    ]);
     await expect(clearRoomHistory(db, room, 1, 110)).resolves.toMatchObject({ deleted: 0, cleared_through_seq: 2 });
     expect((await db.query("SELECT cleared_through_seq FROM room_local_history_floor WHERE room_id=$1", [room])).rows)
       .toEqual([{ cleared_through_seq: 2 }]);
