@@ -451,12 +451,13 @@ async function finalizeDeletion(env: Env, deletionId: string, userId: string): P
     env.DB.prepare("DELETE FROM user_storage_usage"),
     env.DB.prepare(`
       INSERT INTO user_storage_usage
-        (user_id, attachment_bytes, archive_bytes, attachment_objects, archive_objects, updated_at)
+        (user_id, attachment_bytes, archive_bytes, attachment_objects, archive_objects, event_bytes, event_count, updated_at)
       SELECT u.user_id,
         COALESCE(a.bytes, 0) + COALESCE(pa.bytes, 0),
         COALESCE(s.bytes, 0) + COALESCE(ps.bytes, 0) + COALESCE(dh.bytes, 0) + COALESCE(dhs.bytes, 0),
         COALESCE(a.objects, 0) + COALESCE(pa.objects, 0),
         COALESCE(s.objects, 0) + COALESCE(ps.objects, 0) + COALESCE(dh.objects, 0) + COALESCE(dhs.objects, 0),
+        COALESCE(e.bytes, 0), COALESCE(e.events, 0),
         ?1
       FROM users u
       LEFT JOIN (SELECT uploader_user_id AS user_id, SUM(ciphertext_bytes) AS bytes, COUNT(*) AS objects FROM attachments GROUP BY uploader_user_id) a ON a.user_id = u.user_id
@@ -465,6 +466,7 @@ async function finalizeDeletion(env: Env, deletionId: string, userId: string): P
       LEFT JOIN (SELECT owner_user_id AS user_id, SUM(expected_bytes) AS bytes, COUNT(*) AS objects FROM pending_r2_writes WHERE kind = 'archive' GROUP BY owner_user_id) ps ON ps.user_id = u.user_id
       LEFT JOIN (SELECT user_id, SUM(history_bytes) AS bytes, COUNT(*) AS objects FROM device_links WHERE history_object_key IS NOT NULL AND history_bytes IS NOT NULL GROUP BY user_id) dh ON dh.user_id = u.user_id
       LEFT JOIN (SELECT t.user_id, SUM(s.ciphertext_bytes) AS bytes, COUNT(*) AS objects FROM device_link_history_shards s JOIN device_link_history_transfers t ON t.link_id = s.link_id WHERE s.status = 'ready' GROUP BY t.user_id) dhs ON dhs.user_id = u.user_id
+      LEFT JOIN (SELECT user_id, SUM(charged_bytes) AS bytes, COUNT(*) AS events FROM event_storage_claims GROUP BY user_id) e ON e.user_id = u.user_id
       WHERE u.deleted_at IS NULL
     `).bind(now),
     env.DB.prepare(`

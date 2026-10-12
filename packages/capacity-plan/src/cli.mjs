@@ -8,6 +8,13 @@ const OPTION_FIELDS = Object.freeze({
   "--rooms": "rooms",
   "--events-per-room-per-day": "eventsPerRoomPerDay",
   "--event-bytes": "averageEventBytes",
+  "--average-room-members": "averageRoomMembers",
+  "--average-devices-per-member": "averageDevicesPerMember",
+  "--sync-pointer-bytes": "syncPointerBytes",
+  "--local-projection-bytes": "localProjectionBytesPerEvent",
+  "--local-search-index-ratio": "localSearchIndexRatio",
+  "--image-attachment-share": "imageAttachmentShare",
+  "--image-embedding-bytes": "imageEmbeddingBytes",
   "--attachment-rate": "attachmentRate",
   "--attachment-bytes": "averageAttachmentBytes",
   "--compression-ratio": "compressionRatio",
@@ -36,6 +43,13 @@ Workload options (defaults):
   --rooms N                           ${DEFAULT_SCENARIO.rooms}
   --events-per-room-per-day N         ${DEFAULT_SCENARIO.eventsPerRoomPerDay}
   --event-bytes N                     ${DEFAULT_SCENARIO.averageEventBytes}
+  --average-room-members N            ${DEFAULT_SCENARIO.averageRoomMembers}
+  --average-devices-per-member N      ${DEFAULT_SCENARIO.averageDevicesPerMember}
+  --sync-pointer-bytes N              ${DEFAULT_SCENARIO.syncPointerBytes}
+  --local-projection-bytes N          ${DEFAULT_SCENARIO.localProjectionBytesPerEvent}
+  --local-search-index-ratio N         ${DEFAULT_SCENARIO.localSearchIndexRatio}
+  --image-attachment-share N          ${DEFAULT_SCENARIO.imageAttachmentShare}
+  --image-embedding-bytes N           ${DEFAULT_SCENARIO.imageEmbeddingBytes}
   --attachment-rate N                 ${DEFAULT_SCENARIO.attachmentRate}
   --attachment-bytes N                ${DEFAULT_SCENARIO.averageAttachmentBytes}
   --compression-ratio N               ${DEFAULT_SCENARIO.compressionRatio}

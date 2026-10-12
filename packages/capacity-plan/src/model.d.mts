@@ -3,6 +3,13 @@ export interface CapacityScenario {
   rooms: number;
   eventsPerRoomPerDay: number;
   averageEventBytes: number;
+  averageRoomMembers: number;
+  averageDevicesPerMember: number;
+  syncPointerBytes: number;
+  localProjectionBytesPerEvent: number;
+  localSearchIndexRatio: number;
+  imageAttachmentShare: number;
+  imageEmbeddingBytes: number;
   attachmentRate: number;
   averageAttachmentBytes: number;
   compressionRatio: number;
@@ -15,14 +22,14 @@ export interface CapacityScenario {
 }
 
 export interface CapacityPlan {
-  model: "edgechat-capacity-plan/v1";
+  model: "edgechat-capacity-plan/v2";
   pricing: "not-included";
   scenario: CapacityScenario;
   workload: { total_events: number; room_event_acceptances: number; attachment_messages: number };
   archive: {
     segments: number;
     archived_events: number;
-    d1_uncompacted_events: number;
+    d1_online_events: number;
     source_event_bytes: number;
     estimated_object_bytes: number;
     estimated_metadata_bytes: number;
@@ -30,6 +37,9 @@ export interface CapacityPlan {
     average_chunks_per_segment: number;
   };
   attachments: { objects: number; ciphertext_bytes: number };
+  d1: { room_event_rows: number; room_event_bytes: number; sync_pointer_rows: number; sync_pointer_bytes: number; estimated_payload_bytes: number };
+  durable_objects: { hot_event_rows: number; estimated_hot_event_bytes: number };
+  local_devices: { event_copies: number; estimated_envelope_bytes: number; estimated_projection_bytes: number; estimated_search_index_bytes: number; estimated_image_embedding_bytes: number; estimated_total_bytes: number };
   object_store: {
     successful_path_writes: number;
     range_reads: number;

@@ -57,6 +57,10 @@ test("object request forecast preserves zero LIST and exact successful writes", 
   assert.equal(plan.object_store.full_object_reads, 4);
   assert.equal(plan.object_store.list_requests, 0);
   assert.equal(plan.object_store.discovery_head_requests, 0);
+  assert.equal(plan.d1.room_event_rows, 532);
+  assert.equal(plan.d1.sync_pointer_rows, 1064);
+  assert.equal(plan.local_devices.event_copies, 1064);
+  assert.equal(plan.durable_objects.hot_event_rows, 32);
 });
 
 test("configured budgets fail only when an operation or storage limit is crossed", () => {

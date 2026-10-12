@@ -331,6 +331,16 @@ export interface DirectMessageRequests {
   status: string;
 }
 
+export interface EventStorageClaims {
+  accepted_at: number | null;
+  charged_bytes: number;
+  created_at: number;
+  event_id: string;
+  reservation_token: string;
+  room_id: string;
+  user_id: string;
+}
+
 export interface GroupHiddenMembers {
   created_at: number;
   hidden_user_id: string;
@@ -652,6 +662,8 @@ export interface Users {
 }
 
 export interface UserStorageLimits {
+  event_limit: number | null;
+  event_quota_bytes: number | null;
   object_limit: number;
   quota_bytes: number;
   updated_at: number;
@@ -663,6 +675,8 @@ export interface UserStorageUsage {
   archive_objects: Generated<number>;
   attachment_bytes: Generated<number>;
   attachment_objects: Generated<number>;
+  event_bytes: Generated<number>;
+  event_count: Generated<number>;
   updated_at: number;
   user_id: string;
 }
@@ -705,6 +719,7 @@ export interface DB {
   device_session_challenges: DeviceSessionChallenges;
   devices: Devices;
   direct_message_requests: DirectMessageRequests;
+  event_storage_claims: EventStorageClaims;
   group_hidden_members: GroupHiddenMembers;
   history_repair_attempts: HistoryRepairAttempts;
   history_repair_jobs: HistoryRepairJobs;

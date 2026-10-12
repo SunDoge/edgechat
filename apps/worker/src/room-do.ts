@@ -29,6 +29,7 @@ export class RoomDurableObject extends DurableObject<Env> {
           mls_epoch INTEGER NOT NULL DEFAULT 0,
           retention_floor_seq INTEGER NOT NULL DEFAULT 0,
           retention_generation INTEGER NOT NULL DEFAULT 1,
+          archive_floor_seq INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS members (
@@ -74,6 +75,9 @@ export class RoomDurableObject extends DurableObject<Env> {
       }
       if (!metaColumns.some((column) => column.name === "retention_generation")) {
         this.ctx.storage.sql.exec("ALTER TABLE room_meta ADD COLUMN retention_generation INTEGER NOT NULL DEFAULT 1");
+      }
+      if (!metaColumns.some((column) => column.name === "archive_floor_seq")) {
+        this.ctx.storage.sql.exec("ALTER TABLE room_meta ADD COLUMN archive_floor_seq INTEGER NOT NULL DEFAULT 0");
       }
       const eventColumns = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(events)").toArray();
       if (!eventColumns.some((column) => column.name === "accepted_at")) {
@@ -190,6 +194,25 @@ export class RoomDurableObject extends DurableObject<Env> {
     return rows.reverse().map((row) => JSON.parse(row.event_json) as RoomEvent);
   }
 
+  /** Drop only the redundant DO event bodies after an authenticated R2 segment
+   * and its D1 manifest row are durable. D1 remains the online sync authority. */
+  async pruneArchivedRange(startSeq: number, endSeq: number): Promise<number> {
+    if (!Number.isSafeInteger(startSeq) || !Number.isSafeInteger(endSeq) || startSeq < 1 || endSeq < startSeq) throw new Error("invalid archive range");
+    const meta = this.ctx.storage.sql.exec<{ current_seq: number; archive_floor_seq: number; retention_floor_seq: number }>(
+      "SELECT current_seq, archive_floor_seq, retention_floor_seq FROM room_meta LIMIT 1",
+    ).one();
+    const durableFloor = Math.max(meta.archive_floor_seq, meta.retention_floor_seq);
+    if (startSeq > durableFloor + 1) throw new Error("archive range is not contiguous");
+    const nextFloor = Math.min(endSeq, meta.current_seq);
+    if (nextFloor <= meta.archive_floor_seq) return 0;
+    let deleted = 0;
+    this.ctx.storage.transactionSync(() => {
+      deleted = this.ctx.storage.sql.exec("DELETE FROM events WHERE seq <= ?", nextFloor).rowsWritten;
+      this.ctx.storage.sql.exec("UPDATE room_meta SET archive_floor_seq = max(archive_floor_seq, ?)", nextFloor);
+    });
+    return deleted;
+  }
+
   private readRetentionState(): { floor_seq: number; generation: number; current_seq: number } {
     const row = this.ctx.storage.sql.exec<{ retention_floor_seq: number; retention_generation: number; current_seq: number }>(
       "SELECT retention_floor_seq, retention_generation, current_seq FROM room_meta LIMIT 1",
@@ -226,11 +249,12 @@ export class RoomDurableObject extends DurableObject<Env> {
       || endSeq < startSeq || endSeq > state.current_seq || endSeq - startSeq + 1 > 500) {
       throw new Error("repair range is outside retained room history");
     }
+    const archiveFloor = this.ctx.storage.sql.exec<{ archive_floor_seq: number }>("SELECT archive_floor_seq FROM room_meta LIMIT 1").one().archive_floor_seq;
     const present = new Set(this.ctx.storage.sql.exec<{ seq: number }>(
-      "SELECT seq FROM events WHERE seq BETWEEN ? AND ? ORDER BY seq", startSeq, endSeq,
+      "SELECT seq FROM events WHERE seq BETWEEN ? AND ? ORDER BY seq", Math.max(startSeq, archiveFloor + 1), endSeq,
     ).toArray().map((row) => row.seq));
     const missing_sequences: number[] = [];
-    for (let seq = startSeq; seq <= endSeq; seq += 1) if (!present.has(seq)) missing_sequences.push(seq);
+    for (let seq = Math.max(startSeq, archiveFloor + 1); seq <= endSeq; seq += 1) if (!present.has(seq)) missing_sequences.push(seq);
     return { ...state, missing_sequences };
   }
 
@@ -315,10 +339,11 @@ export class RoomDurableObject extends DurableObject<Env> {
     if ((repairLease && repairLease.expires_at > now) || (compactionLease && compactionLease.expires_at > now)) {
       return { ...state, deleted_events: 0, advanced: false };
     }
+    const archiveFloor = this.ctx.storage.sql.exec<{ archive_floor_seq: number }>("SELECT archive_floor_seq FROM room_meta LIMIT 1").one().archive_floor_seq;
+    let nextFloor = Math.max(state.floor_seq, Math.min(archiveFloor, acknowledgedThrough, state.floor_seq + maxEvents));
     const rows = this.ctx.storage.sql.exec<{ seq: number; accepted_at: number }>(
-      "SELECT seq, accepted_at FROM events WHERE seq > ? ORDER BY seq LIMIT ?", state.floor_seq, maxEvents,
+      "SELECT seq, accepted_at FROM events WHERE seq > ? ORDER BY seq LIMIT ?", nextFloor, maxEvents - (nextFloor - state.floor_seq),
     ).toArray();
-    let nextFloor = state.floor_seq;
     for (const row of rows) {
       if (row.seq !== nextFloor + 1 || row.seq > acknowledgedThrough || row.accepted_at > cutoff) break;
       nextFloor = row.seq;
@@ -510,6 +535,9 @@ export class RoomDurableObject extends DurableObject<Env> {
   private async persistForSync(event: RoomEvent): Promise<void> {
     const members = this.ctx.storage.sql.exec<MemberRow>("SELECT user_id, role, removed_at FROM members WHERE removed_at IS NULL").toArray();
     const serialized = JSON.stringify(event);
+    // The event body has one canonical durable copy in room_events. Per-user
+    // sync rows are only delivery pointers; /sync hydrates them with a join.
+    const syncPointer = JSON.stringify({ event_id: event.event_id });
     const db = createDatabase(this.env.DB);
     const queries = [
       db.insertInto("room_events").values({
@@ -520,7 +548,7 @@ export class RoomDurableObject extends DurableObject<Env> {
       db.updateTable("rooms").set({ current_seq: sql<number>`max(current_seq, ${event.seq})` }).where("room_id", "=", event.room_id),
       ...members.map((member) => db.insertInto("sync_log").values({
         recipient_user_id: member.user_id, kind: "room.event" as const, room_id: event.room_id,
-        seq: event.seq, event_id: event.event_id, payload: serialized, created_at: Date.now(),
+        seq: event.seq, event_id: event.event_id, payload: syncPointer, created_at: Date.now(),
       }).onConflict((conflict) => conflict.columns(["recipient_user_id", "kind", "event_id"]).doNothing())),
     ] as const;
     await batch(this.env.DB, queries);

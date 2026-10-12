@@ -3011,9 +3011,20 @@ describe("single-server durable delivery", () => {
     const delivered = page.items.filter((item) => item.kind === "room.event");
     expect(delivered).toHaveLength(1);
     expect(delivered[0].payload).toMatchObject({ ciphertext: unsigned.ciphertext, seq: 1 });
+    const syncCopies = await env.DB.prepare("SELECT payload FROM sync_log WHERE kind = 'room.event' AND event_id = ? ORDER BY cursor")
+      .bind(unsigned.event_id).all<{ payload: string }>();
+    expect(syncCopies.results).toHaveLength(2);
+    expect(syncCopies.results.map((row) => JSON.parse(row.payload))).toEqual([
+      { event_id: unsigned.event_id }, { event_id: unsigned.event_id },
+    ]);
+    expect(syncCopies.results.every((row) => !row.payload.includes(unsigned.ciphertext))).toBe(true);
     const stored = await env.DB.prepare("SELECT event_json FROM room_events WHERE event_id = ?").bind(unsigned.event_id).first<{ event_json: string }>();
     expect(stored?.event_json).toContain(unsigned.ciphertext);
     expect(stored?.event_json).not.toContain("correct-horse-battery");
+    const eventUsage = await env.DB.prepare("SELECT event_bytes, event_count FROM user_storage_usage WHERE user_id = ?")
+      .bind(alice.user_id).first<{ event_bytes: number; event_count: number }>();
+    expect(eventUsage?.event_count).toBe(1);
+    expect(eventUsage?.event_bytes).toBeGreaterThan(new TextEncoder().encode(JSON.stringify(unsigned)).byteLength);
     const committed = await env.DB.prepare("SELECT committed_event_id, object_key FROM attachments WHERE attachment_id = ?").bind(uploadedAttachment.attachment_id).first<{ committed_event_id: string; object_key: string }>();
     expect(committed?.committed_event_id).toBe(unsigned.event_id);
 

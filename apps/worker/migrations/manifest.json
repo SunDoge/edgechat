@@ -216,6 +216,10 @@
     {
       "file": "0054_repair_object_cleanup_barrier.sql",
       "sha256": "43dc1501ac37b55c01f39c3f9bb8e02c72efba1b65f2f91a74eb77c2e2d0dab6"
+    },
+    {
+      "file": "0055_event_storage_quotas.sql",
+      "sha256": "3eb7b847c4bacceeb29086d8f086e93ddbac9cab7da00d6ef9678036fa6ec432"
     }
   ]
 }

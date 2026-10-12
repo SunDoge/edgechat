@@ -21,6 +21,8 @@ export type Env = {
   VAPID_PRIVATE_JWK?: string;
   USER_OBJECT_QUOTA_BYTES?: string;
   USER_OBJECT_LIMIT?: string;
+  USER_EVENT_QUOTA_BYTES?: string;
+  USER_EVENT_LIMIT?: string;
   OPERATOR_TOKEN?: string;
   EVENT_RECEIPT_KEYRING?: string;
   EVENT_RECEIPT_KEY_ID?: string;

@@ -12,6 +12,7 @@ import { cleanupLoginFailureState, clearLoginFailures, limitAuthenticatedRequest
 import { logSecurityEvent } from "./security-events";
 import { ObjectStoreChecksumMismatchError, objectStore, type ObjectStoreObject } from "./object-store";
 import { authenticatePasskey, cleanupExpiredPasskeyChallenges, deletePasskey, listPasskeys, passkeyAuthenticationOptions, passkeyRegistrationOptions, registerPasskey } from "./passkeys";
+import type { AppendEventResult } from "./room-do";
 export { RoomDurableObject } from "./room-do";
 
 // The browser limit is 25 MiB of plaintext; AES-GCM appends a 16-byte tag.
@@ -52,6 +53,9 @@ const ABANDONED_KEY_PACKAGE_TTL_MS = 24 * 60 * 60 * 1_000;
 const CONSUMED_KEY_PACKAGE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_USER_OBJECT_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_USER_OBJECT_LIMIT = 100_000;
+const DEFAULT_USER_EVENT_QUOTA_BYTES = 512 * 1024 * 1024;
+const DEFAULT_USER_EVENT_LIMIT = 1_000_000;
+const EVENT_STORAGE_CLAIM_TTL_MS = 60 * 60 * 1_000;
 const MAX_PROFILE_AVATAR_BYTES = 128 * 1024;
 const ACCOUNT_APPEAL_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const RESOLVED_APPEAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -254,18 +258,22 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function defaultStorageLimits(env: Env): { bytes: number; objects: number } {
+function defaultStorageLimits(env: Env): { bytes: number; objects: number; eventBytes: number; events: number } {
   return {
     bytes: positiveInteger(env.USER_OBJECT_QUOTA_BYTES, DEFAULT_USER_OBJECT_QUOTA_BYTES),
     objects: positiveInteger(env.USER_OBJECT_LIMIT, DEFAULT_USER_OBJECT_LIMIT),
+    eventBytes: positiveInteger(env.USER_EVENT_QUOTA_BYTES, DEFAULT_USER_EVENT_QUOTA_BYTES),
+    events: positiveInteger(env.USER_EVENT_LIMIT, DEFAULT_USER_EVENT_LIMIT),
   };
 }
 
-async function storageLimits(env: Env, userId: string): Promise<{ bytes: number; objects: number; source: "default" | "override" }> {
-  const override = await createDatabase(env.DB).selectFrom("user_storage_limits").select(["quota_bytes", "object_limit"])
+async function storageLimits(env: Env, userId: string): Promise<{ bytes: number; objects: number; eventBytes: number; events: number; source: "default" | "override" }> {
+  const defaults = defaultStorageLimits(env);
+  const override = await createDatabase(env.DB).selectFrom("user_storage_limits").select(["quota_bytes", "object_limit", "event_quota_bytes", "event_limit"])
     .where("user_id", "=", userId).executeTakeFirst();
-  if (override) return { bytes: override.quota_bytes, objects: override.object_limit, source: "override" };
-  return { ...defaultStorageLimits(env), source: "default" };
+  if (override) return { bytes: override.quota_bytes, objects: override.object_limit,
+    eventBytes: override.event_quota_bytes ?? defaults.eventBytes, events: override.event_limit ?? defaults.events, source: "override" };
+  return { ...defaults, source: "default" };
 }
 
 async function reserveStorage(env: Env, userId: string, bytes: number, kind: StorageKind): Promise<void> {
@@ -403,17 +411,19 @@ export async function processPendingR2Writes(env: Env, cutoff = Date.now() - PEN
 async function storageUsage(env: Env, auth: AuthContext): Promise<Response> {
   requireUser(auth);
   const usage = await createDatabase(env.DB).selectFrom("user_storage_usage")
-    .select(["attachment_bytes", "archive_bytes", "attachment_objects", "archive_objects", "updated_at"])
+    .select(["attachment_bytes", "archive_bytes", "attachment_objects", "archive_objects", "event_bytes", "event_count", "updated_at"])
     .where("user_id", "=", auth.userId).executeTakeFirst();
   const [limits, avatar] = await Promise.all([
     storageLimits(env, auth.userId),
     createDatabase(env.DB).selectFrom("users").select("avatar_bytes").where("user_id", "=", auth.userId).executeTakeFirstOrThrow(),
   ]);
-  const value = usage ?? { attachment_bytes: 0, archive_bytes: 0, attachment_objects: 0, archive_objects: 0, updated_at: Date.now() };
+  const value = usage ?? { attachment_bytes: 0, archive_bytes: 0, attachment_objects: 0, archive_objects: 0, event_bytes: 0, event_count: 0, updated_at: Date.now() };
   const avatarBytes = Number(avatar.avatar_bytes); const avatarObjects = avatarBytes > 0 ? 1 : 0;
   const usedBytes = value.attachment_bytes + value.archive_bytes + avatarBytes;
   const usedObjects = value.attachment_objects + value.archive_objects + avatarObjects;
-  return json({ ...value, avatar_bytes: avatarBytes, avatar_objects: avatarObjects, used_bytes: usedBytes, quota_bytes: limits.bytes, remaining_bytes: Math.max(0, limits.bytes - usedBytes), used_objects: usedObjects, object_limit: limits.objects, remaining_objects: Math.max(0, limits.objects - usedObjects), quota_source: limits.source });
+  return json({ ...value, avatar_bytes: avatarBytes, avatar_objects: avatarObjects, used_bytes: usedBytes, quota_bytes: limits.bytes, remaining_bytes: Math.max(0, limits.bytes - usedBytes), used_objects: usedObjects, object_limit: limits.objects, remaining_objects: Math.max(0, limits.objects - usedObjects),
+    event_quota_bytes: limits.eventBytes, remaining_event_bytes: Math.max(0, limits.eventBytes - value.event_bytes), event_limit: limits.events,
+    remaining_events: Math.max(0, limits.events - value.event_count), quota_source: limits.source });
 }
 
 async function requireOperator(request: Request, env: Env): Promise<void> {
@@ -449,12 +459,14 @@ async function operatorSetStorageLimit(request: Request, env: Env, userId: UserI
     const body = await readJson(request, 1_024);
     const quotaBytes = requiredPositiveSafeInteger(body, "quota_bytes");
     const objectLimit = requiredPositiveSafeInteger(body, "object_limit");
+    const eventQuotaBytes = body.event_quota_bytes === undefined ? null : requiredPositiveSafeInteger(body, "event_quota_bytes");
+    const eventLimit = body.event_limit === undefined ? null : requiredPositiveSafeInteger(body, "event_limit");
     const updatedAt = Date.now();
-    await db.insertInto("user_storage_limits").values({ user_id: userId, quota_bytes: quotaBytes, object_limit: objectLimit, updated_at: updatedAt })
-      .onConflict((conflict) => conflict.column("user_id").doUpdateSet({ quota_bytes: quotaBytes, object_limit: objectLimit, updated_at: updatedAt })).execute();
+    await db.insertInto("user_storage_limits").values({ user_id: userId, quota_bytes: quotaBytes, object_limit: objectLimit, event_quota_bytes: eventQuotaBytes, event_limit: eventLimit, updated_at: updatedAt })
+      .onConflict((conflict) => conflict.column("user_id").doUpdateSet({ quota_bytes: quotaBytes, object_limit: objectLimit, event_quota_bytes: eventQuotaBytes, event_limit: eventLimit, updated_at: updatedAt })).execute();
   }
   const limits = await storageLimits(env, userId);
-  return json({ user_id: userId, quota_bytes: limits.bytes, object_limit: limits.objects, quota_source: limits.source });
+  return json({ user_id: userId, quota_bytes: limits.bytes, object_limit: limits.objects, event_quota_bytes: limits.eventBytes, event_limit: limits.events, quota_source: limits.source });
 }
 
 async function operatorStorage(url: URL, env: Env): Promise<Response> {
@@ -466,7 +478,7 @@ async function operatorStorage(url: URL, env: Env): Promise<Response> {
   let usersQuery = db.selectFrom("users as u")
     .leftJoin("user_storage_usage as s", "s.user_id", "u.user_id")
     .leftJoin("user_storage_limits as l", "l.user_id", "u.user_id")
-    .select(["u.user_id", "u.display_name", "u.avatar_bytes", "s.attachment_bytes", "s.archive_bytes", "s.attachment_objects", "s.archive_objects", "s.updated_at", "l.quota_bytes", "l.object_limit"])
+    .select(["u.user_id", "u.display_name", "u.avatar_bytes", "s.attachment_bytes", "s.archive_bytes", "s.attachment_objects", "s.archive_objects", "s.event_bytes", "s.event_count", "s.updated_at", "l.quota_bytes", "l.object_limit", "l.event_quota_bytes", "l.event_limit"])
     .orderBy("u.user_id").limit(requestedLimit + 1);
   if (cursor) usersQuery = usersQuery.where("u.user_id", ">", cursor);
   const [rows, usage, avatars, userCount, pendingWrites, pendingDeletes, pendingAvatarDeletes] = await Promise.all([
@@ -474,6 +486,7 @@ async function operatorStorage(url: URL, env: Env): Promise<Response> {
     db.selectFrom("user_storage_usage").select(({ fn }) => [
       fn.sum<number>("attachment_bytes").as("attachment_bytes"), fn.sum<number>("archive_bytes").as("archive_bytes"),
       fn.sum<number>("attachment_objects").as("attachment_objects"), fn.sum<number>("archive_objects").as("archive_objects"),
+      fn.sum<number>("event_bytes").as("event_bytes"), fn.sum<number>("event_count").as("event_count"),
     ]).executeTakeFirst(),
     db.selectFrom("users").select(({ fn }) => [fn.sum<number>("avatar_bytes").as("bytes"), sql<number>`sum(case when avatar_bytes > 0 then 1 else 0 end)`.as("objects")]).executeTakeFirst(),
     db.selectFrom("users").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
@@ -493,6 +506,8 @@ async function operatorStorage(url: URL, env: Env): Promise<Response> {
       attachment_bytes: attachmentBytes, archive_bytes: archiveBytes, avatar_bytes: avatarBytes, used_bytes: attachmentBytes + archiveBytes + avatarBytes,
       attachment_objects: attachmentObjects, archive_objects: archiveObjects, avatar_objects: avatarObjects, used_objects: attachmentObjects + archiveObjects + avatarObjects,
       quota_bytes: row.quota_bytes ?? defaults.bytes, object_limit: row.object_limit ?? defaults.objects,
+      event_bytes: Number(row.event_bytes ?? 0), event_count: Number(row.event_count ?? 0),
+      event_quota_bytes: row.event_quota_bytes ?? defaults.eventBytes, event_limit: row.event_limit ?? defaults.events,
       quota_source: row.quota_bytes === null ? "default" : "override", updated_at: row.updated_at,
     };
   });
@@ -500,10 +515,11 @@ async function operatorStorage(url: URL, env: Env): Promise<Response> {
   const attachmentObjects = Number(usage?.attachment_objects ?? 0); const archiveObjects = Number(usage?.archive_objects ?? 0);
   const avatarBytes = Number(avatars?.bytes ?? 0); const avatarObjects = Number(avatars?.objects ?? 0);
   return json({
-    defaults: { quota_bytes: defaults.bytes, object_limit: defaults.objects },
+    defaults: { quota_bytes: defaults.bytes, object_limit: defaults.objects, event_quota_bytes: defaults.eventBytes, event_limit: defaults.events },
     totals: {
       users: Number(userCount.count), attachment_bytes: attachmentBytes, archive_bytes: archiveBytes, avatar_bytes: avatarBytes, used_bytes: attachmentBytes + archiveBytes + avatarBytes,
       attachment_objects: attachmentObjects, archive_objects: archiveObjects, avatar_objects: avatarObjects, used_objects: attachmentObjects + archiveObjects + avatarObjects,
+      event_bytes: Number(usage?.event_bytes ?? 0), event_count: Number(usage?.event_count ?? 0),
       pending_write_bytes: Number(pendingWrites?.bytes ?? 0), pending_write_objects: Number(pendingWrites?.objects ?? 0),
       pending_delete_bytes: Number(pendingDeletes?.bytes ?? 0) + Number(pendingAvatarDeletes?.bytes ?? 0), pending_delete_objects: Number(pendingDeletes?.objects ?? 0) + Number(pendingAvatarDeletes?.objects ?? 0),
     },
@@ -1424,15 +1440,92 @@ async function listBlockedUsers(url: URL, env: Env, auth: AuthContext): Promise<
 }
 
 async function appendRoomEvent(env: Env, roomId: RoomId, event: ClientEvent, currentEpoch: number): Promise<RoomEvent> {
-  const result = await env.ROOMS.getByName(roomId).appendEvent(event, currentEpoch);
+  const db = createDatabase(env.DB);
+  const durable = await db.selectFrom("room_events").select("event_json").where("event_id", "=", event.event_id).executeTakeFirst();
+  if (durable) {
+    const existing = JSON.parse(durable.event_json) as RoomEvent;
+    if (existing.room_id !== roomId || existing.signature !== event.signature) {
+      throw new HttpError(409, "Event ID is already bound to another signed envelope", "event_id_conflict");
+    }
+    return existing;
+  }
+
+  // Include a conservative allowance for the server acceptance receipt. The
+  // quota is charged to the sending user, while fan-out pointers are free.
+  const chargedBytes = new TextEncoder().encode(JSON.stringify(event)).byteLength + 512;
+  const claim = await reserveEventStorage(env, event.event_id, event.sender, roomId, chargedBytes);
+  let result: AppendEventResult;
+  try {
+    result = await env.ROOMS.getByName(roomId).appendEvent(event, currentEpoch);
+  } catch (error) {
+    if (claim.owned) await releaseEventStorageClaim(env, event.event_id, claim.token);
+    throw error;
+  }
   if (!result.ok) {
+    if (claim.owned) await releaseEventStorageClaim(env, event.event_id, claim.token);
     const message = result.code === "stale_epoch"
       ? "Room MLS epoch changed while ordering the event"
       : result.code === "event_id_conflict" ? "Event ID is already bound to another signed envelope"
         : result.code === "owner_conflict" ? "Room ownership changed while ordering the event" : "Event MLS epoch is invalid";
     throw new HttpError(409, message, result.code);
   }
+  await db.updateTable("event_storage_claims").set({ accepted_at: Date.now() })
+    .where("event_id", "=", event.event_id).where("reservation_token", "=", claim.token).execute();
   return result.event;
+}
+
+async function reserveEventStorage(env: Env, eventId: string, userId: UserId, roomId: RoomId, chargedBytes: number): Promise<{ token: string; owned: boolean }> {
+  const defaults = defaultStorageLimits(env);
+  const token = randomId(24); const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO user_storage_usage
+      (user_id, attachment_bytes, archive_bytes, attachment_objects, archive_objects, event_bytes, event_count, updated_at)
+      VALUES (?, 0, 0, 0, 0, 0, 0, ?) ON CONFLICT(user_id) DO NOTHING`).bind(userId, now),
+    env.DB.prepare(`INSERT INTO event_storage_claims
+      (event_id, user_id, room_id, reservation_token, charged_bytes, created_at, accepted_at)
+      SELECT ?, ?, ?, ?, ?, ?, NULL
+      WHERE COALESCE((SELECT event_bytes FROM user_storage_usage WHERE user_id = ?), 0) + ?
+          <= COALESCE((SELECT event_quota_bytes FROM user_storage_limits WHERE user_id = ?), ?)
+        AND COALESCE((SELECT event_count FROM user_storage_usage WHERE user_id = ?), 0) + 1
+          <= COALESCE((SELECT event_limit FROM user_storage_limits WHERE user_id = ?), ?)
+      ON CONFLICT(event_id) DO NOTHING`).bind(eventId, userId, roomId, token, chargedBytes, now,
+        userId, chargedBytes, userId, defaults.eventBytes, userId, userId, defaults.events),
+    env.DB.prepare(`UPDATE user_storage_usage SET event_bytes = event_bytes + ?, event_count = event_count + 1, updated_at = ?
+      WHERE user_id = ? AND EXISTS (SELECT 1 FROM event_storage_claims WHERE event_id = ? AND reservation_token = ?)`)
+      .bind(chargedBytes, now, userId, eventId, token),
+  ]);
+  const row = await env.DB.prepare(`SELECT user_id, room_id, reservation_token, charged_bytes
+    FROM event_storage_claims WHERE event_id = ?`).bind(eventId).first<{ user_id: string; room_id: string; reservation_token: string; charged_bytes: number }>();
+  if (!row) throw new HttpError(413, "Encrypted event storage quota exceeded", "event_storage_quota_exceeded");
+  if (row.user_id !== userId || row.room_id !== roomId || row.charged_bytes !== chargedBytes) {
+    throw new HttpError(409, "Event ID is already reserved for another envelope", "event_id_conflict");
+  }
+  return { token: row.reservation_token, owned: row.reservation_token === token };
+}
+
+async function releaseEventStorageClaim(env: Env, eventId: string, token: string): Promise<void> {
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE user_storage_usage SET
+      event_bytes = max(0, event_bytes - COALESCE((SELECT charged_bytes FROM event_storage_claims WHERE event_id = ? AND reservation_token = ? AND accepted_at IS NULL), 0)),
+      event_count = max(0, event_count - CASE WHEN EXISTS (SELECT 1 FROM event_storage_claims WHERE event_id = ? AND reservation_token = ? AND accepted_at IS NULL) THEN 1 ELSE 0 END), updated_at = ?
+      WHERE user_id = (SELECT user_id FROM event_storage_claims WHERE event_id = ? AND reservation_token = ? AND accepted_at IS NULL)`)
+      .bind(eventId, token, eventId, token, now, eventId, token),
+    env.DB.prepare("DELETE FROM event_storage_claims WHERE event_id = ? AND reservation_token = ? AND accepted_at IS NULL").bind(eventId, token),
+  ]);
+}
+
+export async function cleanupStaleEventStorageClaims(env: Env, cutoff = Date.now() - EVENT_STORAGE_CLAIM_TTL_MS): Promise<number> {
+  const rows = await env.DB.prepare(`SELECT event_id, reservation_token FROM event_storage_claims
+    WHERE accepted_at IS NULL AND created_at < ? ORDER BY created_at LIMIT 100`).bind(cutoff).all<{ event_id: string; reservation_token: string }>();
+  for (const row of rows.results) {
+    const durable = await env.DB.prepare("SELECT accepted_at FROM room_events WHERE event_id = ?").bind(row.event_id).first<{ accepted_at: number }>();
+    if (durable) {
+      await env.DB.prepare("UPDATE event_storage_claims SET accepted_at = ? WHERE event_id = ? AND reservation_token = ? AND accepted_at IS NULL")
+        .bind(durable.accepted_at, row.event_id, row.reservation_token).run();
+    } else await releaseEventStorageClaim(env, row.event_id, row.reservation_token);
+  }
+  return rows.results.length;
 }
 
 function assertLocalId(id: string, prefix: "@" | "!" | "$", env: Env): void {
@@ -3123,10 +3216,20 @@ export async function cleanupExpiredDeviceLinks(env: Env): Promise<number> {
 
 async function persistRetentionFloor(env: Env, roomId: RoomId, floorSeq: number, generation: number, checkedAt: number): Promise<void> {
   const db = createDatabase(env.DB);
+  const released = await db.selectFrom("event_storage_claims as claim")
+    .innerJoin("room_events as event", "event.event_id", "claim.event_id")
+    .select(["claim.user_id", sql<number>`sum(claim.charged_bytes)`.as("bytes"), sql<number>`count(*)`.as("events")])
+    .where("event.room_id", "=", roomId).where("event.seq", "<=", floorSeq).groupBy("claim.user_id").execute();
   await batch(env.DB, [
     db.updateTable("rooms").set({ retention_floor_seq: floorSeq, retention_generation: generation, retention_gc_at: checkedAt })
       .where("room_id", "=", roomId),
     db.deleteFrom("attachment_grants").where("room_id", "=", roomId).where("grant_seq", "<=", floorSeq),
+    ...released.map((item) => db.updateTable("user_storage_usage").set({
+      event_bytes: sql<number>`max(0, event_bytes - ${Number(item.bytes)})`,
+      event_count: sql<number>`max(0, event_count - ${Number(item.events)})`, updated_at: checkedAt,
+    }).where("user_id", "=", item.user_id)),
+    db.deleteFrom("event_storage_claims").where("room_id", "=", roomId)
+      .where("event_id", "in", db.selectFrom("room_events").select("event_id").where("room_id", "=", roomId).where("seq", "<=", floorSeq)),
     db.deleteFrom("room_events").where("room_id", "=", roomId).where("seq", "<=", floorSeq),
     db.deleteFrom("sync_log").where("room_id", "=", roomId).where("kind", "=", "room.event").where("seq", "<=", floorSeq),
     db.deleteFrom("room_retention_acks").where("room_id", "=", roomId).where("through_seq", "<=", floorSeq),
@@ -4475,12 +4578,18 @@ export async function cleanupExpiredRoomPeerRecoveries(env: Env, now = Date.now(
 
 async function sync(url: URL, env: Env, auth: AuthContext): Promise<Response> {
   const cursor = Math.max(0, Number(url.searchParams.get("cursor") ?? 0) || 0);
-  let query = createDatabase(env.DB).selectFrom("sync_log").select(["cursor", "kind", "room_id", "seq", "payload"])
-    .where("recipient_user_id", "=", auth.userId).where("cursor", ">", cursor);
-  if (auth.actor === "bot") query = query.where("room_id", "=", auth.botRoomId ?? "");
-  const rows = await query.orderBy("cursor").limit(201).execute();
+  let query = createDatabase(env.DB).selectFrom("sync_log as sync")
+    .leftJoin("room_events as event", "event.event_id", "sync.event_id")
+    .select(["sync.cursor", "sync.kind", "sync.room_id", "sync.seq", "sync.payload", "event.event_json"])
+    .where("sync.recipient_user_id", "=", auth.userId).where("sync.cursor", ">", cursor);
+  if (auth.actor === "bot") query = query.where("sync.room_id", "=", auth.botRoomId ?? "");
+  const rows = await query.orderBy("sync.cursor").limit(201).execute();
   const page = rows.slice(0, 200);
-  return json({ next_cursor: page.at(-1)?.cursor ?? cursor, has_more: rows.length > 200, items: page.map((item) => ({ ...item, payload: JSON.parse(item.payload) })) });
+  const items = page.flatMap(({ event_json, ...item }) => {
+    const payload = item.kind === "room.event" ? event_json : item.payload;
+    return payload ? [{ ...item, payload: JSON.parse(payload) }] : [];
+  });
+  return json({ next_cursor: page.at(-1)?.cursor ?? cursor, has_more: rows.length > 200, items });
 }
 
 async function history(url: URL, env: Env, auth: AuthContext, roomId: RoomId): Promise<Response> {
@@ -5244,6 +5353,7 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
       || existing.ciphertext_sha256 !== suppliedDigest.text) {
       throw new HttpError(409, "Segment ID was already used for different ciphertext", "segment_conflict");
     }
+    await env.ROOMS.getByName(roomId).pruneArchivedRange(existing.start_seq, existing.end_seq);
     await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
     return json(existing);
   }
@@ -5315,6 +5425,7 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
       const landed = await db.selectFrom("archive_segments").select(["start_seq", "end_seq", "byte_size", "ciphertext_sha256"])
         .where("segment_id", "=", id).where("room_id", "=", roomId).executeTakeFirst();
       if (landed && matchesCommitted(landed)) {
+        await env.ROOMS.getByName(roomId).pruneArchivedRange(start, end);
         await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
         return json({ segment_id: id, start_seq: start, end_seq: end, byte_size: declaredSize });
       }
@@ -5354,6 +5465,7 @@ async function uploadSegment(request: Request, env: Env, auth: AuthContext, room
     if (reservationCreated && releaseReservation) await finalizePendingR2Cleanup(env, [pending]);
     throw error;
   }
+  await env.ROOMS.getByName(roomId).pruneArchivedRange(start, end);
   await env.ROOMS.getByName(roomId).releaseCompactionLease(leaseToken, auth.deviceId);
   return json({ segment_id: id, start_seq: start, end_seq: end, byte_size: declaredSize }, 201);
 }
@@ -6088,6 +6200,9 @@ export default {
       }),
       processPendingR2Writes(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "deleted abandoned R2 writes", count }));
+      }),
+      cleanupStaleEventStorageClaims(env).then((count) => {
+        if (count) console.log(JSON.stringify({ message: "reconciled stale event storage claims", count }));
       }),
       processProfileAvatarDeletions(env).then((count) => {
         if (count) console.log(JSON.stringify({ message: "deleted replaced profile avatars", count }));

@@ -242,7 +242,8 @@ limits, or expected deployment size. It models the archive policy implemented by
 the Worker: at most 500 events, a 1 MiB minimum input threshold, a 6 MiB target,
 a 32-event recent tail, and 128 KiB independently encrypted chunks. It also
 separates cold archive lookups (header + envelope/index + chunks), warm lookups
-(cached authenticated metadata + chunks), and full attachment reads.
+(cached authenticated metadata + chunks), full attachment reads, D1 canonical
+events/sync pointers, the RoomDO hot tail, and per-device local databases.
 
 ```sh
 pnpm run plan:capacity -- \
@@ -255,7 +256,9 @@ pnpm run plan:capacity -- \
 ```
 
 The JSON result reports stored ciphertext bytes, object count, successful-path
-PUTs, Range GETs, attachment GETs, and uncompacted D1 events. Optional
+PUTs, Range GETs, attachment GETs, D1/DO payload estimates, and local-device
+storage estimates. Use `--average-room-members` and
+`--average-devices-per-member` to make fan-out explicit. Optional
 `--max-object-writes`, `--max-object-reads`, `--max-stored-objects`, and
 `--max-stored-bytes` limits make the command exit with status 2 when exceeded,
 so an operator can version a deployment scenario in CI. The planner performs no

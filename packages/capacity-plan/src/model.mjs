@@ -14,6 +14,13 @@ export const DEFAULT_SCENARIO = Object.freeze({
   rooms: 20,
   eventsPerRoomPerDay: 20,
   averageEventBytes: 2_048,
+  averageRoomMembers: 2,
+  averageDevicesPerMember: 1,
+  syncPointerBytes: 96,
+  localProjectionBytesPerEvent: 512,
+  localSearchIndexRatio: 0.35,
+  imageAttachmentShare: 0.5,
+  imageEmbeddingBytes: 2_048,
   attachmentRate: 0.05,
   averageAttachmentBytes: 2 * 1024 * 1024,
   compressionRatio: 0.85,
@@ -26,7 +33,8 @@ export const DEFAULT_SCENARIO = Object.freeze({
 });
 
 const INTEGER_FIELDS = new Set([
-  "days", "rooms", "eventsPerRoomPerDay", "averageEventBytes", "averageAttachmentBytes",
+  "days", "rooms", "eventsPerRoomPerDay", "averageEventBytes", "averageRoomMembers", "averageDevicesPerMember",
+  "syncPointerBytes", "localProjectionBytesPerEvent", "imageEmbeddingBytes", "averageAttachmentBytes",
   "keyEnvelopeBytes", "indexBytesPerEvent", "coldArchiveLookupsPerDay",
   "warmArchiveLookupsPerDay", "chunksPerLookup", "attachmentDownloadsPerDay",
 ]);
@@ -45,6 +53,13 @@ export function normalizeScenario(input = {}) {
   finite("rooms", value.rooms, 1, 1_000_000);
   finite("eventsPerRoomPerDay", value.eventsPerRoomPerDay, 0, 1_000_000);
   finite("averageEventBytes", value.averageEventBytes, 256, 4_500_000);
+  finite("averageRoomMembers", value.averageRoomMembers, 1, 10_000);
+  finite("averageDevicesPerMember", value.averageDevicesPerMember, 1, 100);
+  finite("syncPointerBytes", value.syncPointerBytes, 32, 4096);
+  finite("localProjectionBytesPerEvent", value.localProjectionBytesPerEvent, 0, 1_000_000);
+  finite("localSearchIndexRatio", value.localSearchIndexRatio, 0, 10);
+  finite("imageAttachmentShare", value.imageAttachmentShare, 0, 1);
+  finite("imageEmbeddingBytes", value.imageEmbeddingBytes, 0, 1_000_000);
   finite("attachmentRate", value.attachmentRate, 0, 10);
   finite("averageAttachmentBytes", value.averageAttachmentBytes, 1, 25 * 1024 * 1024 + 16);
   finite("compressionRatio", value.compressionRatio, 0.01, 1.5);
@@ -121,12 +136,24 @@ export function createCapacityPlan(input = {}) {
     + scenario.chunksPerLookup * averageChunkBytes)
     + warmLookups * scenario.chunksPerLookup * averageChunkBytes;
   const attachmentReadBytes = attachmentDownloads * scenario.averageAttachmentBytes;
-  if (![archiveBytes, archiveMetadataBytes, archiveChunkBytes, archiveReadBytes, attachmentReadBytes].every(Number.isSafeInteger)) {
+  const syncPointerRows = totalEvents * scenario.averageRoomMembers;
+  const d1EventBytes = totalEvents * scenario.averageEventBytes;
+  const d1SyncPointerBytes = syncPointerRows * scenario.syncPointerBytes;
+  const durableObjectHotBytes = roomPlan.unarchivedEvents * scenario.rooms * scenario.averageEventBytes;
+  const localEventCopies = totalEvents * scenario.averageRoomMembers * scenario.averageDevicesPerMember;
+  const localEnvelopeBytes = localEventCopies * scenario.averageEventBytes;
+  const localProjectionBytes = localEventCopies * scenario.localProjectionBytesPerEvent;
+  const localSearchIndexBytes = Math.ceil(localProjectionBytes * scenario.localSearchIndexRatio);
+  const localImageEmbeddingBytes = Math.round(attachmentObjects * scenario.imageAttachmentShare
+    * scenario.averageRoomMembers * scenario.averageDevicesPerMember * scenario.imageEmbeddingBytes);
+  const localEstimatedBytes = localEnvelopeBytes + localProjectionBytes + localSearchIndexBytes + localImageEmbeddingBytes;
+  if (![archiveBytes, archiveMetadataBytes, archiveChunkBytes, archiveReadBytes, attachmentReadBytes, syncPointerRows,
+    d1EventBytes, d1SyncPointerBytes, durableObjectHotBytes, localEventCopies, localEstimatedBytes].every(Number.isSafeInteger)) {
     throw new Error("scenario byte forecast exceeds safe integer precision");
   }
 
   return {
-    model: "edgechat-capacity-plan/v1",
+    model: "edgechat-capacity-plan/v2",
     pricing: "not-included",
     scenario,
     workload: {
@@ -137,7 +164,7 @@ export function createCapacityPlan(input = {}) {
     archive: {
       segments: archiveSegments,
       archived_events: roomPlan.archivedEvents * scenario.rooms,
-      d1_uncompacted_events: roomPlan.unarchivedEvents * scenario.rooms,
+      d1_online_events: totalEvents,
       source_event_bytes: archiveInputBytes,
       estimated_object_bytes: archiveBytes,
       estimated_metadata_bytes: archiveMetadataBytes,
@@ -147,6 +174,25 @@ export function createCapacityPlan(input = {}) {
     attachments: {
       objects: attachmentObjects,
       ciphertext_bytes: attachmentBytes,
+    },
+    d1: {
+      room_event_rows: totalEvents,
+      room_event_bytes: d1EventBytes,
+      sync_pointer_rows: syncPointerRows,
+      sync_pointer_bytes: d1SyncPointerBytes,
+      estimated_payload_bytes: d1EventBytes + d1SyncPointerBytes,
+    },
+    durable_objects: {
+      hot_event_rows: roomPlan.unarchivedEvents * scenario.rooms,
+      estimated_hot_event_bytes: durableObjectHotBytes,
+    },
+    local_devices: {
+      event_copies: localEventCopies,
+      estimated_envelope_bytes: localEnvelopeBytes,
+      estimated_projection_bytes: localProjectionBytes,
+      estimated_search_index_bytes: localSearchIndexBytes,
+      estimated_image_embedding_bytes: localImageEmbeddingBytes,
+      estimated_total_bytes: localEstimatedBytes,
     },
     object_store: {
       successful_path_writes: archiveSegments + attachmentObjects,
@@ -162,6 +208,8 @@ export function createCapacityPlan(input = {}) {
     notes: [
       "Counts describe successful-path object operations; retries, repair, deletion and temporary device-transfer objects are intentionally separate.",
       "Attachment rate is the average attachment-object count per accepted event and may be greater than one for albums.",
+      "D1, Durable Object and local-device figures are payload estimates and exclude SQLite/Postgres page, row and index overhead.",
+      "Local-device storage is multiplied by average members and devices because every participating device keeps its own decrypted cache.",
       "The default 0.85 archive compression ratio is conservative for base64url-encoded high-entropy MLS ciphertext and is release-tested against the real zstd segment builder.",
       "Cold archive lookup means header plus envelope/index plus requested chunk ranges; warm lookup reuses authenticated local metadata.",
       "Storage bytes are planning estimates. Apply current provider prices outside this model so changing R2/B2/S3 tariffs cannot silently alter the protocol budget.",

@@ -136,6 +136,18 @@ describe("RoomDurableObject", () => {
     expect(await room.acquireCompactionLease(second, 10_003)).toEqual({ acquired: true, lease: second });
   });
 
+  it("prunes archived event bodies without turning them into repair gaps", async () => {
+    const room = env.ROOMS.getByName(roomId);
+    await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());
+    await room.appendEvent(event("archived-one"), 1);
+    await room.appendEvent(event("hot-two"), 1);
+    expect(await room.pruneArchivedRange(1, 1)).toBe(1);
+    expect(await room.pruneArchivedRange(1, 1)).toBe(0);
+    expect(await room.getEvents(null, 20)).toMatchObject([{ event_id: eventId("hot-two"), seq: 2 }]);
+    expect(await room.repairRangeState(1, 2)).toMatchObject({ missing_sequences: [] });
+    expect(await env.DB.prepare("SELECT event_json FROM room_events WHERE event_id = ?").bind(eventId("archived-one")).first()).not.toBeNull();
+  });
+
   it("binds history repair leases to one device, range, generation, and token hash", async () => {
     const room = env.ROOMS.getByName(roomId);
     await room.initialize(roomId, [{ user_id: alice, role: "owner" }, { user_id: bob, role: "member" }], Date.now());
