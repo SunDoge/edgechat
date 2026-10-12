@@ -3,12 +3,14 @@ import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import {
   canonicalEventBytes,
   isNamespacedMessageId,
+  isMessageDeletePayload,
   isRoomEventEnvelope,
   MAX_ATTACHMENT_PLAINTEXT_BYTES,
   MAX_MESSAGE_ATTACHMENTS,
   MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES,
   type ClientEvent,
   type MessageId,
+  type MessageDeletePayload,
   type RoomEvent,
   type RoomId,
   type UserId,
@@ -79,6 +81,13 @@ export type DecryptedNodeMessage = {
   text: string;
   attachments: NodeAttachment[];
   replyToId?: MessageId;
+  mutation?: NodeMessageMutation;
+};
+
+export type NodeMessageMutation = {
+  type: "message-delete";
+  targetMessageId: MessageId;
+  deletedAt: number;
 };
 
 export type NodeMessageOptions = {
@@ -293,6 +302,22 @@ export class NodeEdgeChatClient {
     });
   }
 
+  deleteMessage(roomId: RoomId, targetMessageId: MessageId): Promise<{ event_id: MessageId; seq: number }> {
+    return this.exclusive(async () => {
+      if (!isNamespacedMessageId(targetMessageId)) throw new RangeError("Message deletion target is invalid");
+      const deletedAt = Date.now();
+      const payload: MessageDeletePayload = {
+        version: 1,
+        kind: "message.delete",
+        target: { kind: "message", message_id: targetMessageId, room_id: roomId },
+        deleted_at: deletedAt,
+      };
+      return this.queueMessageLocked(roomId, "message.delete", () => payload as unknown as Record<string, unknown>, {
+        target_event_id: targetMessageId,
+      }, undefined, deletedAt);
+    });
+  }
+
   async downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer> {
     const normalized = normalizeAttachment(attachment);
     if (!normalized) throw new NodeClientError("Attachment metadata is invalid", "invalid_attachment_metadata");
@@ -392,7 +417,8 @@ export class NodeEdgeChatClient {
             })
             : [];
           const replyToId = messageReplyTarget(payload, event.room_id);
-          const message = { event, payload, text, attachments, ...(replyToId ? { replyToId } : {}) };
+          const mutation = messageMutation(payload, event);
+          const message = { event, payload, text, attachments, ...(replyToId ? { replyToId } : {}), ...(mutation ? { mutation } : {}) };
           messages.push(message);
           this.state.pending_deliveries.push(message);
         }
@@ -430,10 +456,11 @@ export class NodeEdgeChatClient {
 
   private async queueMessageLocked(
     roomId: RoomId,
-    type: "message.text" | "message.file",
+    type: "message.text" | "message.file" | "message.delete",
     createPayload: (eventId: MessageId) => Record<string, unknown>,
     metadata: Record<string, unknown>,
     afterQueued?: () => void,
+    createdAt = Date.now(),
   ): Promise<{ event_id: MessageId; seq: number }> {
     await this.flushPendingLocked();
     if (!this.mls.hasGroup(roomId)) await this.refreshRoomsLocked();
@@ -443,7 +470,7 @@ export class NodeEdgeChatClient {
     this.captureMlsState();
     const unsigned: Omit<ClientEvent, "signature"> = {
       event_id: eventId, room_id: roomId, sender: this.state.user_id, device_id: this.state.device_id,
-      type, created_at: Date.now(), ciphertext, metadata: { ...metadata, mls_epoch: this.mls.epoch(roomId) },
+      type, created_at: createdAt, ciphertext, metadata: { ...metadata, mls_epoch: this.mls.epoch(roomId) },
     };
     const signature = base64Url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, this.signingKey, canonicalEventBytes(unsigned)));
     this.state.outbox.push({ ...unsigned, signature });
@@ -526,4 +553,13 @@ function messageReplyTarget(payload: Record<string, unknown>, roomId: RoomId): M
     throw new NodeClientError("Decrypted reply target is invalid", "invalid_message_relation");
   }
   return target.message_id;
+}
+
+function messageMutation(payload: Record<string, unknown>, event: RoomEvent): NodeMessageMutation | undefined {
+  if (event.type !== "message.delete") return undefined;
+  if (!isMessageDeletePayload(payload) || payload.target.room_id !== event.room_id
+    || event.metadata.target_event_id !== payload.target.message_id) {
+    throw new NodeClientError("Decrypted message deletion is invalid", "invalid_message_deletion");
+  }
+  return { type: "message-delete", targetMessageId: payload.target.message_id, deletedAt: payload.deleted_at };
 }

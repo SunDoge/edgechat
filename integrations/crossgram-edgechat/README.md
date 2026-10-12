@@ -47,6 +47,11 @@ Telegram replies map to an EdgeChat `relation` inside the MLS-encrypted message
 payload. The Worker sees neither the target message ID nor that the message is
 a reply.
 
+Telegram “delete for everyone” maps to an immutable EdgeChat retraction event.
+“Delete only for me” is deliberately rejected for now because EdgeChat has no
+per-device remote tombstone and must not silently turn a local delete into a
+global retraction.
+
 This portal layout is intended for testing and personal self-hosting. A future
 published package should bundle the Node client and native OpenMLS Wasm instead
 of importing source from a neighboring checkout.

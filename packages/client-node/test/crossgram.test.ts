@@ -31,11 +31,14 @@ describe("EdgeChatCrossgramPlatform", () => {
       acknowledgeDeliveries: vi.fn(async () => undefined),
       sendText: vi.fn(async () => ({ event_id: "$two12345:example.com" as const, seq: 2 })),
       sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
+      deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 4 })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 3_000 });
     expect((await platform.getDialogs()).dialogs[0].conversation).toMatchObject({ id: room.room_id, title: "Bob", kind: "direct" });
     const incoming = await platform.pollOnce();
+    expect(incoming[0]?.type).toBe("message");
+    if (incoming[0]?.type !== "message") throw new Error("message event missing");
     expect(incoming[0].message).toMatchObject({ id: "$one12345:example.com", senderId: "@bob:example.com", outgoing: false,
       content: { parts: [{ type: "text", text: "hello from Bob" }] }, replyToId });
     const sent = await platform.sendMessage({}, { id: room.room_id }, { parts: [{ type: "text", text: "reply" }], replyToId: event.event_id });
@@ -57,6 +60,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       acknowledgeDeliveries: vi.fn(async () => undefined),
       sendText: vi.fn(async () => ({ event_id: "$text1234:example.com" as const, seq: 1 })),
       sendAttachments,
+      deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 3 })),
       downloadAttachment: vi.fn(async () => bytes.buffer),
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 4_000 });
@@ -88,6 +92,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       acknowledgeDeliveries,
       sendText: vi.fn(async () => ({ event_id: "$text1234:example.com" as const, seq: 2 })),
       sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
+      deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 4 })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     let reportPollError!: (error: unknown) => void;
@@ -106,6 +111,36 @@ describe("EdgeChatCrossgramPlatform", () => {
     expect(acknowledgeDeliveries).toHaveBeenCalledOnce();
 
     await unsubscribe();
+    platform.close();
+  });
+
+  it("maps immutable EdgeChat retractions to CrossGram delete operations and events", async () => {
+    const targetMessageId = "$target123:example.com" as const;
+    const deletionEvent = { event_id: "$delete12:example.com", room_id: room.room_id, sender: "@bob:example.com", device_id: "bob-phone",
+      seq: 2, type: "message.delete", created_at: 5_000, ciphertext: "ciphertext", metadata: { target_event_id: targetMessageId, mls_epoch: 1 }, signature: "signature" } as RoomEvent;
+    const deleteMessage = vi.fn(async () => ({ event_id: "$delete34:example.com" as const, seq: 3 }));
+    let pulled = false;
+    const client: EdgeChatGatewayClient = {
+      userId: "@alice:example.com",
+      rooms: vi.fn(async () => [room]),
+      pull: vi.fn(async () => pulled ? [] : (pulled = true, [{ event: deletionEvent, payload: {}, text: "", attachments: [],
+        mutation: { type: "message-delete" as const, targetMessageId, deletedAt: 5_000 } }])),
+      acknowledgeDeliveries: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => ({ event_id: "$text1234:example.com" as const, seq: 4 })),
+      sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 4, attachments: [] })),
+      deleteMessage,
+      downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
+    };
+    const platform = new EdgeChatCrossgramPlatform(client);
+    const incoming = await platform.pollOnce();
+    expect(incoming).toEqual([expect.objectContaining({ type: "message-delete", eventId: deletionEvent.event_id,
+      messageIds: [targetMessageId], timestamp: 5 })]);
+
+    await expect(platform.deleteMessages({}, { id: room.room_id }, [targetMessageId], { forEveryone: false }))
+      .rejects.toThrow("for every participant");
+    await platform.deleteMessages({}, { id: room.room_id }, [targetMessageId, targetMessageId], { forEveryone: true });
+    expect(deleteMessage).toHaveBeenCalledOnce();
+    expect(deleteMessage).toHaveBeenCalledWith(room.room_id, targetMessageId);
     platform.close();
   });
 });

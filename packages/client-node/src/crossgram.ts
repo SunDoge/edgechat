@@ -29,12 +29,15 @@ export type CrossgramMessage = {
   replyToId?: string;
   metadata: Record<string, string | number | boolean | null>;
 };
-export type CrossgramEvent = { type: "message"; message: CrossgramMessage; conversation: CrossgramConversation };
 export type CrossgramMediaSource = { size?: number; stream(options?: { signal?: AbortSignal }): AsyncIterable<Uint8Array> };
 export type CrossgramMessageInput = { parts: Array<
   | { type: "text"; text: string }
   | { type: "media"; media: { kind: "image" | "file"; name?: string; mimeType?: string; size?: number; width?: number; height?: number; duration?: number; voice?: boolean; source: CrossgramMediaSource } }
 >; replyToId?: string };
+
+export type CrossgramEvent =
+  | { type: "message"; message: CrossgramMessage; conversation: CrossgramConversation }
+  | { type: "message-delete"; eventId: string; conversation: CrossgramConversation; messageIds: string[]; timestamp: number };
 
 export interface EdgeChatGatewayClient {
   readonly userId: UserId;
@@ -43,6 +46,7 @@ export interface EdgeChatGatewayClient {
   acknowledgeDeliveries(eventIds: readonly string[]): Promise<void>;
   sendText(roomId: RoomId, text: string, options?: { replyToId?: MessageId }): Promise<{ event_id: MessageId; seq: number }>;
   sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text?: string, options?: { replyToId?: MessageId }): Promise<SendNodeMessageResult>;
+  deleteMessage(roomId: RoomId, targetMessageId: MessageId): Promise<{ event_id: MessageId; seq: number }>;
   downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
 }
 
@@ -63,6 +67,11 @@ export class EdgeChatCrossgramPlatform {
     history: true,
     send: { text: true, images: true, files: true, mixed: true, maxTextLength: 16_000, maxMedia: 10 },
     conversations: { groups: true, channels: false, subchannels: false },
+    messageActions: {
+      delete: { own: { supported: true }, others: { supported: false } },
+      edit: { mode: "unsupported" },
+      forward: { mode: "unsupported", preservesAuthor: false },
+    },
   } as const;
 
   private readonly pollIntervalMs: number;
@@ -109,6 +118,16 @@ export class EdgeChatCrossgramPlatform {
       await this.refreshRooms();
       const incoming = await this.client.pull();
       for (const item of incoming) {
+        if (item.mutation?.type === "message-delete") {
+          const conversation = this.conversation(this.roomsById.get(item.event.room_id));
+          const event: CrossgramEvent = { type: "message-delete", eventId: item.event.event_id, conversation,
+            messageIds: [item.mutation.targetMessageId], timestamp: Math.floor(item.mutation.deletedAt / 1_000) };
+          events.push(event);
+          for (const subscriber of this.subscribers) await subscriber(event);
+          if (this.subscribers.size) await this.client.acknowledgeDeliveries([item.event.event_id]);
+          this.forget(item.event.room_id, item.mutation.targetMessageId);
+          continue;
+        }
         const message = this.messageFromEvent(item.event, item.text, item.attachments, item.replyToId);
         if (!message.content.parts.length) {
           await this.client.acknowledgeDeliveries([item.event.event_id]);
@@ -200,6 +219,19 @@ export class EdgeChatCrossgramPlatform {
     return message;
   }
 
+  async deleteMessages(_session: unknown, conversation: { id: string }, messageIds: readonly string[], options: { forEveryone: boolean }): Promise<void> {
+    if (!options.forEveryone) throw new Error("EdgeChat only supports retracting a message for every participant");
+    await this.refreshRooms();
+    const room = this.roomsById.get(conversation.id);
+    if (!room) throw new Error(`Unknown EdgeChat room: ${conversation.id}`);
+    const targets = [...new Set(messageIds)];
+    if (!targets.length || targets.some((id) => !isNamespacedMessageId(id))) throw new Error("EdgeChat message deletion targets are invalid");
+    for (const target of targets) {
+      await this.client.deleteMessage(room.room_id, target as MessageId);
+      this.forget(room.room_id, target);
+    }
+  }
+
   async *downloadMedia(_session: unknown, media: CrossgramMedia, options: { offset?: number; limit?: number; signal?: AbortSignal } = {}): AsyncIterable<Uint8Array> {
     const attachment = media.locator?.edgechatAttachment;
     if (!attachment || attachment.id !== media.id) throw new Error("EdgeChat media locator is invalid");
@@ -258,6 +290,12 @@ export class EdgeChatCrossgramPlatform {
       messages.push(message); messages.sort((left, right) => left.nativeOrderKey.localeCompare(right.nativeOrderKey));
       this.messages.set(message.conversationId, messages);
     }
+  }
+
+  private forget(conversationId: string, messageId: string): void {
+    const messages = this.messages.get(conversationId);
+    if (!messages) return;
+    this.messages.set(conversationId, messages.filter((message) => message.id !== messageId));
   }
 
   close(): void {

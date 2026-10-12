@@ -213,6 +213,25 @@ describe("NodeEdgeChatClient", () => {
     alice.close(); bob.close();
   });
 
+  it("delivers a message retraction as an authenticated immutable event", async () => {
+    const server = testServer();
+    const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
+    const bob = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Bob", fetch: server.fetcher });
+    const roomId = await alice.createRoom([bob.userId]);
+    const original = await alice.sendText(roomId, "retract me");
+    await bob.pull();
+    await bob.acknowledgeDeliveries([original.event_id]);
+
+    const deletion = await alice.deleteMessage(roomId, original.event_id);
+    const [received] = await bob.pull();
+    expect(received).toMatchObject({
+      event: { event_id: deletion.event_id, room_id: roomId, seq: 2, type: "message.delete", metadata: { target_event_id: original.event_id } },
+      mutation: { type: "message-delete", targetMessageId: original.event_id },
+      payload: { version: 1, kind: "message.delete", target: { message_id: original.event_id, room_id: roomId } },
+    });
+    alice.close(); bob.close();
+  });
+
   it("encrypts attachments before upload and authenticates them after durable recovery", async () => {
     const server = testServer();
     const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
