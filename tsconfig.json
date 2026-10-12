@@ -6,6 +6,7 @@
     { "path": "packages/sync" },
     { "path": "packages/ui" },
     { "path": "packages/bot-sdk" },
+    { "path": "packages/client-node" },
     { "path": "apps/web" },
     { "path": "apps/worker" }
   ]

@@ -53,5 +53,6 @@ export class NodeOpenMlsMessagingCore {
     return JSON.parse(decoder.decode(this.client.remove_members(encoder.encode(roomId), encoder.encode(JSON.stringify(deviceIds.map((id) => toBase64Url(encoder.encode(id)))))))) as MlsCommitResult;
   }
   epoch(roomId: string): number { return Number(this.client.epoch(encoder.encode(roomId))); }
+  hasGroup(roomId: string): boolean { try { this.epoch(roomId); return true; } catch { return false; } }
   destroy(): void { this.client.free(); }
 }

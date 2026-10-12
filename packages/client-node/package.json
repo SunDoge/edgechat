@@ -1,0 +1,27 @@
+{
+  "name": "@edgechat/client-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./crossgram": "./src/crossgram.ts",
+    "./file-store": "./src/file-store.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --exclude test/live.test.ts",
+    "test:live": "vitest run test/live.test.ts",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@edgechat/messaging-core": "workspace:*",
+    "@edgechat/protocol": "workspace:*",
+    "@edgechat/sync": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest",
+    "vitest": "^4.1.11"
+  }
+}

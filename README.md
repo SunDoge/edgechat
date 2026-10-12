@@ -1,5 +1,8 @@
 # EdgeChat
 
+For browser-free Worker/RoomDO/MLS testing and the trusted CrossGram gateway
+boundary, see [docs/CROSSGRAM_GATEWAY.md](docs/CROSSGRAM_GATEWAY.md).
+
 EdgeChat is a web-first, self-hostable encrypted messenger for Cloudflare Workers. Phase 1 is deliberately single-server: IDs are globally namespaceable, but every remote-domain operation is rejected. The room home server assigns one monotonically increasing sequence number, so the core never inherits Matrix DAGs, multi-writer state resolution, or federation complexity.
 
 The PWA is the install-free baseline client and commits to text, image, recorded-voice, and file messaging plus the E2EE, local history, offline outbox, and durable foreground sync they require. Browser-controlled background delivery and OS integration are best effort and are labelled in the account UI with a recovery path; a later native app will own the complete platform experience without forking the protocol. See [`docs/CLIENT_STRATEGY.md`](docs/CLIENT_STRATEGY.md).
