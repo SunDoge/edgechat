@@ -1733,8 +1733,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
         else if (preparedOutgoing.outcome === "unsupported") unsupportedImages += 1;
         const preparedImage = await prepareImageMetadata(uploadFile, previewBudget);
         if (preparedImage.preview) previewBudget -= embeddedImagePreviewByteLength(preparedImage.preview);
-        const encryptedFile = await core.encryptAttachment(await uploadFile.arrayBuffer());
         const attachmentId = attachmentIds[index]!;
+        const encryptedFile = await core.encryptAttachment(await uploadFile.arrayBuffer(), attachmentId);
         const upload = await api.uploadAttachment(room.room_id, encryptedFile.ciphertext, attachmentId);
         if (await attachmentCache.put(upload.attachment_id, encryptedFile.ciphertext)) {
           await attachmentLoader.acknowledgeCached(upload.attachment_id, encryptedFile.ciphertext);
@@ -2154,8 +2154,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
       else if (change.kind === "replace") {
         const plaintext = await change.blob.arrayBuffer();
         const preview = (await prepareImageMetadata(change.blob)).preview ?? undefined;
-        const encrypted = await core.encryptAttachment(plaintext);
         uploadedId = createAttachmentId();
+        const encrypted = await core.encryptAttachment(plaintext, uploadedId);
         const uploaded = await api.uploadAttachment(roomId, encrypted.ciphertext, uploadedId);
         if (await attachmentCache.put(uploaded.attachment_id, encrypted.ciphertext)) {
           await attachmentLoader.acknowledgeCached(uploaded.attachment_id, encrypted.ciphertext).catch(() => undefined);
@@ -2172,8 +2172,8 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
 
   async function decryptRoomProfileAvatar(avatar: RoomProfileAvatar): Promise<ArrayBuffer> {
     const ciphertext = await attachmentLoader.load(avatar.attachment_id);
-    if (ciphertext.byteLength > 128 * 1024 + 16) throw new DiagnosticError("ROOM_AVATAR_CIPHERTEXT_LIMIT_EXCEEDED");
-    const plaintext = await core.decryptAttachment(ciphertext, avatar.key, avatar.nonce);
+    if (ciphertext.byteLength > 192 * 1024) throw new DiagnosticError("ROOM_AVATAR_CIPHERTEXT_LIMIT_EXCEEDED");
+    const plaintext = await core.decryptAttachment(ciphertext, avatar.key, avatar.nonce, avatar.attachment_id);
     if (plaintext.byteLength !== avatar.plaintext_bytes || plaintext.byteLength > 128 * 1024) throw new DiagnosticError("ROOM_AVATAR_PLAINTEXT_SIZE_MISMATCH");
     return plaintext;
   }
@@ -3687,13 +3687,13 @@ export function App(props: { localProfile: LocalProfile; localProfiles: LocalPro
   }
   async function decryptAttachment(attachment: AttachmentMetadata) {
     const ciphertext = await loadAttachmentCiphertext(attachment.id);
-    try { return await core.decryptAttachment(ciphertext, attachment.key, attachment.nonce); }
+    try { return await core.decryptAttachment(ciphertext, attachment.key, attachment.nonce, attachment.id); }
     catch (cause) { await attachmentCache.remove(attachment.id).catch(() => undefined); throw cause; }
   }
   async function decryptCachedAttachment(attachment: AttachmentMetadata): Promise<ArrayBuffer | null> {
     const ciphertext = await attachmentCache.get(attachment.id);
     if (!ciphertext) return null;
-    try { return await core.decryptAttachment(ciphertext, attachment.key, attachment.nonce); }
+    try { return await core.decryptAttachment(ciphertext, attachment.key, attachment.nonce, attachment.id); }
     catch { await attachmentCache.remove(attachment.id).catch(() => undefined); return null; }
   }
   function profileChangeBlocked(): boolean {

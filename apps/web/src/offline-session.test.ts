@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { currentServerProtocol } from "@edgechat/protocol";
 import { cachedSessionForDevice, canUseOfflineSession, offlineSessionSnapshot, validCachedRooms } from "./offline-session";
 
-const session = { user_id: "@alice:example.com", device_id: "phone", display_name: "Alice", server_name: "example.com", archive_compaction_enabled: false };
+const session = { user_id: "@alice:example.com", device_id: "phone", display_name: "Alice", server_name: "example.com", archive_compaction_enabled: false, protocol: currentServerProtocol };
 const room = { room_id: "!room-000000000001:example.com", name: null, kind: "direct", purpose: "chat", current_seq: 3, joined_seq: 0, created_at: 1, home_server: "example.com", encrypted_state: null, epoch: 1, muted_until: null, blocked_by_me: false, hidden_member_ids: [], members: [{ user_id: "@alice:example.com", display_name: "Alice", avatar_url: null, role: "owner" }] };
 
 describe("offline session cache validation", () => {

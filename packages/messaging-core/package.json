@@ -10,5 +10,6 @@
     "typecheck": "tsc --noEmit",
     "test": "cargo test && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/edgechat_messaging_core.wasm --target nodejs --out-dir pkg-node --out-name edgechat_mls && node scripts/mls-smoke.mjs && vitest run"
   },
+  "dependencies": { "valibot": "^1.5.0" },
   "devDependencies": { "typescript": "latest", "vitest": "^4.1.11" }
 }

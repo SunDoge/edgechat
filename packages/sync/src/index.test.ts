@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LocalDatabase } from "@edgechat/db";
-import { decodeTransportRecord, encodeTransportRecord, type RoomEvent } from "@edgechat/protocol";
+import { currentServerProtocol, decodeTransportRecord, encodeTransportRecord, type RoomEvent } from "@edgechat/protocol";
 import { API_CONTROL_TIMEOUT_MS, API_TRANSFER_TIMEOUT_MS, HTTPS_FALLBACK_ERROR_MAX_MS, HTTPS_FALLBACK_POLL_MAX_MS, HTTPS_FALLBACK_POLL_MIN_MS, IDEMPOTENT_READ_RETRY_DELAY_MS, OPAQUE_REGISTRATION_RETRY_DELAY_MS, ApiClient, ApiError, ApiTimeoutError, ArchiveSegmentReader, AutomaticArchiveRepair, AutomaticAttachmentRepair, AutomaticHistoryRepair, deviceHistoryTransferAvailable, HistoryRepairEngine, httpsFallbackPollDelay, InvalidRoomEventEnvelopeError, LocalProjectionPersistenceError, LocalStagingIntegrityError, OrderedArchiveCatchUp, ProgressiveHistoryIndexer, reconnectDelay, RoomSequenceGapError, SyncEngine, type ArchiveMetadataCache, type DeviceHistoryTransfer, type NetworkRoute } from "./index";
 import { buildSegment } from "./archive";
 
@@ -1244,7 +1244,7 @@ describe("ApiClient protocol negotiation", () => {
   it("routes HTTPS and realtime through one injectable outer transport", async () => {
     const socket = { readyState: 0, onopen: null, onmessage: null, onclose: null, send: vi.fn(), close: vi.fn() };
     const route = {
-      fetch: vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ user_id: "@alice:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false })),
+      fetch: vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ user_id: "@alice:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false, protocol: currentServerProtocol })),
       openRealtime: vi.fn(() => socket),
     } satisfies NetworkRoute;
     const api = new ApiClient("https://edgechat.test", "token", route);
@@ -1261,23 +1261,22 @@ describe("ApiClient protocol negotiation", () => {
   it("announces its version and normalizes a current server session", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => Response.json({
       user_id: "@alice:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false,
-      protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1"], limits: { max_attachments_per_message: 10, max_attachment_plaintext_bytes: 25 * 1024 * 1024, max_message_attachment_plaintext_bytes: 100 * 1024 * 1024 } },
-    }, { headers: { "x-edgechat-server-protocol": "1", "x-edgechat-min-client-protocol": "1" } }));
+      protocol: { version: 2, minimum_client_version: 2, features: ["attachments.multi.v1", "attachments.chunked-aead.v2"], limits: { max_attachments_per_message: 10, max_attachment_plaintext_bytes: 25 * 1024 * 1024, max_message_attachment_plaintext_bytes: 100 * 1024 * 1024 } },
+    }, { headers: { "x-edgechat-server-protocol": "2", "x-edgechat-min-client-protocol": "2" } }));
     vi.stubGlobal("fetch", fetchMock);
     try {
       const session = await new ApiClient("https://edgechat.test", "token").me();
       const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
-      expect(headers.get("x-edgechat-client-protocol")).toBe("1");
-      expect(headers.get("x-edgechat-min-server-protocol")).toBe("1");
+      expect(headers.get("x-edgechat-client-protocol")).toBe("2");
+      expect(headers.get("x-edgechat-min-server-protocol")).toBe("2");
       expect(session.protocol?.limits.max_attachments_per_message).toBe(10);
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it("downgrades a pre-negotiation server session to legacy single-attachment behavior", async () => {
+  it("rejects a pre-negotiation server now that attachment v2 is mandatory", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ user_id: "@alice:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false })));
     try {
-      const session = await new ApiClient("https://legacy.test").me();
-      expect(session.protocol).toMatchObject({ version: 1, features: [], limits: { max_attachments_per_message: 1 } });
+      await expect(new ApiClient("https://legacy.test").me()).rejects.toThrow("版本过旧");
     } finally { vi.unstubAllGlobals(); }
   });
 });
@@ -1285,7 +1284,7 @@ describe("ApiClient protocol negotiation", () => {
 describe("ApiClient opaque registration replay", () => {
   const session = {
     user_id: "@opaque:example.com", device_id: "device", display_name: "Alice", archive_compaction_enabled: false,
-    access_token: "token", account_credential: "a".repeat(43), account_mode: "opaque" as const,
+    access_token: "token", account_credential: "a".repeat(43), account_mode: "opaque" as const, protocol: currentServerProtocol,
   };
 
   it("retries one transient gateway failure with the byte-identical payload", async () => {
@@ -1584,6 +1583,34 @@ describe("ApiClient archive ranges", () => {
       const api = new ApiClient("https://edgechat.test");
       await expect(api.segmentRange("!range-00000000001:example.com", "segment-id", 1, 2)).rejects.toThrow("invalid byte range");
       await expect(api.segmentRange("!range-00000000001:example.com", "segment-id", 1, 2)).rejects.toThrow("truncated");
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+describe("ApiClient attachment ranges", () => {
+  it("requires an exact immutable partial-content response", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([8, 9, 10]), { status: 206,
+      headers: { "content-range": "bytes 4-6/20", "content-length": "3" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(new ApiClient("https://edgechat.test").attachmentRange("A".repeat(32), 4, 3))
+        .resolves.toEqual(new Uint8Array([8, 9, 10]));
+      expect(new Headers(fetchMock.mock.calls[0]![1]?.headers).get("range")).toBe("bytes=4-6");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("rejects ignored, substituted, and truncated attachment ranges", async () => {
+    const responses = [
+      new Response(new Uint8Array([1, 2, 3]), { status: 200 }),
+      new Response(new Uint8Array([1, 2, 3]), { status: 206, headers: { "content-range": "bytes 5-7/20" } }),
+      new Response(new Uint8Array([1, 2]), { status: 206, headers: { "content-range": "bytes 4-6/20" } }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    try {
+      const api = new ApiClient("https://edgechat.test");
+      await expect(api.attachmentRange("A".repeat(32), 4, 3)).rejects.toThrow("invalid byte range");
+      await expect(api.attachmentRange("A".repeat(32), 4, 3)).rejects.toThrow("invalid byte range");
+      await expect(api.attachmentRange("A".repeat(32), 4, 3)).rejects.toThrow("truncated");
     } finally { vi.unstubAllGlobals(); }
   });
 });

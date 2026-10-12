@@ -1,12 +1,14 @@
 export const API_VERSION = "v1" as const;
-export const PROTOCOL_VERSION = 1 as const;
-export const MIN_SUPPORTED_PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
+export const MIN_SUPPORTED_PROTOCOL_VERSION = 2 as const;
 export const MAX_ATTACHMENT_PLAINTEXT_BYTES = 25 * 1024 * 1024;
+/** Allows an authenticated manifest, per-chunk tags, and future container metadata without changing the plaintext quota. */
+export const MAX_ATTACHMENT_CIPHERTEXT_BYTES = MAX_ATTACHMENT_PLAINTEXT_BYTES + 1024 * 1024;
 export const MAX_MESSAGE_ATTACHMENTS = 10;
 export const MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES = 100 * 1024 * 1024;
 export const MAX_EVENT_CIPHERTEXT_LENGTH = 200_000;
 
-export const serverProtocolFeatures = ["attachments.multi.v1", "attachments.idempotent-upload.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"] as const;
+export const serverProtocolFeatures = ["attachments.multi.v1", "attachments.idempotent-upload.v1", "attachments.chunked-aead.v2", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"] as const;
 export type ServerProtocolFeature = typeof serverProtocolFeatures[number];
 export type ServerProtocolCapabilities = {
   version: number;

@@ -55,16 +55,20 @@ it("classifies only structural D1 schema failures as an upgrade requirement", ()
 it("advertises protocol capabilities and rejects impossible version ranges before storage work", async () => {
   const legacy = await SELF.fetch("https://edgechat.test/api/v1/health");
   expect(legacy.status).toBe(200);
-  expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("1");
-  expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("1");
+  expect(legacy.headers.get("x-edgechat-server-protocol")).toBe("2");
+  expect(legacy.headers.get("x-edgechat-min-client-protocol")).toBe("2");
   expect(legacy.headers.get("x-edgechat-request-id")).toMatch(/^[A-Za-z0-9_-]{16}$/);
-  expect(await legacy.json()).toMatchObject({ protocol: { version: 1, minimum_client_version: 1, features: ["attachments.multi.v1", "attachments.idempotent-upload.v1", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"], limits: { max_attachments_per_message: 10 } } });
+  expect(await legacy.json()).toMatchObject({ protocol: { version: 2, minimum_client_version: 2, features: ["attachments.multi.v1", "attachments.idempotent-upload.v1", "attachments.chunked-aead.v2", "history.repair.v1", "attachments.repair.v1", "archive.repair.v1", "room.peer-recovery.v1", "drafts.e2ee.v1", "message-requests.v1", "groups.hidden-members.v1", "messages.expiry.v1", "messages.contact.v1", "rooms.profile.v1", "rooms.leave.v1", "rooms.owner-transfer.v1", "account.password-change.v1", "device-session.v1", "passkeys.v1", "accounts.opaque.v1"], limits: { max_attachments_per_message: 10 } } });
 
-  const tooNew = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "2", "x-edgechat-min-server-protocol": "2" } });
+  const tooNew = await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { "x-edgechat-client-protocol": "3", "x-edgechat-min-server-protocol": "3" } });
   expect(tooNew.status).toBe(426);
   expect(await tooNew.json()).toMatchObject({ code: "server_upgrade_required" });
 
-  const malformed = await SELF.fetch("https://edgechat.test/api/v1/health", { headers: { "x-edgechat-client-protocol": "latest" } });
+  const tooOld = await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { "x-edgechat-client-protocol": "1", "x-edgechat-min-server-protocol": "1" } });
+  expect(tooOld.status).toBe(426);
+  expect(await tooOld.json()).toMatchObject({ code: "client_upgrade_required" });
+
+  const malformed = await SELF.fetch("https://edgechat.test/api/v1/me", { headers: { "x-edgechat-client-protocol": "latest" } });
   expect(malformed.status).toBe(400);
   const malformedBody = await malformed.json() as { code: string; request_id: string };
   expect(malformedBody).toMatchObject({ code: "invalid_protocol_version" });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { currentServerProtocol } from "@edgechat/protocol";
 import { NodeEdgeChatClient, NodeClientError, type NodeClientState } from "../src/index.js";
 
 type Account = {
@@ -54,7 +55,7 @@ function testServer() {
       return Response.json({ access_token: created.token, user_id: userId, device_id: created.deviceId,
         device_credential: device.device_credential, account_credential: body.account_credential,
         account_mode: "opaque", display_name: created.displayName, server_name: "example.com",
-        archive_compaction_enabled: false }, { status: 201 });
+        archive_compaction_enabled: false, protocol: currentServerProtocol }, { status: 201 });
     }
     if (path === "/api/v1/mls/key-packages/claim") {
       const requester = account(init);
@@ -104,7 +105,13 @@ function testServer() {
     if (attachmentMatch) {
       account(init);
       const bytes = attachments.get(attachmentMatch[1]);
-      return bytes ? new Response(bytes) : Response.json({ error: "missing", code: "not_found" }, { status: 404 });
+      if (!bytes) return Response.json({ error: "missing", code: "not_found" }, { status: 404 });
+      const range = new Headers(init?.headers).get("range")?.match(/^bytes=(\d+)-(\d+)$/);
+      if (!range) return new Response(bytes);
+      const start = Number(range[1]); const end = Number(range[2]);
+      return new Response(bytes.slice(start, end + 1), { status: 206, headers: {
+        "content-range": `bytes ${start}-${end}/${bytes.byteLength}`, "content-length": String(end - start + 1),
+      } });
     }
     const eventMatch = path.match(/^\/api\/v1\/rooms\/(![^/]+)\/events$/);
     if (eventMatch && init?.method === "POST") {
@@ -307,7 +314,7 @@ describe("NodeEdgeChatClient", () => {
     const sent = await alice.sendAttachments(roomId, [{ name: "voice.webm", type: "audio/webm", bytes: cleartext, duration_ms: 1_250 }], "listen", { replyToId });
     expect(sent.seq).toBe(1);
     const stored = server.attachment(sent.attachments[0]!.id)!;
-    expect(stored.byteLength).toBe(cleartext.byteLength + 16);
+    expect(stored.byteLength).toBeGreaterThan(cleartext.byteLength + 16);
     expect(new TextDecoder().decode(stored)).not.toContain("not visible");
 
     const [message] = await bob.pull();

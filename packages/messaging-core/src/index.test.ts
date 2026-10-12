@@ -1,13 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { decodeBase64Url, deviceFingerprint, deviceLinkClaimBytes, openAccountCredential, openArchiveSegmentKey, sealAccountCredential, sealArchiveSegmentKey, WebCryptoMessagingCore } from "./index";
+import { ATTACHMENT_PREFIX_BYTES, decodeBase64Url, deviceFingerprint, deviceLinkClaimBytes, openAccountCredential, openArchiveSegmentKey, parseEncryptedAttachmentManifest, readEncryptedAttachmentManifest, sealAccountCredential, sealArchiveSegmentKey, WebCryptoMessagingCore } from "./index";
 
 describe("device support crypto", () => {
   it("encrypts attachments and rejects a changed authentication tag", async () => {
     const core = new WebCryptoMessagingCore();
-    const encrypted = await core.encryptAttachment(new TextEncoder().encode("attachment").buffer);
-    expect(new TextDecoder().decode(await core.decryptAttachment(encrypted.ciphertext, encrypted.key, encrypted.nonce))).toBe("attachment");
+    const attachmentId = "A".repeat(32);
+    const encrypted = await core.encryptAttachment(new TextEncoder().encode("attachment").buffer, attachmentId);
+    expect(new TextDecoder().decode(await core.decryptAttachment(encrypted.ciphertext, encrypted.key, encrypted.nonce, attachmentId))).toBe("attachment");
+    expect(new TextDecoder().decode(await core.decryptAttachment(encrypted.ciphertext, encrypted.key, encrypted.nonce, "G".repeat(32))))
+      .toBe("attachment"); // zero-copy forwarding may replace the server-side ACL locator
     const tampered = encrypted.ciphertext.slice(0); new Uint8Array(tampered)[0] ^= 1;
-    await expect(core.decryptAttachment(tampered, encrypted.key, encrypted.nonce)).rejects.toThrow();
+    await expect(core.decryptAttachment(tampered, encrypted.key, encrypted.nonce, attachmentId)).rejects.toThrow();
+  });
+
+  it("range-decrypts only the independently authenticated chunks covering the requested plaintext", async () => {
+    const core = new WebCryptoMessagingCore(); const attachmentId = "R".repeat(32);
+    const plaintext = Uint8Array.from({ length: 1024 * 1024 + 777 }, (_, index) => index % 251);
+    const encrypted = await core.encryptAttachment(plaintext.buffer, attachmentId);
+    expect(encrypted.chunkCount).toBeGreaterThan(1);
+    const ciphertext = new Uint8Array(encrypted.ciphertext); const reads: Array<[number, number]> = [];
+    const source = async (offset: number, length: number) => { reads.push([offset, length]); return ciphertext.slice(offset, offset + length); };
+    const offset = encrypted.chunkSize - 19; const length = 91;
+    const opened = await core.decryptAttachmentRange(source, encrypted.key, encrypted.nonce, attachmentId, offset, length);
+    expect(new Uint8Array(opened)).toEqual(plaintext.slice(offset, offset + length));
+    expect(reads[0]).toEqual([0, ATTACHMENT_PREFIX_BYTES]);
+    expect(reads).toHaveLength(3); // prefix, encrypted manifest, then the two contiguous data chunks
+    expect(reads[2]![1]).toBeLessThan(encrypted.ciphertext.byteLength);
+  });
+
+  it("authenticates the strict encrypted manifest and every chunk independently", async () => {
+    const core = new WebCryptoMessagingCore(); const attachmentId = "T".repeat(32);
+    const plaintext = new Uint8Array(1024 * 1024 + 1).fill(7);
+    const encrypted = await core.encryptAttachment(plaintext.buffer, attachmentId);
+    const original = new Uint8Array(encrypted.ciphertext);
+    const source = async (offset: number, length: number) => original.slice(offset, offset + length);
+    const { dataOffset, manifest } = await readEncryptedAttachmentManifest(source, encrypted.key, encrypted.nonce, attachmentId);
+    expect(parseEncryptedAttachmentManifest(manifest)).toEqual(manifest);
+    expect(() => parseEncryptedAttachmentManifest({ ...manifest, unexpected: true })).toThrow("manifest JSON");
+    const tampered = original.slice(); tampered[dataOffset + manifest.chunks[1]!.offset] ^= 1;
+    await expect(core.decryptAttachmentRange(async (offset, length) => tampered.slice(offset, offset + length), encrypted.key,
+      encrypted.nonce, attachmentId, manifest.chunk_size, 1)).rejects.toThrow("chunk authentication failed");
+    const badManifest = original.slice(); badManifest[ATTACHMENT_PREFIX_BYTES] ^= 1;
+    await expect(readEncryptedAttachmentManifest(async (offset, length) => badManifest.slice(offset, offset + length),
+      encrypted.key, encrypted.nonce, attachmentId)).rejects.toThrow("manifest authentication failed");
   });
 
   it("round-trips a portable device identity without changing its public keys", async () => {

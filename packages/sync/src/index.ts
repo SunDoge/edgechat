@@ -439,6 +439,21 @@ export class ApiClient {
   async downloadAttachment(id: string): Promise<ArrayBuffer> {
     return this.withResponse(`/api/v1/attachments/${encodeURIComponent(id)}`, {}, API_TRANSFER_TIMEOUT_MS, (response) => response.arrayBuffer());
   }
+  async attachmentRange(id: string, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>> {
+    const maximumRangeBytes = 16 * 1024 * 1024;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length)
+      || length < 1 || length > maximumRangeBytes || !Number.isSafeInteger(offset + length - 1)) throw new Error("Invalid attachment byte range");
+    const end = offset + length - 1;
+    return this.withResponse(`/api/v1/attachments/${encodeURIComponent(id)}`, { headers: { range: `bytes=${offset}-${end}` } },
+      API_TRANSFER_TIMEOUT_MS, async (response) => {
+        const contentRange = response.headers.get("content-range")?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+        if (response.status !== 206 || !contentRange || Number(contentRange[1]) !== offset || Number(contentRange[2]) !== end
+          || !Number.isSafeInteger(Number(contentRange[3])) || Number(contentRange[3]) <= end) throw new Error("Attachment server returned an invalid byte range");
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.byteLength !== length) throw new Error("Attachment range body is truncated");
+        return bytes;
+      });
+  }
   async acknowledgeAttachmentRetention(id: string): Promise<{ attachment_id: string }> {
     return this.request(`/api/v1/attachments/${encodeURIComponent(id)}/retention-ack`, { method: "POST" });
   }

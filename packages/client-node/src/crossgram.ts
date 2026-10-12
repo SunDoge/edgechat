@@ -58,6 +58,7 @@ export interface EdgeChatGatewayClient {
   reactionContext(roomId: RoomId, targetMessageId: MessageId): NodeReactionContext;
   markRead(roomId: RoomId, upToMessageId: MessageId): Promise<{ event_id: MessageId; seq: number }>;
   downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
+  downloadAttachmentRange?(attachment: NodeAttachment, offset: number, length: number): Promise<ArrayBuffer>;
 }
 
 export type CrossgramAdapterOptions = {
@@ -323,12 +324,19 @@ export class EdgeChatCrossgramPlatform {
     const attachment = media.locator?.edgechatAttachment;
     if (!attachment || attachment.id !== media.id) throw new Error("EdgeChat media locator is invalid");
     if (options.signal?.aborted) throw options.signal.reason ?? new Error("Download aborted");
-    const plaintext = new Uint8Array(await this.client.downloadAttachment(attachment));
-    const offset = Math.min(plaintext.length, Math.max(0, options.offset ?? 0));
-    const end = Math.min(plaintext.length, offset + Math.max(0, options.limit ?? plaintext.length));
-    for (let position = offset; position < end; position += 64 * 1024) {
+    const offset = Math.min(attachment.size, Math.max(0, options.offset ?? 0));
+    const length = Math.min(attachment.size - offset, Math.max(0, options.limit ?? attachment.size));
+    if (!length) return;
+    const fullRequest = offset === 0 && length === attachment.size;
+    const usesRange = !fullRequest && Boolean(this.client.downloadAttachmentRange);
+    const plaintext = new Uint8Array(usesRange
+      ? await this.client.downloadAttachmentRange!(attachment, offset, length)
+      : await this.client.downloadAttachment(attachment));
+    const localOffset = fullRequest || usesRange ? 0 : offset;
+    const localEnd = localOffset + length;
+    for (let position = localOffset; position < localEnd; position += 64 * 1024) {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error("Download aborted");
-      yield plaintext.slice(position, Math.min(end, position + 64 * 1024));
+      yield plaintext.slice(position, Math.min(localEnd, position + 64 * 1024));
     }
   }
 

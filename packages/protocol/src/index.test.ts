@@ -42,14 +42,16 @@ describe("federation-ready identifiers", () => {
     expect(isDeliveryReceiptPayload({ version: 1, kind: "receipt.delivered", room_id: "!0123456789abcdef:example.com", up_to_seq: 0, delivered_at: 3 })).toBe(false);
   });
 
-  it("treats a server without capability metadata as legacy single-attachment v1", () => {
-    const legacy = assertCompatibleServerProtocol(undefined);
+  it("recognizes legacy capability metadata but requires the chunked-attachment protocol", () => {
+    const legacy = normalizeServerProtocol(undefined);
     expect(legacy).toMatchObject({ version: 1, minimum_client_version: 1, features: [], limits: { max_attachments_per_message: 1 } });
+    expect(() => assertCompatibleServerProtocol(undefined)).toThrow("版本过旧");
     expect(serverSupports(legacy, "attachments.multi.v1")).toBe(false);
     expect(serverSupports(currentServerProtocol, "attachments.multi.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "history.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "attachments.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "attachments.idempotent-upload.v1")).toBe(true);
+    expect(serverSupports(currentServerProtocol, "attachments.chunked-aead.v2")).toBe(true);
     expect(serverSupports(currentServerProtocol, "archive.repair.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "messages.contact.v1")).toBe(true);
     expect(serverSupports(currentServerProtocol, "rooms.profile.v1")).toBe(true);
@@ -63,7 +65,7 @@ describe("federation-ready identifiers", () => {
 
   it("rejects malformed or incompatible server capability envelopes", () => {
     expect(() => normalizeServerProtocol({ ...currentServerProtocol, limits: { ...currentServerProtocol.limits, max_attachments_per_message: 1000 } })).toThrow("Invalid server protocol");
-    expect(() => assertCompatibleServerProtocol({ ...currentServerProtocol, version: 2, minimum_client_version: 2 })).toThrow("更新版本");
+    expect(() => assertCompatibleServerProtocol({ ...currentServerProtocol, version: 3, minimum_client_version: 3 })).toThrow("更新版本");
     expect(() => normalizeServerProtocol({ ...currentServerProtocol, features: ["attachments.multi.v1", "attachments.multi.v1"] })).toThrow("Invalid server protocol");
   });
 

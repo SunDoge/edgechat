@@ -298,7 +298,7 @@ export class NodeEdgeChatClient {
       try {
         for (const input of normalized) {
           const id = createAttachmentId();
-          const encrypted = await this.attachmentCrypto.encryptAttachment(input.bytes);
+          const encrypted = await this.attachmentCrypto.encryptAttachment(input.bytes, id);
           await this.api.uploadAttachment(roomId, encrypted.ciphertext, id);
           uploaded.push({ id, name: input.name, type: input.type, size: input.bytes.byteLength,
             key: encrypted.key, nonce: encrypted.nonce, ...(input.width ? { width: input.width, height: input.height } : {}),
@@ -399,9 +399,26 @@ export class NodeEdgeChatClient {
     if (!normalized) throw new NodeClientError("Attachment metadata is invalid", "invalid_attachment_metadata");
     try {
       const ciphertext = await this.api.downloadAttachment(normalized.id);
-      const plaintext = await this.attachmentCrypto.decryptAttachment(ciphertext, normalized.key, normalized.nonce);
+      const plaintext = await this.attachmentCrypto.decryptAttachment(ciphertext, normalized.key, normalized.nonce, normalized.id);
       if (plaintext.byteLength !== normalized.size) throw new NodeClientError("Attachment size does not match its authenticated metadata", "attachment_size_mismatch");
       return plaintext;
+    } catch (error) {
+      if (error instanceof NodeClientError) throw error;
+      throw new NodeClientError("Attachment authentication failed", "attachment_authentication_failed");
+    }
+  }
+
+  async downloadAttachmentRange(attachment: NodeAttachment, offset: number, length: number): Promise<ArrayBuffer> {
+    const normalized = normalizeAttachment(attachment);
+    if (!normalized) throw new NodeClientError("Attachment metadata is invalid", "invalid_attachment_metadata");
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || offset + length > normalized.size) {
+      throw new NodeClientError("Attachment plaintext range is invalid", "invalid_attachment_range");
+    }
+    try {
+      return await this.attachmentCrypto.decryptAttachmentRange(
+        (ciphertextOffset, ciphertextLength) => this.api.attachmentRange(normalized.id, ciphertextOffset, ciphertextLength),
+        normalized.key, normalized.nonce, normalized.id, offset, length,
+      );
     } catch (error) {
       if (error instanceof NodeClientError) throw error;
       throw new NodeClientError("Attachment authentication failed", "attachment_authentication_failed");

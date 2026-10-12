@@ -1,4 +1,4 @@
-import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, normalizeLocalUserId, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DeviceSessionChallenge, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
+import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_CIPHERTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, normalizeLocalUserId, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DeviceSessionChallenge, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
 import { sql } from "kysely";
 import { authenticate, cleanupExpiredAuthenticationState, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
@@ -15,7 +15,7 @@ import { authenticatePasskey, cleanupExpiredPasskeyChallenges, deletePasskey, li
 export { RoomDurableObject } from "./room-do";
 
 // The browser limit is 25 MiB of plaintext; AES-GCM appends a 16-byte tag.
-const MAX_ATTACHMENT = MAX_ATTACHMENT_PLAINTEXT_BYTES + 16;
+const MAX_ATTACHMENT = MAX_ATTACHMENT_CIPHERTEXT_BYTES;
 const MAX_SEGMENT = 12 * 1024 * 1024;
 const ARCHIVE_V3_HEADER_BYTES = 40;
 const ARCHIVE_KEY_ENVELOPE_MAX_BYTES = 1024 * 1024;
@@ -208,11 +208,15 @@ function protocolHeader(request: Request, name: string, fallback: number): numbe
 }
 
 function assertClientProtocol(request: Request): void {
-  // Headerless requests are legacy v1. Browser WebSocket upgrades cannot set
-  // custom headers, but their one-time ticket was minted by a checked request.
-  if (new URL(request.url).pathname === "/api/v1/ws") return;
-  const clientVersion = protocolHeader(request, "x-edgechat-client-protocol", 1);
-  const minimumServerVersion = protocolHeader(request, "x-edgechat-min-server-protocol", 1);
+  // Headerless requests use this deployment's current protocol. Browser
+  // WebSocket upgrades cannot set custom headers, but their one-time ticket was
+  // minted by a checked request. Explicit stale/new version ranges still fail.
+  // Health is deliberately public and version-neutral so monitors can discover
+  // the required protocol from its response headers and body.
+  const pathname = new URL(request.url).pathname;
+  if (pathname === "/api/v1/ws" || pathname === "/api/v1/health") return;
+  const clientVersion = protocolHeader(request, "x-edgechat-client-protocol", PROTOCOL_VERSION);
+  const minimumServerVersion = protocolHeader(request, "x-edgechat-min-server-protocol", MIN_SUPPORTED_PROTOCOL_VERSION);
   if (clientVersion < MIN_SUPPORTED_PROTOCOL_VERSION) {
     throw new HttpError(426, "This client must be updated before it can use this server", "client_upgrade_required");
   }

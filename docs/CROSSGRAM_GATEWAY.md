@@ -63,13 +63,15 @@ the existing EdgeChat event envelope instead of leaking into RoomDO, MLS, D1,
 or R2 APIs. Features such as edits, replies, reactions and receipts should be
 added as referenced room events, not mutable Telegram-shaped server records.
 
-One limitation is now explicit: the Worker and object-store abstraction support
-HTTP Range for attachments, but today's client encrypts each attachment as one
-AES-GCM record. A CrossGram range read therefore downloads and authenticates the
-whole attachment before slicing plaintext. This is bounded by the current
-25 MiB limit and correct, but inefficient. Before raising that limit, large
-attachments should gain a versioned encrypted manifest plus independently
-authenticated chunks; small attachments can retain the simpler format.
+Attachment range reads now use the version-2 encrypted container. CrossGram
+fetches the fixed prefix, encrypted Valibot-validated manifest, and only the
+contiguous authenticated chunks covering the requested plaintext range. Files
+up to 1 MiB use the same format with one chunk; larger files use 256 KiB chunks.
+All chunks remain concatenated in one R2/S3 object, so seeking does not create
+one object or authorization decision per chunk. A forwarding grant may replace
+the server-side opaque locator without rewriting ciphertext: the AEAD context
+is the random nonce carried inside the MLS-protected attachment metadata, not
+the mutable download locator.
 
 The gateway state file can temporarily contain decrypted pending deliveries.
 This does not change the Worker boundary, but it makes disk permissions,

@@ -28,7 +28,10 @@ type AccountCredentialEnvelope = {
   ciphertext: string;
 };
 
-export type EncryptedAttachment = { key: string; nonce: string; ciphertext: ArrayBuffer };
+export { ATTACHMENT_DEFAULT_CHUNK_BYTES, ATTACHMENT_PREFIX_BYTES, ATTACHMENT_SINGLE_CHUNK_BYTES,
+  decryptAttachmentRangeV2, encryptedAttachmentManifestSchema, parseEncryptedAttachmentManifest, readEncryptedAttachmentManifest } from "./attachment.js";
+export type { AttachmentCiphertextSource, EncryptedAttachmentManifest, EncryptedAttachmentV2 as EncryptedAttachment } from "./attachment.js";
+import { decryptAttachmentRangeV2, decryptAttachmentV2, encryptAttachmentV2, type AttachmentCiphertextSource, type EncryptedAttachmentV2 } from "./attachment.js";
 export type ArchiveKeyContext = { room_id: string; segment_id: string; start_seq: number; end_seq: number };
 export type ArchiveKeyRecipient = { device_id: string; encryption_key: JsonWebKey | string };
 export type ArchiveKeyEnvelopeManifest = {
@@ -265,17 +268,17 @@ export class WebCryptoMessagingCore {
     return encodeBase64Url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, identity.signingPrivateKey, new Uint8Array(bytes).buffer));
   }
 
-  async encryptAttachment(plaintext: ArrayBuffer): Promise<EncryptedAttachment> {
-    const rawKey = crypto.getRandomValues(new Uint8Array(32));
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["encrypt"]);
-    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, plaintext);
-    return { key: encodeBase64Url(rawKey), nonce: encodeBase64Url(nonce), ciphertext };
+  async encryptAttachment(plaintext: ArrayBuffer, attachmentId: string): Promise<EncryptedAttachmentV2> {
+    return encryptAttachmentV2(plaintext, attachmentId);
   }
 
-  async decryptAttachment(ciphertext: ArrayBuffer, keyBytes: string, nonce: string): Promise<ArrayBuffer> {
-    const key = await crypto.subtle.importKey("raw", decodeBase64Url(keyBytes), "AES-GCM", false, ["decrypt"]);
-    return crypto.subtle.decrypt({ name: "AES-GCM", iv: decodeBase64Url(nonce) }, key, ciphertext);
+  async decryptAttachment(ciphertext: ArrayBuffer, keyBytes: string, nonce: string, attachmentId: string): Promise<ArrayBuffer> {
+    return decryptAttachmentV2(ciphertext, keyBytes, nonce, attachmentId);
+  }
+
+  async decryptAttachmentRange(source: AttachmentCiphertextSource, keyBytes: string, nonce: string, attachmentId: string,
+    plaintextOffset: number, plaintextLength: number): Promise<ArrayBuffer> {
+    return decryptAttachmentRangeV2(source, keyBytes, nonce, attachmentId, plaintextOffset, plaintextLength);
   }
 
 }

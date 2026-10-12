@@ -62,6 +62,7 @@ describe("EdgeChatCrossgramPlatform", () => {
     const attachment = { id: "A".repeat(32), name: "note.ogg", type: "audio/ogg", size: bytes.length,
       key: "K".repeat(43), nonce: "N".repeat(16), duration_ms: 2_500 };
     const sendAttachments = vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 2, attachments: [attachment] }));
+    const downloadAttachmentRange = vi.fn(async (_attachment: unknown, offset: number, length: number) => bytes.slice(offset, offset + length).buffer);
     const client: EdgeChatGatewayClient = {
       userId: "@alice:example.com",
       rooms: vi.fn(async () => [room]), pull: vi.fn(async () => []),
@@ -74,6 +75,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
       markRead: vi.fn(async () => ({ event_id: "$read1234:example.com" as const, seq: 6 })),
       downloadAttachment: vi.fn(async () => bytes.buffer),
+      downloadAttachmentRange,
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 4_000 });
     const message = await platform.sendMessage({}, { id: room.room_id }, { parts: [
@@ -86,6 +88,8 @@ describe("EdgeChatCrossgramPlatform", () => {
     expect(mediaPart).toMatchObject({ media: { id: attachment.id, kind: "file", mimeType: "audio/ogg", duration: 2.5, voice: true } });
     if (!mediaPart || mediaPart.type !== "media") throw new Error("media part missing");
     await expect(collect(platform.downloadMedia({}, mediaPart.media, { offset: 2, limit: 5 }))).resolves.toEqual(bytes.slice(2, 7));
+    expect(downloadAttachmentRange).toHaveBeenCalledWith(attachment, 2, 5);
+    expect(client.downloadAttachment).not.toHaveBeenCalled();
     platform.close();
   });
 
