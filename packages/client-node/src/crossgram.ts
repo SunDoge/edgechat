@@ -1,28 +1,47 @@
 import type { RoomEvent, RoomId, UserId } from "@edgechat/protocol";
 import type { ServerRoom } from "@edgechat/sync";
-import type { DecryptedNodeMessage, NodeEdgeChatClient } from "./index.js";
+import type { DecryptedNodeMessage, NodeAttachment, NodeAttachmentInput, NodeEdgeChatClient, SendNodeMessageResult } from "./index.js";
 
 export type CrossgramUser = { id: string; firstName: string; username?: string; metadata?: Record<string, string | number | boolean | null> };
 export type CrossgramConversation = { id: string; kind: "direct" | "group"; title: string; selfRole: "owner" | "member"; metadata?: Record<string, string | number | boolean | null> };
+export type CrossgramMediaLocator = { edgechatAttachment: NodeAttachment };
+export type CrossgramMedia = {
+  id: string;
+  kind: "image" | "file";
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+  duration?: number;
+  voice?: boolean;
+  locator: CrossgramMediaLocator;
+};
 export type CrossgramMessage = {
   id: string;
   conversationId: string;
   senderId: string;
   sender?: CrossgramUser;
-  content: { parts: Array<{ type: "text"; text: string }> };
+  content: { parts: Array<{ type: "text"; text: string } | { type: "media"; media: CrossgramMedia }> };
   timestamp: number;
   nativeOrderKey: string;
   outgoing: boolean;
   metadata: Record<string, string | number | boolean | null>;
 };
 export type CrossgramEvent = { type: "message"; message: CrossgramMessage; conversation: CrossgramConversation };
-export type CrossgramMessageInput = { parts: Array<{ type: string; text?: string }> };
+export type CrossgramMediaSource = { size?: number; stream(options?: { signal?: AbortSignal }): AsyncIterable<Uint8Array> };
+export type CrossgramMessageInput = { parts: Array<
+  | { type: "text"; text: string }
+  | { type: "media"; media: { kind: "image" | "file"; name?: string; mimeType?: string; size?: number; width?: number; height?: number; duration?: number; voice?: boolean; source: CrossgramMediaSource } }
+> };
 
 export interface EdgeChatGatewayClient {
   readonly userId: UserId;
   rooms(): Promise<ServerRoom[]>;
   pull(): Promise<DecryptedNodeMessage[]>;
   sendText(roomId: RoomId, text: string): Promise<{ event_id: string; seq: number }>;
+  sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text?: string): Promise<SendNodeMessageResult>;
+  downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
 }
 
 export type CrossgramAdapterOptions = {
@@ -39,7 +58,7 @@ export class EdgeChatCrossgramPlatform {
   readonly platformKind = "edgechat";
   readonly capabilities = {
     history: true,
-    send: { text: true, images: false, files: false, mixed: false, maxTextLength: 32_000, maxMedia: 0 },
+    send: { text: true, images: true, files: true, mixed: true, maxTextLength: 16_000, maxMedia: 10 },
     conversations: { groups: true, channels: false, subchannels: false },
   } as const;
 
@@ -81,7 +100,7 @@ export class EdgeChatCrossgramPlatform {
       await this.refreshRooms();
       const incoming = await this.client.pull();
       for (const item of incoming) {
-        const message = this.messageFromEvent(item.event, item.text);
+        const message = this.messageFromEvent(item.event, item.text, item.attachments);
         if (!message.content.parts.length) continue;
         this.remember(message);
         const conversation = this.conversation(this.roomsById.get(item.event.room_id));
@@ -133,19 +152,44 @@ export class EdgeChatCrossgramPlatform {
 
   async sendMessage(_session: unknown, conversation: { id: string }, content: CrossgramMessageInput): Promise<CrossgramMessage> {
     const parts = content.parts;
-    if (!parts.length || parts.some((part) => part.type !== "text" || typeof part.text !== "string")) {
-      throw new Error("The EdgeChat CrossGram MVP currently accepts text-only messages");
-    }
-    const text = parts.map((part) => part.text).join("\n").trim();
-    if (!text) throw new Error("Message text is empty");
+    if (!parts.length) throw new Error("Message is empty");
+    const text = parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map((part) => part.text).join("\n").trim();
+    const mediaParts = parts.filter((part): part is Extract<typeof part, { type: "media" }> => part.type === "media");
+    if (!text && !mediaParts.length) throw new Error("Message is empty");
+    if (mediaParts.length > 10) throw new Error("EdgeChat accepts at most 10 media items per message");
     await this.refreshRooms();
     const room = this.roomsById.get(conversation.id);
     if (!room) throw new Error(`Unknown EdgeChat room: ${conversation.id}`);
-    const accepted = await this.client.sendText(room.room_id, text);
+    let accepted: { event_id: string; seq: number }; let attachments: NodeAttachment[] = [];
+    if (mediaParts.length) {
+      const inputs: NodeAttachmentInput[] = [];
+      for (const [index, part] of mediaParts.entries()) {
+        const bytes = await collectSource(part.media.source, part.media.size);
+        inputs.push({ name: part.media.name?.trim() || `attachment-${index + 1}`,
+          type: part.media.mimeType?.trim() || "application/octet-stream", bytes,
+          ...(part.media.width && part.media.height ? { width: part.media.width, height: part.media.height } : {}),
+          ...(part.media.duration ? { duration_ms: Math.max(1, Math.round(part.media.duration * 1_000)) } : {}) });
+      }
+      const result = await this.client.sendAttachments(room.room_id, inputs, text);
+      accepted = result; attachments = result.attachments;
+    } else accepted = await this.client.sendText(room.room_id, text);
     const event = { event_id: accepted.event_id, room_id: room.room_id, sender: this.client.userId, seq: accepted.seq, created_at: this.now() } as RoomEvent;
-    const message = this.messageFromEvent(event, text);
+    const message = this.messageFromEvent(event, text, attachments);
     this.remember(message);
     return message;
+  }
+
+  async *downloadMedia(_session: unknown, media: CrossgramMedia, options: { offset?: number; limit?: number; signal?: AbortSignal } = {}): AsyncIterable<Uint8Array> {
+    const attachment = media.locator?.edgechatAttachment;
+    if (!attachment || attachment.id !== media.id) throw new Error("EdgeChat media locator is invalid");
+    if (options.signal?.aborted) throw options.signal.reason ?? new Error("Download aborted");
+    const plaintext = new Uint8Array(await this.client.downloadAttachment(attachment));
+    const offset = Math.min(plaintext.length, Math.max(0, options.offset ?? 0));
+    const end = Math.min(plaintext.length, offset + Math.max(0, options.limit ?? plaintext.length));
+    for (let position = offset; position < end; position += 64 * 1024) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error("Download aborted");
+      yield plaintext.slice(position, Math.min(end, position + 64 * 1024));
+    }
   }
 
   private async refreshRooms(): Promise<ServerRoom[]> {
@@ -163,7 +207,7 @@ export class EdgeChatCrossgramPlatform {
       selfRole: self?.role === "owner" ? "owner" : "member", metadata: { edgechatRoomId: room.room_id } };
   }
 
-  private messageFromEvent(event: Pick<RoomEvent, "event_id" | "room_id" | "sender" | "seq" | "created_at">, text: string): CrossgramMessage {
+  private messageFromEvent(event: Pick<RoomEvent, "event_id" | "room_id" | "sender" | "seq" | "created_at">, text: string, attachments: readonly NodeAttachment[]): CrossgramMessage {
     const room = this.roomsById.get(event.room_id);
     const sender = room?.members.find((member) => member.user_id === event.sender);
     return {
@@ -171,7 +215,10 @@ export class EdgeChatCrossgramPlatform {
       conversationId: event.room_id,
       senderId: event.sender,
       sender: this.user(sender?.display_name ?? event.sender, event.sender),
-      content: { parts: text ? [{ type: "text", text }] : [] },
+      content: { parts: [
+        ...(text ? [{ type: "text" as const, text }] : []),
+        ...attachments.map((attachment) => ({ type: "media" as const, media: attachmentMedia(attachment) })),
+      ] },
       timestamp: Math.floor(event.created_at / 1_000),
       nativeOrderKey: String(event.seq).padStart(16, "0"),
       outgoing: event.sender === this.client.userId,
@@ -195,6 +242,29 @@ export class EdgeChatCrossgramPlatform {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined; this.subscribers.clear();
   }
+}
+
+function attachmentMedia(attachment: NodeAttachment): CrossgramMedia {
+  return {
+    id: attachment.id, kind: attachment.type.startsWith("image/") ? "image" : "file", name: attachment.name,
+    mimeType: attachment.type, size: attachment.size, ...(attachment.width ? { width: attachment.width, height: attachment.height } : {}),
+    ...(attachment.duration_ms ? { duration: attachment.duration_ms / 1_000 } : {}),
+    ...(attachment.type.startsWith("audio/") && attachment.duration_ms ? { voice: true } : {}),
+    locator: { edgechatAttachment: attachment },
+  };
+}
+
+async function collectSource(source: CrossgramMediaSource, declaredSize?: number): Promise<ArrayBuffer> {
+  const chunks: Uint8Array[] = []; let total = 0;
+  for await (const chunk of source.stream()) {
+    total += chunk.byteLength;
+    if (total > 25 * 1024 * 1024) throw new Error("EdgeChat attachment exceeds 25 MiB");
+    chunks.push(chunk.slice());
+  }
+  if (declaredSize !== undefined && declaredSize !== total) throw new Error("CrossGram media size does not match its byte stream");
+  const joined = new Uint8Array(total); let offset = 0;
+  for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+  return joined.buffer;
 }
 
 export function asCrossgramPlatform(client: NodeEdgeChatClient, options?: CrossgramAdapterOptions): EdgeChatCrossgramPlatform {

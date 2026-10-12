@@ -1,14 +1,18 @@
 import { NodeOpenMlsMessagingCore } from "@edgechat/messaging-core/node";
+import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import {
   canonicalEventBytes,
   isRoomEventEnvelope,
+  MAX_ATTACHMENT_PLAINTEXT_BYTES,
+  MAX_MESSAGE_ATTACHMENTS,
+  MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES,
   type ClientEvent,
   type MessageId,
   type RoomEvent,
   type RoomId,
   type UserId,
 } from "@edgechat/protocol";
-import { ApiClient, type NetworkRoute, type ServerRoom } from "@edgechat/sync";
+import { ApiClient, createAttachmentId, type NetworkRoute, type ServerRoom } from "@edgechat/sync";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -71,6 +75,34 @@ export type DecryptedNodeMessage = {
   event: RoomEvent;
   payload: Record<string, unknown>;
   text: string;
+  attachments: NodeAttachment[];
+};
+
+export type NodeAttachment = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  key: string;
+  nonce: string;
+  width?: number;
+  height?: number;
+  duration_ms?: number;
+};
+
+export type NodeAttachmentInput = {
+  name: string;
+  type: string;
+  bytes: ArrayBuffer | Uint8Array;
+  width?: number;
+  height?: number;
+  duration_ms?: number;
+};
+
+export type SendNodeMessageResult = {
+  event_id: string;
+  seq: number;
+  attachments: NodeAttachment[];
 };
 
 export class NodeClientError extends Error {
@@ -90,6 +122,7 @@ function nodeRoute(fetcher: typeof globalThis.fetch): NetworkRoute {
  */
 export class NodeEdgeChatClient {
   private operationTail: Promise<void> = Promise.resolve();
+  private readonly attachmentCrypto = new WebCryptoMessagingCore();
 
   private constructor(
     private state: NodeClientState,
@@ -174,6 +207,10 @@ export class NodeEdgeChatClient {
     return this.exclusive(async () => this.refreshRoomsLocked());
   }
 
+  acceptMessageRequest(roomId: RoomId): Promise<void> {
+    return this.exclusive(async () => { await this.api.acceptMessageRequest(roomId); });
+  }
+
   createRoom(memberIds: UserId[]): Promise<RoomId> {
     return this.exclusive(async () => {
       const members = [...new Set(memberIds.filter((id) => id !== this.state.user_id))];
@@ -204,33 +241,58 @@ export class NodeEdgeChatClient {
   sendText(roomId: RoomId, text: string): Promise<{ event_id: string; seq: number }> {
     return this.exclusive(async () => {
       const content = text.trim();
-      if (!content || content.length > 32_000) throw new RangeError("Text must contain 1-32000 characters");
-      await this.flushPendingLocked();
-      if (!this.mls.hasGroup(roomId)) await this.refreshRoomsLocked();
-      if (!this.mls.hasGroup(roomId)) throw new NodeClientError("Room MLS state is unavailable", "room_state_unavailable");
-      const eventId = `$${crypto.randomUUID()}:${serverName(this.state.user_id)}` as MessageId;
-      const payload = { version: 2, message_id: eventId, parts: [{ part_id: crypto.randomUUID(), kind: "text", text: content }] };
-      const ciphertext = base64Url(this.mls.encryptMessage(roomId, encoder.encode(JSON.stringify(payload))));
-      this.captureMlsState();
-      const unsigned: Omit<ClientEvent, "signature"> = {
-        event_id: eventId,
-        room_id: roomId,
-        sender: this.state.user_id,
-        device_id: this.state.device_id,
-        type: "message.text",
-        created_at: Date.now(),
-        ciphertext,
-        metadata: { mls_epoch: this.mls.epoch(roomId) },
-      };
-      const signature = base64Url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, this.signingKey, canonicalEventBytes(unsigned)));
-      this.state.outbox.push({ ...unsigned, signature });
-      // Ratchet state and its exact ciphertext are durable before the request can become ambiguous.
-      await this.persist();
-      const delivered = await this.flushPendingLocked();
-      const result = delivered.at(-1);
-      if (!result) throw new NodeClientError("Message was not delivered", "delivery_failed");
-      return result;
+      if (!content || content.length > 16_000) throw new RangeError("Text must contain 1-16000 characters");
+      return this.queueMessageLocked(roomId, "message.text", (eventId) => ({
+        version: 2, message_id: eventId, parts: [{ part_id: crypto.randomUUID(), kind: "text", text: content }],
+      }), {});
     });
+  }
+
+  sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text = ""): Promise<SendNodeMessageResult> {
+    return this.exclusive(async () => {
+      const content = text.trim();
+      if (content.length > 16_000) throw new RangeError("Text must contain at most 16000 characters");
+      if (!inputs.length || inputs.length > MAX_MESSAGE_ATTACHMENTS) throw new RangeError(`A message requires 1-${MAX_MESSAGE_ATTACHMENTS} attachments`);
+      const normalized = inputs.map(normalizeAttachmentInput);
+      const total = normalized.reduce((sum, input) => sum + input.bytes.byteLength, 0);
+      if (total > MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES) throw new RangeError("Message attachments exceed the plaintext size limit");
+      const uploaded: NodeAttachment[] = [];
+      let queued = false;
+      try {
+        for (const input of normalized) {
+          const id = createAttachmentId();
+          const encrypted = await this.attachmentCrypto.encryptAttachment(input.bytes);
+          await this.api.uploadAttachment(roomId, encrypted.ciphertext, id);
+          uploaded.push({ id, name: input.name, type: input.type, size: input.bytes.byteLength,
+            key: encrypted.key, nonce: encrypted.nonce, ...(input.width ? { width: input.width, height: input.height } : {}),
+            ...(input.duration_ms ? { duration_ms: input.duration_ms } : {}) });
+        }
+        const result = await this.queueMessageLocked(roomId, "message.file", (eventId) => ({
+          version: 2, message_id: eventId, parts: [
+            ...(content ? [{ part_id: crypto.randomUUID(), kind: "text", text: content }] : []),
+            ...uploaded.map((attachment) => ({ part_id: crypto.randomUUID(), kind: "attachment", attachment })),
+          ],
+        }), uploaded.length === 1 ? { attachment_id: uploaded[0]!.id } : { attachment_ids: uploaded.map((item) => item.id) }, () => { queued = true; });
+        return { ...result, attachments: uploaded };
+      } catch (error) {
+        if (!queued && uploaded.length) await this.api.abandonAttachments(uploaded.map((item) => item.id)).catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
+  async downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer> {
+    const normalized = normalizeAttachment(attachment);
+    if (!normalized) throw new NodeClientError("Attachment metadata is invalid", "invalid_attachment_metadata");
+    try {
+      const ciphertext = await this.api.downloadAttachment(normalized.id);
+      const plaintext = await this.attachmentCrypto.decryptAttachment(ciphertext, normalized.key, normalized.nonce);
+      if (plaintext.byteLength !== normalized.size) throw new NodeClientError("Attachment size does not match its authenticated metadata", "attachment_size_mismatch");
+      return plaintext;
+    } catch (error) {
+      if (error instanceof NodeClientError) throw error;
+      throw new NodeClientError("Attachment authentication failed", "attachment_authentication_failed");
+    }
   }
 
   flushPending(): Promise<Array<{ event_id: string; seq: number }>> {
@@ -299,7 +361,15 @@ export class NodeEdgeChatClient {
           const text = Array.isArray(payload.parts)
             ? payload.parts.filter((part): part is { kind: "text"; text: string } => Boolean(part) && typeof part === "object" && (part as { kind?: unknown }).kind === "text" && typeof (part as { text?: unknown }).text === "string").map((part) => part.text).join("\n")
             : "";
-          messages.push({ event, payload, text });
+          const attachments = Array.isArray(payload.parts)
+            ? payload.parts.flatMap((part) => {
+              if (!part || typeof part !== "object" || (part as { kind?: unknown }).kind !== "attachment") return [];
+              const attachment = normalizeAttachment((part as { attachment?: unknown }).attachment);
+              if (!attachment) throw new NodeClientError("Decrypted attachment metadata is invalid", "invalid_attachment_metadata");
+              return [attachment];
+            })
+            : [];
+          messages.push({ event, payload, text, attachments });
         }
       }
       this.state.room_sequences[room.room_id] = event.seq;
@@ -333,6 +403,36 @@ export class NodeEdgeChatClient {
     return delivered;
   }
 
+  private async queueMessageLocked(
+    roomId: RoomId,
+    type: "message.text" | "message.file",
+    createPayload: (eventId: MessageId) => Record<string, unknown>,
+    metadata: Record<string, unknown>,
+    afterQueued?: () => void,
+  ): Promise<{ event_id: string; seq: number }> {
+    await this.flushPendingLocked();
+    if (!this.mls.hasGroup(roomId)) await this.refreshRoomsLocked();
+    if (!this.mls.hasGroup(roomId)) throw new NodeClientError("Room MLS state is unavailable", "room_state_unavailable");
+    const eventId = `$${crypto.randomUUID()}:${serverName(this.state.user_id)}` as MessageId;
+    const ciphertext = base64Url(this.mls.encryptMessage(roomId, encoder.encode(JSON.stringify(createPayload(eventId)))));
+    this.captureMlsState();
+    const unsigned: Omit<ClientEvent, "signature"> = {
+      event_id: eventId, room_id: roomId, sender: this.state.user_id, device_id: this.state.device_id,
+      type, created_at: Date.now(), ciphertext, metadata: { ...metadata, mls_epoch: this.mls.epoch(roomId) },
+    };
+    const signature = base64Url(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, this.signingKey, canonicalEventBytes(unsigned)));
+    this.state.outbox.push({ ...unsigned, signature });
+    // From this point the exact event owns its attachments. Even a state-store
+    // error is ambiguous, so cleanup must not delete ciphertext it references.
+    afterQueued?.();
+    // Ratchet state and its exact ciphertext are durable before the request can become ambiguous.
+    await this.persist();
+    const delivered = await this.flushPendingLocked();
+    const result = delivered.at(-1);
+    if (!result) throw new NodeClientError("Message was not delivered", "delivery_failed");
+    return result;
+  }
+
   private captureMlsState(): void { this.state.mls_state = base64Url(this.mls.exportState()); }
   private persist(): Promise<void> { return this.store?.save(this.exportState()) ?? Promise.resolve(); }
 
@@ -343,4 +443,40 @@ export class NodeEdgeChatClient {
   }
 
   close(): void { this.mls.destroy(); }
+}
+
+function normalizeAttachmentInput(input: NodeAttachmentInput): NodeAttachmentInput & { bytes: ArrayBuffer } {
+  const name = input.name.trim();
+  const type = input.type.trim().toLowerCase();
+  const bytes = input.bytes instanceof Uint8Array
+    ? input.bytes.buffer.slice(input.bytes.byteOffset, input.bytes.byteOffset + input.bytes.byteLength) as ArrayBuffer
+    : input.bytes;
+  if (!name || name.length > 255 || /[\\/\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(name)) throw new RangeError("Attachment name is invalid");
+  if (!type || type.length > 128 || !type.includes("/") || /[^\x21-\x7e]/u.test(type)) throw new RangeError("Attachment MIME type is invalid");
+  if (bytes.byteLength < 1 || bytes.byteLength > MAX_ATTACHMENT_PLAINTEXT_BYTES) throw new RangeError("Attachment size is invalid");
+  const hasWidth = input.width !== undefined; const hasHeight = input.height !== undefined;
+  if (hasWidth !== hasHeight || (hasWidth && (!Number.isSafeInteger(input.width) || !Number.isSafeInteger(input.height)
+    || input.width! < 1 || input.height! < 1 || input.width! > 65_535 || input.height! > 65_535))) throw new RangeError("Attachment dimensions are invalid");
+  if (input.duration_ms !== undefined && (!Number.isSafeInteger(input.duration_ms) || input.duration_ms < 1 || input.duration_ms > 10 * 60_000)) throw new RangeError("Attachment duration is invalid");
+  return { ...input, name, type, bytes };
+}
+
+function normalizeAttachment(value: unknown): NodeAttachment | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const attachment = value as Partial<NodeAttachment>;
+  const name = typeof attachment.name === "string" ? attachment.name.trim() : "";
+  const type = typeof attachment.type === "string" ? attachment.type.trim().toLowerCase() : "";
+  const hasWidth = attachment.width !== undefined; const hasHeight = attachment.height !== undefined;
+  if (typeof attachment.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(attachment.id)
+    || !name || name.length > 255 || /[\\/\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(name)
+    || !type || type.length > 128 || !type.includes("/") || /[^\x21-\x7e]/u.test(type)
+    || !Number.isSafeInteger(attachment.size) || attachment.size! < 1 || attachment.size! > MAX_ATTACHMENT_PLAINTEXT_BYTES
+    || typeof attachment.key !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(attachment.key)
+    || typeof attachment.nonce !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(attachment.nonce)
+    || hasWidth !== hasHeight || (hasWidth && (!Number.isSafeInteger(attachment.width) || !Number.isSafeInteger(attachment.height)
+      || attachment.width! < 1 || attachment.height! < 1 || attachment.width! > 65_535 || attachment.height! > 65_535))
+    || (attachment.duration_ms !== undefined && (!Number.isSafeInteger(attachment.duration_ms) || attachment.duration_ms < 1 || attachment.duration_ms > 10 * 60_000))) return null;
+  return { id: attachment.id, name, type, size: Number(attachment.size), key: attachment.key, nonce: attachment.nonce,
+    ...(hasWidth ? { width: Number(attachment.width), height: Number(attachment.height) } : {}),
+    ...(attachment.duration_ms ? { duration_ms: Number(attachment.duration_ms) } : {}) };
 }

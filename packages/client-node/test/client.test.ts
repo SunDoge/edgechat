@@ -23,6 +23,7 @@ function testServer() {
     epoch: number;
     events: Array<Record<string, unknown> & { seq: number }>;
   }>();
+  const attachments = new Map<string, ArrayBuffer>();
   let cursor = 0;
   let tamperSignature = false;
 
@@ -86,6 +87,25 @@ function testServer() {
       })) });
     }
     if (path === "/api/v1/sync") return Response.json({ next_cursor: cursor, has_more: false, items: [] });
+    if (path === "/api/v1/attachments" && init?.method === "POST") {
+      account(init);
+      const id = new Headers(init.headers).get("x-attachment-id")!;
+      const bytes = init.body instanceof ArrayBuffer ? init.body.slice(0) : await new Response(init?.body).arrayBuffer();
+      attachments.set(id, bytes);
+      return Response.json({ attachment_id: id }, { status: 201 });
+    }
+    if (path === "/api/v1/attachments/abandon" && init?.method === "POST") {
+      account(init);
+      const ids = body.attachment_ids as string[];
+      for (const id of ids) attachments.delete(id);
+      return Response.json({ abandoned: ids.length });
+    }
+    const attachmentMatch = path.match(/^\/api\/v1\/attachments\/([A-Za-z0-9_-]+)$/);
+    if (attachmentMatch) {
+      account(init);
+      const bytes = attachments.get(attachmentMatch[1]);
+      return bytes ? new Response(bytes) : Response.json({ error: "missing", code: "not_found" }, { status: 404 });
+    }
     const eventMatch = path.match(/^\/api\/v1\/rooms\/(![^/]+)\/events$/);
     if (eventMatch && init?.method === "POST") {
       account(init);
@@ -111,7 +131,16 @@ function testServer() {
     return Response.json({ error: `unhandled ${init?.method ?? "GET"} ${path}`, code: "not_found" }, { status: 404 });
   };
 
-  return { fetcher, setTamperSignature(value: boolean) { tamperSignature = value; } };
+  return {
+    fetcher,
+    setTamperSignature(value: boolean) { tamperSignature = value; },
+    attachment(id: string) { return attachments.get(id); },
+    tamperAttachment(id: string) {
+      const bytes = attachments.get(id);
+      if (!bytes) throw new Error("attachment not found");
+      const changed = new Uint8Array(bytes.slice(0)); changed[0] ^= 1; attachments.set(id, changed.buffer);
+    },
+  };
 }
 
 describe("NodeEdgeChatClient", () => {
@@ -145,6 +174,28 @@ describe("NodeEdgeChatClient", () => {
     await alice.sendText(roomId, "must authenticate");
     server.setTamperSignature(true);
     await expect(bob.pull()).rejects.toMatchObject({ code: "invalid_signature" });
+    alice.close(); bob.close();
+  });
+
+  it("encrypts attachments before upload and authenticates them after durable recovery", async () => {
+    const server = testServer();
+    const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
+    const bob = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Bob", fetch: server.fetcher });
+    const roomId = await alice.createRoom([bob.userId]);
+    const cleartext = new TextEncoder().encode("not visible to the object store");
+    const sent = await alice.sendAttachments(roomId, [{ name: "voice.webm", type: "audio/webm", bytes: cleartext, duration_ms: 1_250 }], "listen");
+    expect(sent.seq).toBe(1);
+    const stored = server.attachment(sent.attachments[0]!.id)!;
+    expect(stored.byteLength).toBe(cleartext.byteLength + 16);
+    expect(new TextDecoder().decode(stored)).not.toContain("not visible");
+
+    const [message] = await bob.pull();
+    expect(message).toMatchObject({ text: "listen", event: { type: "message.file" },
+      attachments: [{ name: "voice.webm", type: "audio/webm", size: cleartext.byteLength, duration_ms: 1_250 }] });
+    await expect(bob.downloadAttachment(message!.attachments[0]!)).resolves.toEqual(cleartext.buffer);
+
+    server.tamperAttachment(sent.attachments[0]!.id);
+    await expect(bob.downloadAttachment(message!.attachments[0]!)).rejects.toMatchObject({ code: "attachment_authentication_failed" });
     alice.close(); bob.close();
   });
 });
