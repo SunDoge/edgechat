@@ -163,7 +163,22 @@ describe("NodeEdgeChatClient", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ text: "server smoke works", event: { room_id: roomId, seq: 1, type: "message.text" } });
     expect(bobState?.room_sequences[roomId]).toBe(1);
-    alice.close(); restored.close();
+    expect(bobState?.pending_deliveries).toHaveLength(1);
+
+    // Advancing the encrypted room cursor must not lose a delivery when the
+    // projection process exits before its own canonical database commit.
+    restored.close();
+    const replayed = await NodeEdgeChatClient.restore(bobState!, { fetch: server.fetcher,
+      store: { async save(state) { bobState = state; } } });
+    const replay = await replayed.pull();
+    expect(replay.map((message) => message.event.event_id)).toEqual([messages[0]!.event.event_id]);
+    await replayed.acknowledgeDeliveries([messages[0]!.event.event_id, messages[0]!.event.event_id]);
+    expect(bobState?.pending_deliveries).toEqual([]);
+    replayed.close();
+
+    const confirmed = await NodeEdgeChatClient.restore(bobState!, { fetch: server.fetcher });
+    await expect(confirmed.pull()).resolves.toEqual([]);
+    alice.close(); confirmed.close();
   });
 
   it("rejects a server history event whose device signature was changed", async () => {

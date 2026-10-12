@@ -27,6 +27,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       userId: "@alice:example.com",
       rooms: vi.fn(async () => [room]),
       pull: vi.fn(async () => pulled ? [] : (pulled = true, [{ event, payload: {}, text: "hello from Bob", attachments: [] }])),
+      acknowledgeDeliveries: vi.fn(async () => undefined),
       sendText: vi.fn(async () => ({ event_id: "$two:example.com", seq: 2 })),
       sendAttachments: vi.fn(async () => ({ event_id: "$media:example.com", seq: 3, attachments: [] })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
@@ -52,6 +53,7 @@ describe("EdgeChatCrossgramPlatform", () => {
     const client: EdgeChatGatewayClient = {
       userId: "@alice:example.com",
       rooms: vi.fn(async () => [room]), pull: vi.fn(async () => []),
+      acknowledgeDeliveries: vi.fn(async () => undefined),
       sendText: vi.fn(async () => ({ event_id: "$text:example.com", seq: 1 })),
       sendAttachments,
       downloadAttachment: vi.fn(async () => bytes.buffer),
@@ -67,6 +69,42 @@ describe("EdgeChatCrossgramPlatform", () => {
     expect(mediaPart).toMatchObject({ media: { id: attachment.id, kind: "file", mimeType: "audio/ogg", duration: 2.5, voice: true } });
     if (!mediaPart || mediaPart.type !== "media") throw new Error("media part missing");
     await expect(collect(platform.downloadMedia({}, mediaPart.media, { offset: 2, limit: 5 }))).resolves.toEqual(bytes.slice(2, 7));
+    platform.close();
+  });
+
+  it("acknowledges a durable delivery only after the subscriber commits it", async () => {
+    const event = { event_id: "$durable:example.com", room_id: room.room_id, sender: "@bob:example.com", device_id: "bob-phone",
+      seq: 1, type: "message.text", created_at: 2_000, ciphertext: "ciphertext", metadata: { mls_epoch: 1 }, signature: "signature" } as RoomEvent;
+    let acknowledged = false;
+    const acknowledgeDeliveries = vi.fn(async (eventIds: readonly string[]) => {
+      expect(eventIds).toEqual([event.event_id]);
+      acknowledged = true;
+    });
+    const client: EdgeChatGatewayClient = {
+      userId: "@alice:example.com",
+      rooms: vi.fn(async () => [room]),
+      pull: vi.fn(async () => acknowledged ? [] : [{ event, payload: {}, text: "retry me", attachments: [] }]),
+      acknowledgeDeliveries,
+      sendText: vi.fn(async () => ({ event_id: "$text:example.com", seq: 2 })),
+      sendAttachments: vi.fn(async () => ({ event_id: "$media:example.com", seq: 3, attachments: [] })),
+      downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
+    };
+    let reportPollError!: (error: unknown) => void;
+    const firstError = new Promise<unknown>((resolve) => { reportPollError = resolve; });
+    const platform = new EdgeChatCrossgramPlatform(client, { pollIntervalMs: 60_000, onPollError: reportPollError });
+    let attempts = 0;
+    const unsubscribe = await platform.subscribe({}, async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("database commit failed");
+    });
+
+    await expect(firstError).resolves.toMatchObject({ message: "database commit failed" });
+    expect(acknowledgeDeliveries).not.toHaveBeenCalled();
+    await expect(platform.pollOnce()).resolves.toHaveLength(1);
+    expect(attempts).toBe(2);
+    expect(acknowledgeDeliveries).toHaveBeenCalledOnce();
+
+    await unsubscribe();
     platform.close();
   });
 });

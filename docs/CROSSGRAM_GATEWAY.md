@@ -29,6 +29,8 @@ supports:
 - client-side AES-GCM upload/download for image, audio/voice and arbitrary files;
 - direct-message request acceptance (attachments remain blocked before it);
 - durable `/sync` plus history recovery after process restart;
+- persist-before-callback delivery with acknowledgement only after CrossGram's
+  canonical ingestion succeeds;
 - event signature and authenticated MLS sender verification;
 - atomic owner-only JSON state persistence;
 - a structural CrossGram `IMPlatform` adapter for dialogs, text/media send,
@@ -67,6 +69,11 @@ whole attachment before slicing plaintext. This is bounded by the current
 attachments should gain a versioned encrypted manifest plus independently
 authenticated chunks; small attachments can retain the simpler format.
 
+The gateway state file can temporarily contain decrypted pending deliveries.
+This does not change the Worker boundary, but it makes disk permissions,
+backups, and eventual encrypted-at-rest gateway storage part of the endpoint
+threat model.
+
 ## Server smoke test
 
 Run the browser-free integration test against an isolated local Worker:
@@ -89,28 +96,16 @@ pnpm --filter @edgechat/client-node test
 ## CrossGram wiring
 
 CrossGram's `@mtproto-relay/bridge` package is private to its Yarn workspace, so
-EdgeChat does not add it as a package-manager dependency. A CrossGram Cordis
-plugin should register the structurally compatible adapter from this repository:
+EdgeChat does not add it to the pnpm workspace. The runnable wrapper lives in
+`integrations/crossgram-edgechat`; install it into a CrossGram checkout through
+Yarn's `portal:` protocol. CrossGram owns the Cordis dependencies while the
+configured absolute `edgechatRoot` loads the headless client from this pnpm
+checkout, without mixing lockfiles. See that integration's README for the
+Cordis configuration.
 
-```ts
-import { NodeEdgeChatClient } from "@edgechat/client-node";
-import { EdgeChatCrossgramPlatform } from "@edgechat/client-node/crossgram";
-import { JsonFileNodeClientStore } from "@edgechat/client-node/file-store";
-
-const store = new JsonFileNodeClientStore(config.statePath);
-const saved = await store.load();
-const client = saved
-  ? await NodeEdgeChatClient.restore(saved, { store })
-  : await NodeEdgeChatClient.register({
-      baseUrl: config.baseUrl,
-      displayName: config.displayName,
-      deviceName: "CrossGram gateway",
-      store,
-    });
-const platform = new EdgeChatCrossgramPlatform(client);
-ctx.imPlatform.register(platform, resolvePlatformPluginId(ctx, "edgechat"));
-ctx.effect(() => () => { platform.close(); client.close(); });
-```
+The wrapper loads or creates the durable gateway device, registers the adapter
+under the Cordis entry ID, and closes both polling and OpenMLS state with the
+owning Cordis fiber. Its schema supplies CrossGram's ordinary configuration UI.
 
 One persisted state file represents one first-class EdgeChat device. Multiple
 Telegram frontends attached to the same CrossGram account share that device.
@@ -139,7 +134,7 @@ schema: the gateway remains a replaceable client endpoint.
 
 ## Remaining CrossGram MVP work
 
-- package the small Cordis wrapper in a CrossGram checkout and add its config UI;
+- validate the portal wrapper against a pinned CrossGram checkout in CI;
 - translate EdgeChat message requests into CrossGram request objects;
 - map read receipts and message references;
 - add chunk-addressable encryption for efficient large-media range reads;

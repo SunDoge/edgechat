@@ -32,6 +32,7 @@
     "test:pwa:matrix": "pnpm run build:core && pnpm --filter @edgechat/web build && pnpm --filter @edgechat/web test:pwa:matrix",
     "test:messaging": "pnpm run build:core && pnpm --filter @edgechat/web build && pnpm --filter @edgechat/web smoke:local",
     "test:server:node": "pnpm run build:core && node packages/client-node/scripts/local-server-smoke.mjs",
+    "test:crossgram:plugin": "node packages/client-node/scripts/verify-crossgram-plugin.mjs",
     "load:local": "pnpm run build:core && pnpm --filter @edgechat/web build && pnpm --filter @edgechat/web load:local",
     "check": "pnpm run db:migrations:check && pnpm run db:types:check && pnpm run typecheck && pnpm run test && pnpm run build",
     "check:release": "pnpm run check && pnpm run security:audit && pnpm --filter @edgechat/web smoke:local && pnpm run test:browser:matrix && pnpm --filter @edgechat/web test:pwa:matrix",

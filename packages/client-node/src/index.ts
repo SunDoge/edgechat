@@ -52,6 +52,7 @@ export type NodeClientState = {
   sync_cursor: number;
   room_sequences: Record<string, number>;
   outbox: ClientEvent[];
+  pending_deliveries: DecryptedNodeMessage[];
 };
 
 export interface NodeClientStateStore {
@@ -180,6 +181,7 @@ export class NodeEdgeChatClient {
         sync_cursor: 0,
         room_sequences: {},
         outbox: [],
+        pending_deliveries: [],
       };
       const client = new NodeEdgeChatClient(state, signing.privateKey, mls, api, options.store);
       await client.persist();
@@ -195,7 +197,7 @@ export class NodeEdgeChatClient {
     const signingKey = await crypto.subtle.importKey("jwk", state.signing_private_key, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
     const mls = NodeOpenMlsMessagingCore.create(state.device_id, fromBase64Url(state.mls_state));
     const api = new ApiClient(state.base_url, state.access_token, nodeRoute(options.fetch ?? globalThis.fetch));
-    return new NodeEdgeChatClient(structuredClone(state), signingKey, mls, api, options.store);
+    return new NodeEdgeChatClient({ ...structuredClone(state), pending_deliveries: structuredClone(state.pending_deliveries ?? []) }, signingKey, mls, api, options.store);
   }
 
   exportState(): NodeClientState { return structuredClone(this.state); }
@@ -308,10 +310,20 @@ export class NodeEdgeChatClient {
         this.state.sync_cursor = page.next_cursor;
         hasMore = page.has_more;
       }
-      const messages: DecryptedNodeMessage[] = [];
+      const messages: DecryptedNodeMessage[] = [...this.state.pending_deliveries];
       for (const room of rooms) messages.push(...await this.pullRoomLocked(room));
       await this.persist();
       return messages;
+    });
+  }
+
+  acknowledgeDeliveries(eventIds: readonly string[]): Promise<void> {
+    return this.exclusive(async () => {
+      const ids = new Set(eventIds);
+      if ([...ids].some((id) => !id || id.length > 512)) throw new RangeError("Delivery acknowledgement IDs are invalid");
+      if (!ids.size) return;
+      this.state.pending_deliveries = this.state.pending_deliveries.filter((message) => !ids.has(message.event.event_id));
+      await this.persist();
     });
   }
 
@@ -369,7 +381,9 @@ export class NodeEdgeChatClient {
               return [attachment];
             })
             : [];
-          messages.push({ event, payload, text, attachments });
+          const message = { event, payload, text, attachments };
+          messages.push(message);
+          this.state.pending_deliveries.push(message);
         }
       }
       this.state.room_sequences[room.room_id] = event.seq;

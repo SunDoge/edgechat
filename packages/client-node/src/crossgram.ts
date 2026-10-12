@@ -39,6 +39,7 @@ export interface EdgeChatGatewayClient {
   readonly userId: UserId;
   rooms(): Promise<ServerRoom[]>;
   pull(): Promise<DecryptedNodeMessage[]>;
+  acknowledgeDeliveries(eventIds: readonly string[]): Promise<void>;
   sendText(roomId: RoomId, text: string): Promise<{ event_id: string; seq: number }>;
   sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text?: string): Promise<SendNodeMessageResult>;
   downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
@@ -47,6 +48,7 @@ export interface EdgeChatGatewayClient {
 export type CrossgramAdapterOptions = {
   pollIntervalMs?: number;
   now?: () => number;
+  onPollError?: (error: unknown) => void;
 };
 
 /**
@@ -64,6 +66,7 @@ export class EdgeChatCrossgramPlatform {
 
   private readonly pollIntervalMs: number;
   private readonly now: () => number;
+  private readonly onPollError: (error: unknown) => void;
   private readonly messages = new Map<string, CrossgramMessage[]>();
   private readonly subscribers = new Set<(event: CrossgramEvent) => void | Promise<void>>();
   private roomsById = new Map<string, ServerRoom>();
@@ -73,6 +76,7 @@ export class EdgeChatCrossgramPlatform {
   constructor(private readonly client: EdgeChatGatewayClient, options: CrossgramAdapterOptions = {}) {
     this.pollIntervalMs = Math.max(250, options.pollIntervalMs ?? 1_000);
     this.now = options.now ?? (() => Date.now());
+    this.onPollError = options.onPollError ?? (() => undefined);
   }
 
   async getAccount() {
@@ -84,14 +88,18 @@ export class EdgeChatCrossgramPlatform {
   async subscribe(_session: unknown, handler: (event: CrossgramEvent) => void | Promise<void>): Promise<() => void> {
     this.subscribers.add(handler);
     if (!this.timer) {
-      this.timer = setInterval(() => { void this.pollOnce(); }, this.pollIntervalMs);
+      this.timer = setInterval(() => { this.pollInBackground(); }, this.pollIntervalMs);
       this.timer.unref?.();
     }
-    void this.pollOnce();
+    this.pollInBackground();
     return () => {
       this.subscribers.delete(handler);
       if (!this.subscribers.size && this.timer) { clearInterval(this.timer); this.timer = undefined; }
     };
+  }
+
+  private pollInBackground(): void {
+    void this.pollOnce().catch((error: unknown) => { this.onPollError(error); });
   }
 
   async pollOnce(): Promise<CrossgramEvent[]> {
@@ -101,12 +109,18 @@ export class EdgeChatCrossgramPlatform {
       const incoming = await this.client.pull();
       for (const item of incoming) {
         const message = this.messageFromEvent(item.event, item.text, item.attachments);
-        if (!message.content.parts.length) continue;
+        if (!message.content.parts.length) {
+          await this.client.acknowledgeDeliveries([item.event.event_id]);
+          continue;
+        }
         this.remember(message);
         const conversation = this.conversation(this.roomsById.get(item.event.room_id));
         const event = { type: "message", message, conversation } as const;
         events.push(event);
         for (const subscriber of this.subscribers) await subscriber(event);
+        // CrossGram's handler resolves only after canonical ingestion. Keep the
+        // decrypted delivery durable until that backpressure boundary succeeds.
+        if (this.subscribers.size) await this.client.acknowledgeDeliveries([item.event.event_id]);
       }
     };
     const result = this.pollTail.then(operation);
