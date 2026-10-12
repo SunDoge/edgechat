@@ -33,6 +33,8 @@ describe("EdgeChatCrossgramPlatform", () => {
       sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
       deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 4 })),
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 5 })),
+      setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 6 })),
+      reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 3_000 });
@@ -67,6 +69,8 @@ describe("EdgeChatCrossgramPlatform", () => {
       sendAttachments,
       deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 3 })),
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 4 })),
+      setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 5 })),
+      reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
       downloadAttachment: vi.fn(async () => bytes.buffer),
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 4_000 });
@@ -100,6 +104,8 @@ describe("EdgeChatCrossgramPlatform", () => {
       sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
       deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 4 })),
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 5 })),
+      setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 6 })),
+      reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     let reportPollError!: (error: unknown) => void;
@@ -137,6 +143,8 @@ describe("EdgeChatCrossgramPlatform", () => {
       sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 4, attachments: [] })),
       deleteMessage,
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 4 })),
+      setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 5 })),
+      reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client);
@@ -174,6 +182,8 @@ describe("EdgeChatCrossgramPlatform", () => {
       sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
       deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 3 })),
       editMessage: vi.fn(async () => ({ event_id: "$edit3456:example.com" as const, seq: 3 })),
+      setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 3 })),
+      reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client);
@@ -181,6 +191,41 @@ describe("EdgeChatCrossgramPlatform", () => {
     expect(events[1]).toMatchObject({ type: "message-edit", eventId: editEvent.event_id, message: {
       id: targetMessageId, content: { parts: [{ type: "text", text: "after" }, { type: "media", media: { id: attachment.id } }] },
     } });
+    platform.close();
+  });
+
+  it("maps final-state reactions in both directions", async () => {
+    const targetMessageId = "$target123:example.com" as const;
+    const reactionEvent = { event_id: "$react123:example.com", room_id: room.room_id, sender: "@bob:example.com", device_id: "bob-phone",
+      seq: 2, type: "message.reaction", created_at: 6_000, ciphertext: "ciphertext", metadata: { target_event_id: targetMessageId, mls_epoch: 1 }, signature: "signature" } as RoomEvent;
+    const context = { available: [{ key: "👍", title: "👍", presentation: { type: "emoji" as const, emoticon: "👍" } }],
+      reactions: [{ key: "👍", count: 2 }], maxSelected: 1 as const };
+    const setMessageReaction = vi.fn(async () => ({ event_id: "$react456:example.com" as const, seq: 3 }));
+    let pulled = false;
+    const client: EdgeChatGatewayClient = {
+      userId: "@alice:example.com",
+      rooms: vi.fn(async () => [room]),
+      pull: vi.fn(async () => pulled ? [] : (pulled = true, [{ event: reactionEvent, payload: {}, text: "", attachments: [],
+        mutation: { type: "message-reaction" as const, targetMessageId, reaction: "👍", actorUserId: "@bob:example.com" as const, updatedAt: 6_000 } }])),
+      acknowledgeDeliveries: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => ({ event_id: "$text1234:example.com" as const, seq: 3 })),
+      sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
+      deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 3 })),
+      editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 3 })),
+      setMessageReaction,
+      reactionContext: vi.fn(() => context),
+      downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
+    };
+    const platform = new EdgeChatCrossgramPlatform(client);
+    const incoming = await platform.pollOnce();
+    expect(incoming[0]).toMatchObject({ type: "message-reactions", eventId: reactionEvent.event_id,
+      target: { conversationId: room.room_id, messageId: targetMessageId }, context });
+
+    const updated = await platform.setMessageReactions({}, {
+      conversationId: room.room_id, messageId: targetMessageId, targetId: targetMessageId,
+    }, ["👍"]);
+    expect(setMessageReaction).toHaveBeenCalledWith(room.room_id, targetMessageId, "👍");
+    expect(updated).toEqual(context);
     platform.close();
   });
 });

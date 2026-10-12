@@ -251,6 +251,30 @@ describe("NodeEdgeChatClient", () => {
     alice.close(); bob.close();
   });
 
+  it("persists and aggregates final-state reactions by user", async () => {
+    const server = testServer();
+    let bobState: NodeClientState | undefined;
+    const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
+    const bob = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Bob", fetch: server.fetcher,
+      store: { async save(state) { bobState = state; } } });
+    const roomId = await alice.createRoom([bob.userId]);
+    const original = await alice.sendText(roomId, "react here");
+    await bob.pull();
+    await bob.acknowledgeDeliveries([original.event_id]);
+
+    await bob.setMessageReaction(roomId, original.event_id, "👍");
+    const [reaction] = await alice.pull();
+    expect(reaction?.mutation).toMatchObject({ type: "message-reaction", targetMessageId: original.event_id,
+      reaction: "👍", actorUserId: bob.userId });
+    expect(alice.reactionContext(roomId, original.event_id).reactions).toEqual([{ key: "👍", count: 1 }]);
+
+    bob.close();
+    const restored = await NodeEdgeChatClient.restore(bobState!, { fetch: server.fetcher });
+    expect(restored.reactionContext(roomId, original.event_id).reactions).toEqual([{ key: "👍", count: 1, selected: true }]);
+    await expect(restored.setMessageReaction(roomId, original.event_id, "not-an-emoji")).rejects.toBeInstanceOf(RangeError);
+    alice.close(); restored.close();
+  });
+
   it("encrypts attachments before upload and authenticates them after durable recovery", async () => {
     const server = testServer();
     const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });

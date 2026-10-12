@@ -1,6 +1,6 @@
 import { isNamespacedMessageId, type MessageId, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
 import type { ServerRoom } from "@edgechat/sync";
-import type { DecryptedNodeMessage, NodeAttachment, NodeAttachmentInput, NodeEdgeChatClient, SendNodeMessageResult } from "./index.js";
+import type { DecryptedNodeMessage, NodeAttachment, NodeAttachmentInput, NodeEdgeChatClient, NodeReactionContext, SendNodeMessageResult } from "./index.js";
 
 export type CrossgramUser = { id: string; firstName: string; username?: string; metadata?: Record<string, string | number | boolean | null> };
 export type CrossgramConversation = { id: string; kind: "direct" | "group"; title: string; selfRole: "owner" | "member"; metadata?: Record<string, string | number | boolean | null> };
@@ -38,7 +38,11 @@ export type CrossgramMessageInput = { parts: Array<
 export type CrossgramEvent =
   | { type: "message"; message: CrossgramMessage; conversation: CrossgramConversation }
   | { type: "message-edit"; eventId: string; message: CrossgramMessage; conversation: CrossgramConversation }
-  | { type: "message-delete"; eventId: string; conversation: CrossgramConversation; messageIds: string[]; timestamp: number };
+  | { type: "message-delete"; eventId: string; conversation: CrossgramConversation; messageIds: string[]; timestamp: number }
+  | { type: "message-reactions"; eventId: string; conversation: CrossgramConversation; target: CrossgramMessageTarget;
+      context: NodeReactionContext; timestamp: number };
+
+export type CrossgramMessageTarget = { conversationId: string; messageId: string; targetId: string; nativeSequence?: string };
 
 export interface EdgeChatGatewayClient {
   readonly userId: UserId;
@@ -49,6 +53,8 @@ export interface EdgeChatGatewayClient {
   sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text?: string, options?: { replyToId?: MessageId }): Promise<SendNodeMessageResult>;
   deleteMessage(roomId: RoomId, targetMessageId: MessageId): Promise<{ event_id: MessageId; seq: number }>;
   editMessage(roomId: RoomId, targetMessageId: MessageId, text: string): Promise<{ event_id: MessageId; seq: number }>;
+  setMessageReaction(roomId: RoomId, targetMessageId: MessageId, reaction: string | null): Promise<{ event_id: MessageId; seq: number }>;
+  reactionContext(roomId: RoomId, targetMessageId: MessageId): NodeReactionContext;
   downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
 }
 
@@ -74,6 +80,7 @@ export class EdgeChatCrossgramPlatform {
       edit: { mode: "native" },
       forward: { mode: "unsupported", preservesAuthor: false },
     },
+    reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 1 },
   } as const;
 
   private readonly pollIntervalMs: number;
@@ -120,6 +127,18 @@ export class EdgeChatCrossgramPlatform {
       await this.refreshRooms();
       const incoming = await this.client.pull();
       for (const item of incoming) {
+        if (item.mutation?.type === "message-reaction") {
+          const conversation = this.conversation(this.roomsById.get(item.event.room_id));
+          const target = { conversationId: item.event.room_id, messageId: item.mutation.targetMessageId,
+            targetId: item.mutation.targetMessageId };
+          const event: CrossgramEvent = { type: "message-reactions", eventId: item.event.event_id, conversation, target,
+            context: this.client.reactionContext(item.event.room_id, item.mutation.targetMessageId),
+            timestamp: Math.floor(item.mutation.updatedAt / 1_000) };
+          events.push(event);
+          for (const subscriber of this.subscribers) await subscriber(event);
+          if (this.subscribers.size) await this.client.acknowledgeDeliveries([item.event.event_id]);
+          continue;
+        }
         if (item.mutation?.type === "message-edit") {
           const conversation = this.conversation(this.roomsById.get(item.event.room_id));
           const original = this.findMessage(item.event.room_id, item.mutation.targetMessageId);
@@ -266,6 +285,25 @@ export class EdgeChatCrossgramPlatform {
     return updated;
   }
 
+  async setMessageReactions(_session: unknown, target: CrossgramMessageTarget, reactionKeys: readonly string[]): Promise<NodeReactionContext> {
+    const ids = validateReactionTarget(target);
+    if (reactionKeys.length > 1) throw new Error("EdgeChat accepts at most one reaction per user");
+    await this.client.setMessageReaction(ids.roomId, ids.messageId, reactionKeys[0] ?? null);
+    return this.client.reactionContext(ids.roomId, ids.messageId);
+  }
+
+  async getAvailableReactions(_session: unknown, target: { conversationId: string; messageId?: string; targetId?: string }): Promise<NodeReactionContext> {
+    if (target.messageId && isNamespacedMessageId(target.messageId)) {
+      return this.client.reactionContext(target.conversationId as RoomId, target.messageId);
+    }
+    return availableReactionContext();
+  }
+
+  async getMessageReactions(_session: unknown, target: CrossgramMessageTarget): Promise<NodeReactionContext> {
+    const ids = validateReactionTarget(target);
+    return this.client.reactionContext(ids.roomId, ids.messageId);
+  }
+
   async *downloadMedia(_session: unknown, media: CrossgramMedia, options: { offset?: number; limit?: number; signal?: AbortSignal } = {}): AsyncIterable<Uint8Array> {
     const attachment = media.locator?.edgechatAttachment;
     if (!attachment || attachment.id !== media.id) throw new Error("EdgeChat media locator is invalid");
@@ -351,6 +389,19 @@ function attachmentMedia(attachment: NodeAttachment): CrossgramMedia {
     ...(attachment.type.startsWith("audio/") && attachment.duration_ms ? { voice: true } : {}),
     locator: { edgechatAttachment: attachment },
   };
+}
+
+function validateReactionTarget(target: CrossgramMessageTarget): { roomId: RoomId; messageId: MessageId } {
+  if (!target.conversationId.startsWith("!") || !isNamespacedMessageId(target.messageId) || target.targetId !== target.messageId) {
+    throw new Error("EdgeChat reaction target is invalid");
+  }
+  return { roomId: target.conversationId as RoomId, messageId: target.messageId };
+}
+
+function availableReactionContext(): NodeReactionContext {
+  const reactions = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+  return { available: reactions.map((reaction) => ({ key: reaction, title: reaction,
+    presentation: { type: "emoji", emoticon: reaction } })), reactions: [], maxSelected: 1 };
 }
 
 async function collectSource(source: CrossgramMediaSource, declaredSize?: number): Promise<ArrayBuffer> {

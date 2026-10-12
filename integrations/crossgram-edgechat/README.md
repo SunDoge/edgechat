@@ -55,6 +55,9 @@ global retraction.
 Text edits preserve attachment parts when the gateway has projected the target
 message. An edit request for an unavailable target snapshot fails closed.
 
+Reaction selections are part of the durable gateway state because CrossGram
+requires aggregate counts while EdgeChat transports per-user final state.
+
 This portal layout is intended for testing and personal self-hosting. A future
 published package should bundle the Node client and native OpenMLS Wasm instead
 of importing source from a neighboring checkout.

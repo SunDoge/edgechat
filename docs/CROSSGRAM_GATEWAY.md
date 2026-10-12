@@ -35,7 +35,8 @@ supports:
 - atomic owner-only JSON state persistence;
 - a structural CrossGram `IMPlatform` adapter for dialogs, text/media send,
   authenticated media download, encrypted reply references, own-message
-  text editing, retraction, history, users and polling subscriptions.
+  text editing, retraction, final-state reactions, history, users and polling
+  subscriptions.
 
 Image, voice and file are one encrypted attachment primitive. MIME type,
 dimensions and duration control presentation; the server never interprets
@@ -84,6 +85,10 @@ Editing is likewise an immutable `message.edit` MLS event. CrossGram preserves
 known attachment parts while replacing text. It refuses a Telegram-originated
 edit when the target snapshot is unavailable instead of returning a false
 success or accidentally removing media.
+
+Reaction events carry one user's final selection, not an increment/decrement.
+The gateway persists those selections by user and rebuilds aggregate counts
+after restart before exposing CrossGram's reaction context.
 
 ## Server smoke test
 
@@ -147,7 +152,7 @@ schema: the gateway remains a replaceable client endpoint.
 
 - validate the portal wrapper against a pinned CrossGram checkout in CI;
 - translate EdgeChat message requests into CrossGram request objects;
-- map read receipts and reactions;
+- map read receipts;
 - add chunk-addressable encryption for efficient large-media range reads;
 - replace one-second polling with WebSocket wakeups while retaining `/sync` as
   the durable delivery path.

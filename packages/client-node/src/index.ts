@@ -5,6 +5,7 @@ import {
   isNamespacedMessageId,
   isMessageDeletePayload,
   isMessageEditPayload,
+  isMessageReactionPayload,
   isRoomEventEnvelope,
   MAX_ATTACHMENT_PLAINTEXT_BYTES,
   MAX_MESSAGE_ATTACHMENTS,
@@ -13,6 +14,7 @@ import {
   type MessageId,
   type MessageDeletePayload,
   type MessageEditPayload,
+  type MessageReactionPayload,
   type RoomEvent,
   type RoomId,
   type UserId,
@@ -58,6 +60,7 @@ export type NodeClientState = {
   room_sequences: Record<string, number>;
   outbox: ClientEvent[];
   pending_deliveries: DecryptedNodeMessage[];
+  reaction_selections: Record<string, Record<string, string>>;
 };
 
 export interface NodeClientStateStore {
@@ -88,7 +91,14 @@ export type DecryptedNodeMessage = {
 
 export type NodeMessageMutation =
   | { type: "message-delete"; targetMessageId: MessageId; deletedAt: number }
-  | { type: "message-edit"; targetMessageId: MessageId; text: string; editedAt: number };
+  | { type: "message-edit"; targetMessageId: MessageId; text: string; editedAt: number }
+  | { type: "message-reaction"; targetMessageId: MessageId; reaction: string | null; actorUserId: UserId; updatedAt: number };
+
+export type NodeReactionContext = {
+  available: Array<{ key: string; title: string; presentation: { type: "emoji"; emoticon: string } }>;
+  reactions: Array<{ key: string; count: number; selected?: boolean }>;
+  maxSelected: 1;
+};
 
 export type NodeMessageOptions = {
   replyToId?: MessageId;
@@ -197,6 +207,7 @@ export class NodeEdgeChatClient {
         room_sequences: {},
         outbox: [],
         pending_deliveries: [],
+        reaction_selections: {},
       };
       const client = new NodeEdgeChatClient(state, signing.privateKey, mls, api, options.store);
       await client.persist();
@@ -212,7 +223,8 @@ export class NodeEdgeChatClient {
     const signingKey = await crypto.subtle.importKey("jwk", state.signing_private_key, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
     const mls = NodeOpenMlsMessagingCore.create(state.device_id, fromBase64Url(state.mls_state));
     const api = new ApiClient(state.base_url, state.access_token, nodeRoute(options.fetch ?? globalThis.fetch));
-    return new NodeEdgeChatClient({ ...structuredClone(state), pending_deliveries: structuredClone(state.pending_deliveries ?? []) }, signingKey, mls, api, options.store);
+    return new NodeEdgeChatClient({ ...structuredClone(state), pending_deliveries: structuredClone(state.pending_deliveries ?? []),
+      reaction_selections: structuredClone(state.reaction_selections ?? {}) }, signingKey, mls, api, options.store);
   }
 
   exportState(): NodeClientState { return structuredClone(this.state); }
@@ -337,6 +349,35 @@ export class NodeEdgeChatClient {
     });
   }
 
+  setMessageReaction(roomId: RoomId, targetMessageId: MessageId, reaction: string | null): Promise<{ event_id: MessageId; seq: number }> {
+    return this.exclusive(async () => {
+      if (!isNamespacedMessageId(targetMessageId) || !validReaction(reaction)) throw new RangeError("Message reaction is invalid");
+      const updatedAt = Date.now();
+      const payload: MessageReactionPayload = {
+        version: 1,
+        kind: "message.reaction",
+        target: { kind: "message", message_id: targetMessageId, room_id: roomId },
+        reaction,
+        updated_at: updatedAt,
+      };
+      return this.queueMessageLocked(roomId, "message.reaction", () => payload as unknown as Record<string, unknown>, {
+        target_event_id: targetMessageId,
+      }, () => { this.applyReaction(roomId, targetMessageId, this.state.user_id, reaction); }, updatedAt);
+    });
+  }
+
+  reactionContext(roomId: RoomId, targetMessageId: MessageId): NodeReactionContext {
+    const selections = this.state.reaction_selections[reactionStateKey(roomId, targetMessageId)] ?? {};
+    const counts = new Map<string, number>();
+    for (const reaction of Object.values(selections)) counts.set(reaction, (counts.get(reaction) ?? 0) + 1);
+    const available = [...new Set<string>([...REACTIONS, ...counts.keys()])];
+    return {
+      available: available.map((reaction) => ({ key: reaction, title: reaction, presentation: { type: "emoji", emoticon: reaction } })),
+      reactions: [...counts].map(([key, count]) => ({ key, count, ...(selections[this.state.user_id] === key ? { selected: true } : {}) })),
+      maxSelected: 1,
+    };
+  }
+
   async downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer> {
     const normalized = normalizeAttachment(attachment);
     if (!normalized) throw new NodeClientError("Attachment metadata is invalid", "invalid_attachment_metadata");
@@ -437,6 +478,7 @@ export class NodeEdgeChatClient {
             : [];
           const replyToId = messageReplyTarget(payload, event.room_id);
           const mutation = messageMutation(payload, event);
+          if (mutation?.type === "message-reaction") this.applyReaction(event.room_id, mutation.targetMessageId, mutation.actorUserId, mutation.reaction);
           const message = { event, payload, text, attachments, ...(replyToId ? { replyToId } : {}), ...(mutation ? { mutation } : {}) };
           messages.push(message);
           this.state.pending_deliveries.push(message);
@@ -475,7 +517,7 @@ export class NodeEdgeChatClient {
 
   private async queueMessageLocked(
     roomId: RoomId,
-    type: "message.text" | "message.file" | "message.delete" | "message.edit",
+    type: "message.text" | "message.file" | "message.delete" | "message.edit" | "message.reaction",
     createPayload: (eventId: MessageId) => Record<string, unknown>,
     metadata: Record<string, unknown>,
     afterQueued?: () => void,
@@ -505,6 +547,14 @@ export class NodeEdgeChatClient {
   }
 
   private captureMlsState(): void { this.state.mls_state = base64Url(this.mls.exportState()); }
+  private applyReaction(roomId: RoomId, targetMessageId: MessageId, userId: UserId, reaction: string | null): void {
+    const key = reactionStateKey(roomId, targetMessageId);
+    const selections = this.state.reaction_selections[key] ?? {};
+    if (reaction === null) delete selections[userId];
+    else selections[userId] = reaction;
+    if (Object.keys(selections).length) this.state.reaction_selections[key] = selections;
+    else delete this.state.reaction_selections[key];
+  }
   private persist(): Promise<void> { return this.store?.save(this.exportState()) ?? Promise.resolve(); }
 
   private exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -589,5 +639,23 @@ function messageMutation(payload: Record<string, unknown>, event: RoomEvent): No
     }
     return { type: "message-edit", targetMessageId: payload.target.message_id, text: payload.text, editedAt: payload.edited_at };
   }
+  if (event.type === "message.reaction") {
+    if (!isMessageReactionPayload(payload) || payload.target.room_id !== event.room_id
+      || event.metadata.target_event_id !== payload.target.message_id || !validReaction(payload.reaction)) {
+      throw new NodeClientError("Decrypted message reaction is invalid", "invalid_message_reaction");
+    }
+    return { type: "message-reaction", targetMessageId: payload.target.message_id, reaction: payload.reaction,
+      actorUserId: event.sender, updatedAt: payload.updated_at };
+  }
   return undefined;
+}
+
+const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
+
+function validReaction(reaction: string | null): boolean {
+  return reaction === null || (typeof reaction === "string" && Array.from(reaction).length >= 1 && Array.from(reaction).length <= 8);
+}
+
+function reactionStateKey(roomId: RoomId, targetMessageId: MessageId): string {
+  return `${roomId}\n${targetMessageId}`;
 }
