@@ -52,6 +52,9 @@ Telegram “delete for everyone” maps to an immutable EdgeChat retraction even
 per-device remote tombstone and must not silently turn a local delete into a
 global retraction.
 
+Text edits preserve attachment parts when the gateway has projected the target
+message. An edit request for an unavailable target snapshot fails closed.
+
 This portal layout is intended for testing and personal self-hosting. A future
 published package should bundle the Node client and native OpenMLS Wasm instead
 of importing source from a neighboring checkout.

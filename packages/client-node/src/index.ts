@@ -4,6 +4,7 @@ import {
   canonicalEventBytes,
   isNamespacedMessageId,
   isMessageDeletePayload,
+  isMessageEditPayload,
   isRoomEventEnvelope,
   MAX_ATTACHMENT_PLAINTEXT_BYTES,
   MAX_MESSAGE_ATTACHMENTS,
@@ -11,6 +12,7 @@ import {
   type ClientEvent,
   type MessageId,
   type MessageDeletePayload,
+  type MessageEditPayload,
   type RoomEvent,
   type RoomId,
   type UserId,
@@ -84,11 +86,9 @@ export type DecryptedNodeMessage = {
   mutation?: NodeMessageMutation;
 };
 
-export type NodeMessageMutation = {
-  type: "message-delete";
-  targetMessageId: MessageId;
-  deletedAt: number;
-};
+export type NodeMessageMutation =
+  | { type: "message-delete"; targetMessageId: MessageId; deletedAt: number }
+  | { type: "message-edit"; targetMessageId: MessageId; text: string; editedAt: number };
 
 export type NodeMessageOptions = {
   replyToId?: MessageId;
@@ -318,6 +318,25 @@ export class NodeEdgeChatClient {
     });
   }
 
+  editMessage(roomId: RoomId, targetMessageId: MessageId, text: string): Promise<{ event_id: MessageId; seq: number }> {
+    return this.exclusive(async () => {
+      if (!isNamespacedMessageId(targetMessageId)) throw new RangeError("Message edit target is invalid");
+      const content = text.trim();
+      if (!content || content.length > 16_000) throw new RangeError("Edited text must contain 1-16000 characters");
+      const editedAt = Date.now();
+      const payload: MessageEditPayload = {
+        version: 1,
+        kind: "message.edit",
+        target: { kind: "message", message_id: targetMessageId, room_id: roomId },
+        text: content,
+        edited_at: editedAt,
+      };
+      return this.queueMessageLocked(roomId, "message.edit", () => payload as unknown as Record<string, unknown>, {
+        target_event_id: targetMessageId,
+      }, undefined, editedAt);
+    });
+  }
+
   async downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer> {
     const normalized = normalizeAttachment(attachment);
     if (!normalized) throw new NodeClientError("Attachment metadata is invalid", "invalid_attachment_metadata");
@@ -456,7 +475,7 @@ export class NodeEdgeChatClient {
 
   private async queueMessageLocked(
     roomId: RoomId,
-    type: "message.text" | "message.file" | "message.delete",
+    type: "message.text" | "message.file" | "message.delete" | "message.edit",
     createPayload: (eventId: MessageId) => Record<string, unknown>,
     metadata: Record<string, unknown>,
     afterQueued?: () => void,
@@ -556,10 +575,19 @@ function messageReplyTarget(payload: Record<string, unknown>, roomId: RoomId): M
 }
 
 function messageMutation(payload: Record<string, unknown>, event: RoomEvent): NodeMessageMutation | undefined {
-  if (event.type !== "message.delete") return undefined;
-  if (!isMessageDeletePayload(payload) || payload.target.room_id !== event.room_id
-    || event.metadata.target_event_id !== payload.target.message_id) {
-    throw new NodeClientError("Decrypted message deletion is invalid", "invalid_message_deletion");
+  if (event.type === "message.delete") {
+    if (!isMessageDeletePayload(payload) || payload.target.room_id !== event.room_id
+      || event.metadata.target_event_id !== payload.target.message_id) {
+      throw new NodeClientError("Decrypted message deletion is invalid", "invalid_message_deletion");
+    }
+    return { type: "message-delete", targetMessageId: payload.target.message_id, deletedAt: payload.deleted_at };
   }
-  return { type: "message-delete", targetMessageId: payload.target.message_id, deletedAt: payload.deleted_at };
+  if (event.type === "message.edit") {
+    if (!isMessageEditPayload(payload) || payload.target.room_id !== event.room_id
+      || event.metadata.target_event_id !== payload.target.message_id || !payload.text.trim()) {
+      throw new NodeClientError("Decrypted message edit is invalid", "invalid_message_edit");
+    }
+    return { type: "message-edit", targetMessageId: payload.target.message_id, text: payload.text, editedAt: payload.edited_at };
+  }
+  return undefined;
 }

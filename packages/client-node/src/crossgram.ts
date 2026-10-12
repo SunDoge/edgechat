@@ -37,6 +37,7 @@ export type CrossgramMessageInput = { parts: Array<
 
 export type CrossgramEvent =
   | { type: "message"; message: CrossgramMessage; conversation: CrossgramConversation }
+  | { type: "message-edit"; eventId: string; message: CrossgramMessage; conversation: CrossgramConversation }
   | { type: "message-delete"; eventId: string; conversation: CrossgramConversation; messageIds: string[]; timestamp: number };
 
 export interface EdgeChatGatewayClient {
@@ -47,6 +48,7 @@ export interface EdgeChatGatewayClient {
   sendText(roomId: RoomId, text: string, options?: { replyToId?: MessageId }): Promise<{ event_id: MessageId; seq: number }>;
   sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text?: string, options?: { replyToId?: MessageId }): Promise<SendNodeMessageResult>;
   deleteMessage(roomId: RoomId, targetMessageId: MessageId): Promise<{ event_id: MessageId; seq: number }>;
+  editMessage(roomId: RoomId, targetMessageId: MessageId, text: string): Promise<{ event_id: MessageId; seq: number }>;
   downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
 }
 
@@ -69,7 +71,7 @@ export class EdgeChatCrossgramPlatform {
     conversations: { groups: true, channels: false, subchannels: false },
     messageActions: {
       delete: { own: { supported: true }, others: { supported: false } },
-      edit: { mode: "unsupported" },
+      edit: { mode: "native" },
       forward: { mode: "unsupported", preservesAuthor: false },
     },
   } as const;
@@ -118,6 +120,22 @@ export class EdgeChatCrossgramPlatform {
       await this.refreshRooms();
       const incoming = await this.client.pull();
       for (const item of incoming) {
+        if (item.mutation?.type === "message-edit") {
+          const conversation = this.conversation(this.roomsById.get(item.event.room_id));
+          const original = this.findMessage(item.event.room_id, item.mutation.targetMessageId);
+          const message: CrossgramMessage = original
+            ? { ...original, content: { ...original.content, parts: [
+                { type: "text", text: item.mutation.text },
+                ...original.content.parts.filter((part) => part.type === "media"),
+              ] } }
+            : this.messageFromEvent({ ...item.event, event_id: item.mutation.targetMessageId }, item.mutation.text, []);
+          const event: CrossgramEvent = { type: "message-edit", eventId: item.event.event_id, message, conversation };
+          events.push(event);
+          for (const subscriber of this.subscribers) await subscriber(event);
+          if (this.subscribers.size) await this.client.acknowledgeDeliveries([item.event.event_id]);
+          this.remember(message);
+          continue;
+        }
         if (item.mutation?.type === "message-delete") {
           const conversation = this.conversation(this.roomsById.get(item.event.room_id));
           const event: CrossgramEvent = { type: "message-delete", eventId: item.event.event_id, conversation,
@@ -232,6 +250,22 @@ export class EdgeChatCrossgramPlatform {
     }
   }
 
+  async editMessage(_session: unknown, target: { conversationId: string; messageId: string; targetId: string }, content: CrossgramMessageInput): Promise<CrossgramMessage> {
+    const original = this.findMessage(target.conversationId, target.messageId);
+    if (!original || target.targetId !== target.messageId) throw new Error("EdgeChat edit target is not available in the gateway projection");
+    const textParts = content.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text");
+    if (content.parts.some((part) => part.type !== "text") || textParts.length !== 1) throw new Error("EdgeChat currently edits message text only");
+    const text = textParts[0]!.text.trim();
+    if (!text) throw new Error("Edited message is empty");
+    await this.client.editMessage(target.conversationId as RoomId, target.messageId as MessageId, text);
+    const updated = { ...original, content: { ...original.content, parts: [
+      { type: "text" as const, text },
+      ...original.content.parts.filter((part) => part.type === "media"),
+    ] } };
+    this.remember(updated);
+    return updated;
+  }
+
   async *downloadMedia(_session: unknown, media: CrossgramMedia, options: { offset?: number; limit?: number; signal?: AbortSignal } = {}): AsyncIterable<Uint8Array> {
     const attachment = media.locator?.edgechatAttachment;
     if (!attachment || attachment.id !== media.id) throw new Error("EdgeChat media locator is invalid");
@@ -286,10 +320,15 @@ export class EdgeChatCrossgramPlatform {
 
   private remember(message: CrossgramMessage): void {
     const messages = this.messages.get(message.conversationId) ?? [];
-    if (!messages.some((candidate) => candidate.id === message.id)) {
-      messages.push(message); messages.sort((left, right) => left.nativeOrderKey.localeCompare(right.nativeOrderKey));
-      this.messages.set(message.conversationId, messages);
-    }
+    const index = messages.findIndex((candidate) => candidate.id === message.id);
+    if (index >= 0) messages[index] = message;
+    else messages.push(message);
+    messages.sort((left, right) => left.nativeOrderKey.localeCompare(right.nativeOrderKey));
+    this.messages.set(message.conversationId, messages);
+  }
+
+  private findMessage(conversationId: string, messageId: string): CrossgramMessage | undefined {
+    return this.messages.get(conversationId)?.find((message) => message.id === messageId);
   }
 
   private forget(conversationId: string, messageId: string): void {
