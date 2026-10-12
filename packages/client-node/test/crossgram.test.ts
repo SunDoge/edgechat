@@ -35,6 +35,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 5 })),
       setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 6 })),
       reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
+      markRead: vi.fn(async () => ({ event_id: "$read1234:example.com" as const, seq: 7 })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 3_000 });
@@ -71,6 +72,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 4 })),
       setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 5 })),
       reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
+      markRead: vi.fn(async () => ({ event_id: "$read1234:example.com" as const, seq: 6 })),
       downloadAttachment: vi.fn(async () => bytes.buffer),
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 4_000 });
@@ -106,6 +108,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 5 })),
       setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 6 })),
       reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
+      markRead: vi.fn(async () => ({ event_id: "$read1234:example.com" as const, seq: 7 })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     let reportPollError!: (error: unknown) => void;
@@ -145,6 +148,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 4 })),
       setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 5 })),
       reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
+      markRead: vi.fn(async () => ({ event_id: "$read1234:example.com" as const, seq: 6 })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client);
@@ -184,6 +188,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       editMessage: vi.fn(async () => ({ event_id: "$edit3456:example.com" as const, seq: 3 })),
       setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 3 })),
       reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
+      markRead: vi.fn(async () => ({ event_id: "$read1234:example.com" as const, seq: 4 })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client);
@@ -214,6 +219,7 @@ describe("EdgeChatCrossgramPlatform", () => {
       editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 3 })),
       setMessageReaction,
       reactionContext: vi.fn(() => context),
+      markRead: vi.fn(async () => ({ event_id: "$read1234:example.com" as const, seq: 4 })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client);
@@ -226,6 +232,34 @@ describe("EdgeChatCrossgramPlatform", () => {
     }, ["👍"]);
     expect(setMessageReaction).toHaveBeenCalledWith(room.room_id, targetMessageId, "👍");
     expect(updated).toEqual(context);
+    platform.close();
+  });
+
+  it("maps same-account read boundaries without treating peer receipts as inbox reads", async () => {
+    const targetMessageId = "$target123:example.com" as const;
+    const readEvent = { event_id: "$read1234:example.com", room_id: room.room_id, sender: "@alice:example.com", device_id: "alice-phone",
+      seq: 2, type: "receipt.read", created_at: 7_000, ciphertext: "ciphertext", metadata: { mls_epoch: 1 }, signature: "signature" } as RoomEvent;
+    const markRead = vi.fn(async () => ({ event_id: "$read5678:example.com" as const, seq: 3 }));
+    let pulled = false;
+    const client: EdgeChatGatewayClient = {
+      userId: "@alice:example.com",
+      rooms: vi.fn(async () => [room]),
+      pull: vi.fn(async () => pulled ? [] : (pulled = true, [{ event: readEvent, payload: {}, text: "", attachments: [],
+        mutation: { type: "read" as const, upToMessageId: targetMessageId, readAt: 7_000 } }])),
+      acknowledgeDeliveries: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => ({ event_id: "$text1234:example.com" as const, seq: 3 })),
+      sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
+      deleteMessage: vi.fn(async () => ({ event_id: "$delete12:example.com" as const, seq: 3 })),
+      editMessage: vi.fn(async () => ({ event_id: "$edit1234:example.com" as const, seq: 3 })),
+      setMessageReaction: vi.fn(async () => ({ event_id: "$react123:example.com" as const, seq: 3 })),
+      reactionContext: vi.fn(() => ({ available: [], reactions: [], maxSelected: 1 as const })),
+      markRead,
+      downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
+    };
+    const platform = new EdgeChatCrossgramPlatform(client);
+    await expect(platform.pollOnce()).resolves.toEqual([{ type: "read", conversationId: room.room_id, upToMessageId: targetMessageId }]);
+    await platform.markRead({}, { conversationId: room.room_id, messageId: targetMessageId });
+    expect(markRead).toHaveBeenCalledWith(room.room_id, targetMessageId);
     platform.close();
   });
 });

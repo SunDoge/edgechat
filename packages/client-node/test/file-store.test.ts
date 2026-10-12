@@ -14,7 +14,7 @@ describe("JsonFileNodeClientStore", () => {
       const state = { version: 1, user_id: "@alice:example.com", device_id: "gateway", access_token: "secret", mls_state: "state",
         base_url: "https://chat.example.com", display_name: "Alice", account_credential: "account", device_credential: "device",
         signing_private_key: {}, signing_public_key: {}, encryption_private_key: {}, encryption_public_key: {}, sync_cursor: 0,
-        room_sequences: {}, outbox: [], pending_deliveries: [], reaction_selections: {} } satisfies NodeClientState;
+        room_sequences: {}, outbox: [], pending_deliveries: [], reaction_selections: {}, recent_message_ids: {} } satisfies NodeClientState;
       await store.save(state);
       expect(await store.load()).toEqual(state);
       if (process.platform !== "win32") expect((await stat(store.path)).mode & 0o777).toBe(0o600);

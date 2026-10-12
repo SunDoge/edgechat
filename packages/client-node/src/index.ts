@@ -6,6 +6,7 @@ import {
   isMessageDeletePayload,
   isMessageEditPayload,
   isMessageReactionPayload,
+  isReadReceiptPayload,
   isRoomEventEnvelope,
   MAX_ATTACHMENT_PLAINTEXT_BYTES,
   MAX_MESSAGE_ATTACHMENTS,
@@ -15,6 +16,7 @@ import {
   type MessageDeletePayload,
   type MessageEditPayload,
   type MessageReactionPayload,
+  type ReadReceiptPayload,
   type RoomEvent,
   type RoomId,
   type UserId,
@@ -61,6 +63,7 @@ export type NodeClientState = {
   outbox: ClientEvent[];
   pending_deliveries: DecryptedNodeMessage[];
   reaction_selections: Record<string, Record<string, string>>;
+  recent_message_ids: Record<string, Array<{ seq: number; message_id: MessageId; sender: UserId }>>;
 };
 
 export interface NodeClientStateStore {
@@ -92,7 +95,8 @@ export type DecryptedNodeMessage = {
 export type NodeMessageMutation =
   | { type: "message-delete"; targetMessageId: MessageId; deletedAt: number }
   | { type: "message-edit"; targetMessageId: MessageId; text: string; editedAt: number }
-  | { type: "message-reaction"; targetMessageId: MessageId; reaction: string | null; actorUserId: UserId; updatedAt: number };
+  | { type: "message-reaction"; targetMessageId: MessageId; reaction: string | null; actorUserId: UserId; updatedAt: number }
+  | { type: "read"; upToMessageId: MessageId; readAt: number };
 
 export type NodeReactionContext = {
   available: Array<{ key: string; title: string; presentation: { type: "emoji"; emoticon: string } }>;
@@ -208,6 +212,7 @@ export class NodeEdgeChatClient {
         outbox: [],
         pending_deliveries: [],
         reaction_selections: {},
+        recent_message_ids: {},
       };
       const client = new NodeEdgeChatClient(state, signing.privateKey, mls, api, options.store);
       await client.persist();
@@ -224,7 +229,7 @@ export class NodeEdgeChatClient {
     const mls = NodeOpenMlsMessagingCore.create(state.device_id, fromBase64Url(state.mls_state));
     const api = new ApiClient(state.base_url, state.access_token, nodeRoute(options.fetch ?? globalThis.fetch));
     return new NodeEdgeChatClient({ ...structuredClone(state), pending_deliveries: structuredClone(state.pending_deliveries ?? []),
-      reaction_selections: structuredClone(state.reaction_selections ?? {}) }, signingKey, mls, api, options.store);
+      reaction_selections: structuredClone(state.reaction_selections ?? {}), recent_message_ids: structuredClone(state.recent_message_ids ?? {}) }, signingKey, mls, api, options.store);
   }
 
   exportState(): NodeClientState { return structuredClone(this.state); }
@@ -378,6 +383,17 @@ export class NodeEdgeChatClient {
     };
   }
 
+  markRead(roomId: RoomId, upToMessageId: MessageId): Promise<{ event_id: MessageId; seq: number }> {
+    return this.exclusive(async () => {
+      if (!isNamespacedMessageId(upToMessageId)) throw new RangeError("Read target is invalid");
+      const target = this.state.recent_message_ids[roomId]?.find((item) => item.message_id === upToMessageId);
+      if (!target) throw new NodeClientError("Read target is outside the gateway's recent message index", "read_target_unavailable");
+      const readAt = Date.now();
+      const payload: ReadReceiptPayload = { version: 1, kind: "receipt.read", room_id: roomId, up_to_seq: target.seq, read_at: readAt };
+      return this.queueMessageLocked(roomId, "receipt.read", () => payload as unknown as Record<string, unknown>, {}, undefined, readAt);
+    });
+  }
+
   async downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer> {
     const normalized = normalizeAttachment(attachment);
     if (!normalized) throw new NodeClientError("Attachment metadata is invalid", "invalid_attachment_metadata");
@@ -477,9 +493,13 @@ export class NodeEdgeChatClient {
             })
             : [];
           const replyToId = messageReplyTarget(payload, event.room_id);
-          const mutation = messageMutation(payload, event);
+          const mutation = messageMutation(payload, event, this.state.user_id,
+            (seq) => this.state.recent_message_ids[event.room_id]?.find((item) => item.seq === seq)?.message_id);
           if (mutation?.type === "message-reaction") this.applyReaction(event.room_id, mutation.targetMessageId, mutation.actorUserId, mutation.reaction);
           const message = { event, payload, text, attachments, ...(replyToId ? { replyToId } : {}), ...(mutation ? { mutation } : {}) };
+          if (event.type === "message.text" || event.type === "message.file" || event.type === "message.contact") {
+            this.rememberMessageId(event.room_id, event.seq, event.event_id as MessageId, event.sender);
+          }
           messages.push(message);
           this.state.pending_deliveries.push(message);
         }
@@ -517,7 +537,7 @@ export class NodeEdgeChatClient {
 
   private async queueMessageLocked(
     roomId: RoomId,
-    type: "message.text" | "message.file" | "message.delete" | "message.edit" | "message.reaction",
+    type: "message.text" | "message.file" | "message.delete" | "message.edit" | "message.reaction" | "receipt.read",
     createPayload: (eventId: MessageId) => Record<string, unknown>,
     metadata: Record<string, unknown>,
     afterQueued?: () => void,
@@ -543,6 +563,10 @@ export class NodeEdgeChatClient {
     const delivered = await this.flushPendingLocked();
     const result = delivered.at(-1);
     if (!result) throw new NodeClientError("Message was not delivered", "delivery_failed");
+    if (type === "message.text" || type === "message.file") {
+      this.rememberMessageId(roomId, result.seq, result.event_id, this.state.user_id);
+      await this.persist();
+    }
     return result;
   }
 
@@ -554,6 +578,15 @@ export class NodeEdgeChatClient {
     else selections[userId] = reaction;
     if (Object.keys(selections).length) this.state.reaction_selections[key] = selections;
     else delete this.state.reaction_selections[key];
+  }
+  private rememberMessageId(roomId: RoomId, seq: number, messageId: MessageId, sender: UserId): void {
+    const items = this.state.recent_message_ids[roomId] ?? [];
+    const previous = items.findIndex((item) => item.message_id === messageId || item.seq === seq);
+    if (previous >= 0) items.splice(previous, 1);
+    items.push({ seq, message_id: messageId, sender });
+    items.sort((left, right) => left.seq - right.seq);
+    if (items.length > 2_048) items.splice(0, items.length - 2_048);
+    this.state.recent_message_ids[roomId] = items;
   }
   private persist(): Promise<void> { return this.store?.save(this.exportState()) ?? Promise.resolve(); }
 
@@ -624,7 +657,8 @@ function messageReplyTarget(payload: Record<string, unknown>, roomId: RoomId): M
   return target.message_id;
 }
 
-function messageMutation(payload: Record<string, unknown>, event: RoomEvent): NodeMessageMutation | undefined {
+function messageMutation(payload: Record<string, unknown>, event: RoomEvent, ownUserId: UserId,
+  messageIdAtSeq: (seq: number) => MessageId | undefined): NodeMessageMutation | undefined {
   if (event.type === "message.delete") {
     if (!isMessageDeletePayload(payload) || payload.target.room_id !== event.room_id
       || event.metadata.target_event_id !== payload.target.message_id) {
@@ -646,6 +680,14 @@ function messageMutation(payload: Record<string, unknown>, event: RoomEvent): No
     }
     return { type: "message-reaction", targetMessageId: payload.target.message_id, reaction: payload.reaction,
       actorUserId: event.sender, updatedAt: payload.updated_at };
+  }
+  if (event.type === "receipt.read") {
+    if (!isReadReceiptPayload(payload) || payload.room_id !== event.room_id) {
+      throw new NodeClientError("Decrypted read receipt is invalid", "invalid_read_receipt");
+    }
+    if (event.sender !== ownUserId) return undefined;
+    const upToMessageId = messageIdAtSeq(payload.up_to_seq);
+    return upToMessageId ? { type: "read", upToMessageId, readAt: payload.read_at } : undefined;
   }
   return undefined;
 }

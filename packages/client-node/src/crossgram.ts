@@ -40,7 +40,8 @@ export type CrossgramEvent =
   | { type: "message-edit"; eventId: string; message: CrossgramMessage; conversation: CrossgramConversation }
   | { type: "message-delete"; eventId: string; conversation: CrossgramConversation; messageIds: string[]; timestamp: number }
   | { type: "message-reactions"; eventId: string; conversation: CrossgramConversation; target: CrossgramMessageTarget;
-      context: NodeReactionContext; timestamp: number };
+      context: NodeReactionContext; timestamp: number }
+  | { type: "read"; conversationId: string; upToMessageId: string };
 
 export type CrossgramMessageTarget = { conversationId: string; messageId: string; targetId: string; nativeSequence?: string };
 
@@ -55,6 +56,7 @@ export interface EdgeChatGatewayClient {
   editMessage(roomId: RoomId, targetMessageId: MessageId, text: string): Promise<{ event_id: MessageId; seq: number }>;
   setMessageReaction(roomId: RoomId, targetMessageId: MessageId, reaction: string | null): Promise<{ event_id: MessageId; seq: number }>;
   reactionContext(roomId: RoomId, targetMessageId: MessageId): NodeReactionContext;
+  markRead(roomId: RoomId, upToMessageId: MessageId): Promise<{ event_id: MessageId; seq: number }>;
   downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
 }
 
@@ -81,6 +83,7 @@ export class EdgeChatCrossgramPlatform {
       forward: { mode: "unsupported", preservesAuthor: false },
     },
     reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 1 },
+    readState: { markRead: true, events: true },
   } as const;
 
   private readonly pollIntervalMs: number;
@@ -127,6 +130,13 @@ export class EdgeChatCrossgramPlatform {
       await this.refreshRooms();
       const incoming = await this.client.pull();
       for (const item of incoming) {
+        if (item.mutation?.type === "read") {
+          const event: CrossgramEvent = { type: "read", conversationId: item.event.room_id, upToMessageId: item.mutation.upToMessageId };
+          events.push(event);
+          for (const subscriber of this.subscribers) await subscriber(event);
+          if (this.subscribers.size) await this.client.acknowledgeDeliveries([item.event.event_id]);
+          continue;
+        }
         if (item.mutation?.type === "message-reaction") {
           const conversation = this.conversation(this.roomsById.get(item.event.room_id));
           const target = { conversationId: item.event.room_id, messageId: item.mutation.targetMessageId,
@@ -302,6 +312,11 @@ export class EdgeChatCrossgramPlatform {
   async getMessageReactions(_session: unknown, target: CrossgramMessageTarget): Promise<NodeReactionContext> {
     const ids = validateReactionTarget(target);
     return this.client.reactionContext(ids.roomId, ids.messageId);
+  }
+
+  async markRead(_session: unknown, target: { conversationId: string; messageId: string }): Promise<void> {
+    if (!isNamespacedMessageId(target.messageId)) throw new Error("EdgeChat read target is invalid");
+    await this.client.markRead(target.conversationId as RoomId, target.messageId);
   }
 
   async *downloadMedia(_session: unknown, media: CrossgramMedia, options: { offset?: number; limit?: number; signal?: AbortSignal } = {}): AsyncIterable<Uint8Array> {

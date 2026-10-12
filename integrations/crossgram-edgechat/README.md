@@ -58,6 +58,10 @@ message. An edit request for an unavailable target snapshot fails closed.
 Reaction selections are part of the durable gateway state because CrossGram
 requires aggregate counts while EdgeChat transports per-user final state.
 
+The state file also keeps a bounded recent sequence-to-message-ID index for
+encrypted read receipts. This is metadata held by the trusted gateway endpoint,
+not by the Worker.
+
 This portal layout is intended for testing and personal self-hosting. A future
 published package should bundle the Node client and native OpenMLS Wasm instead
 of importing source from a neighboring checkout.

@@ -36,7 +36,7 @@ supports:
 - a structural CrossGram `IMPlatform` adapter for dialogs, text/media send,
   authenticated media download, encrypted reply references, own-message
   text editing, retraction, final-state reactions, history, users and polling
-  subscriptions.
+  subscriptions, and same-account read-state synchronization.
 
 Image, voice and file are one encrypted attachment primitive. MIME type,
 dimensions and duration control presentation; the server never interprets
@@ -89,6 +89,13 @@ success or accidentally removing media.
 Reaction events carry one user's final selection, not an increment/decrement.
 The gateway persists those selections by user and rebuilds aggregate counts
 after restart before exposing CrossGram's reaction context.
+
+Read receipts remain encrypted. A bounded per-room index of the newest 2,048
+message sequence/ID pairs lets the gateway translate CrossGram's opaque message
+target into EdgeChat's monotonic sequence and recover the reverse mapping after
+restart. Only receipts from another device of the gateway's own EdgeChat user
+become CrossGram incoming-read events; a peer reading our outgoing message is
+not incorrectly projected as the current account reading its inbox.
 
 ## Server smoke test
 
@@ -152,7 +159,8 @@ schema: the gateway remains a replaceable client endpoint.
 
 - validate the portal wrapper against a pinned CrossGram checkout in CI;
 - translate EdgeChat message requests into CrossGram request objects;
-- map read receipts;
+- add outgoing-read-status projection if CrossGram gains a distinct contract
+  for peer receipts;
 - add chunk-addressable encryption for efficient large-media range reads;
 - replace one-second polling with WebSocket wakeups while retaining `/sync` as
   the durable delivery path.

@@ -275,6 +275,28 @@ describe("NodeEdgeChatClient", () => {
     alice.close(); restored.close();
   });
 
+  it("uses a bounded message index to create encrypted read receipts", async () => {
+    const server = testServer();
+    let bobState: NodeClientState | undefined;
+    const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
+    const bob = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Bob", fetch: server.fetcher,
+      store: { async save(state) { bobState = state; } } });
+    const roomId = await alice.createRoom([bob.userId]);
+    const original = await alice.sendText(roomId, "read me");
+    await bob.pull();
+    expect(bobState?.recent_message_ids[roomId]).toEqual([
+      { seq: 1, message_id: original.event_id, sender: alice.userId },
+    ]);
+
+    const receipt = await bob.markRead(roomId, original.event_id);
+    const [received] = await alice.pull();
+    expect(received).toMatchObject({ event: { event_id: receipt.event_id, type: "receipt.read", seq: 2 },
+      payload: { version: 1, kind: "receipt.read", room_id: roomId, up_to_seq: 1 } });
+    expect(received?.mutation).toBeUndefined();
+    await expect(bob.markRead(roomId, "$missing12:example.com")).rejects.toMatchObject({ code: "read_target_unavailable" });
+    alice.close(); bob.close();
+  });
+
   it("encrypts attachments before upload and authenticates them after durable recovery", async () => {
     const server = testServer();
     const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
