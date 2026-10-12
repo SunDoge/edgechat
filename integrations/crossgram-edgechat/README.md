@@ -43,6 +43,10 @@ account credentials, access tokens, group state, and decrypted deliveries that
 CrossGram has not committed yet. Revoke the device from an EdgeChat client
 before intentionally discarding it.
 
+Telegram replies map to an EdgeChat `relation` inside the MLS-encrypted message
+payload. The Worker sees neither the target message ID nor that the message is
+a reply.
+
 This portal layout is intended for testing and personal self-hosting. A future
 published package should bundle the Node client and native OpenMLS Wasm instead
 of importing source from a neighboring checkout.

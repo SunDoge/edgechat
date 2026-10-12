@@ -2,6 +2,7 @@ import { NodeOpenMlsMessagingCore } from "@edgechat/messaging-core/node";
 import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import {
   canonicalEventBytes,
+  isNamespacedMessageId,
   isRoomEventEnvelope,
   MAX_ATTACHMENT_PLAINTEXT_BYTES,
   MAX_MESSAGE_ATTACHMENTS,
@@ -77,6 +78,11 @@ export type DecryptedNodeMessage = {
   payload: Record<string, unknown>;
   text: string;
   attachments: NodeAttachment[];
+  replyToId?: MessageId;
+};
+
+export type NodeMessageOptions = {
+  replyToId?: MessageId;
 };
 
 export type NodeAttachment = {
@@ -101,7 +107,7 @@ export type NodeAttachmentInput = {
 };
 
 export type SendNodeMessageResult = {
-  event_id: string;
+  event_id: MessageId;
   seq: number;
   attachments: NodeAttachment[];
 };
@@ -240,17 +246,19 @@ export class NodeEdgeChatClient {
     });
   }
 
-  sendText(roomId: RoomId, text: string): Promise<{ event_id: string; seq: number }> {
+  sendText(roomId: RoomId, text: string, options: NodeMessageOptions = {}): Promise<{ event_id: MessageId; seq: number }> {
     return this.exclusive(async () => {
       const content = text.trim();
       if (!content || content.length > 16_000) throw new RangeError("Text must contain 1-16000 characters");
+      const relation = messageRelation(roomId, options.replyToId);
       return this.queueMessageLocked(roomId, "message.text", (eventId) => ({
         version: 2, message_id: eventId, parts: [{ part_id: crypto.randomUUID(), kind: "text", text: content }],
+        ...(relation ? { relation } : {}),
       }), {});
     });
   }
 
-  sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text = ""): Promise<SendNodeMessageResult> {
+  sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text = "", options: NodeMessageOptions = {}): Promise<SendNodeMessageResult> {
     return this.exclusive(async () => {
       const content = text.trim();
       if (content.length > 16_000) throw new RangeError("Text must contain at most 16000 characters");
@@ -258,6 +266,7 @@ export class NodeEdgeChatClient {
       const normalized = inputs.map(normalizeAttachmentInput);
       const total = normalized.reduce((sum, input) => sum + input.bytes.byteLength, 0);
       if (total > MAX_MESSAGE_ATTACHMENT_PLAINTEXT_BYTES) throw new RangeError("Message attachments exceed the plaintext size limit");
+      const relation = messageRelation(roomId, options.replyToId);
       const uploaded: NodeAttachment[] = [];
       let queued = false;
       try {
@@ -274,6 +283,7 @@ export class NodeEdgeChatClient {
             ...(content ? [{ part_id: crypto.randomUUID(), kind: "text", text: content }] : []),
             ...uploaded.map((attachment) => ({ part_id: crypto.randomUUID(), kind: "attachment", attachment })),
           ],
+          ...(relation ? { relation } : {}),
         }), uploaded.length === 1 ? { attachment_id: uploaded[0]!.id } : { attachment_ids: uploaded.map((item) => item.id) }, () => { queued = true; });
         return { ...result, attachments: uploaded };
       } catch (error) {
@@ -297,7 +307,7 @@ export class NodeEdgeChatClient {
     }
   }
 
-  flushPending(): Promise<Array<{ event_id: string; seq: number }>> {
+  flushPending(): Promise<Array<{ event_id: MessageId; seq: number }>> {
     return this.exclusive(async () => this.flushPendingLocked());
   }
 
@@ -381,7 +391,8 @@ export class NodeEdgeChatClient {
               return [attachment];
             })
             : [];
-          const message = { event, payload, text, attachments };
+          const replyToId = messageReplyTarget(payload, event.room_id);
+          const message = { event, payload, text, attachments, ...(replyToId ? { replyToId } : {}) };
           messages.push(message);
           this.state.pending_deliveries.push(message);
         }
@@ -404,12 +415,12 @@ export class NodeEdgeChatClient {
     if (!valid) throw new NodeClientError("Event signature is invalid", "invalid_signature");
   }
 
-  private async flushPendingLocked(): Promise<Array<{ event_id: string; seq: number }>> {
-    const delivered: Array<{ event_id: string; seq: number }> = [];
+  private async flushPendingLocked(): Promise<Array<{ event_id: MessageId; seq: number }>> {
+    const delivered: Array<{ event_id: MessageId; seq: number }> = [];
     while (this.state.outbox.length) {
       const event = this.state.outbox[0];
       const result = await this.api.sendEvent(event.room_id, event);
-      delivered.push({ event_id: result.event.event_id, seq: result.event.seq });
+      delivered.push({ event_id: result.event.event_id as MessageId, seq: result.event.seq });
       this.state.room_sequences[event.room_id] = Math.max(this.state.room_sequences[event.room_id] ?? 0, result.event.seq);
       this.state.outbox.shift();
       await this.persist();
@@ -423,7 +434,7 @@ export class NodeEdgeChatClient {
     createPayload: (eventId: MessageId) => Record<string, unknown>,
     metadata: Record<string, unknown>,
     afterQueued?: () => void,
-  ): Promise<{ event_id: string; seq: number }> {
+  ): Promise<{ event_id: MessageId; seq: number }> {
     await this.flushPendingLocked();
     if (!this.mls.hasGroup(roomId)) await this.refreshRoomsLocked();
     if (!this.mls.hasGroup(roomId)) throw new NodeClientError("Room MLS state is unavailable", "room_state_unavailable");
@@ -493,4 +504,26 @@ function normalizeAttachment(value: unknown): NodeAttachment | null {
   return { id: attachment.id, name, type, size: Number(attachment.size), key: attachment.key, nonce: attachment.nonce,
     ...(hasWidth ? { width: Number(attachment.width), height: Number(attachment.height) } : {}),
     ...(attachment.duration_ms ? { duration_ms: Number(attachment.duration_ms) } : {}) };
+}
+
+function messageRelation(roomId: RoomId, replyToId?: MessageId): Record<string, unknown> | undefined {
+  if (replyToId === undefined) return undefined;
+  if (!isNamespacedMessageId(replyToId)) throw new RangeError("Reply target message ID is invalid");
+  return { type: "reply", target: { kind: "message", message_id: replyToId, room_id: roomId } };
+}
+
+function messageReplyTarget(payload: Record<string, unknown>, roomId: RoomId): MessageId | undefined {
+  if (payload.relation === undefined) return undefined;
+  if (!payload.relation || typeof payload.relation !== "object" || Array.isArray(payload.relation)) {
+    throw new NodeClientError("Decrypted message relation is invalid", "invalid_message_relation");
+  }
+  const relation = payload.relation as { type?: unknown; target?: unknown };
+  if (relation.type !== "reply" || !relation.target || typeof relation.target !== "object" || Array.isArray(relation.target)) {
+    throw new NodeClientError("Decrypted message relation is invalid", "invalid_message_relation");
+  }
+  const target = relation.target as { kind?: unknown; message_id?: unknown; room_id?: unknown };
+  if (target.kind !== "message" || typeof target.message_id !== "string" || !isNamespacedMessageId(target.message_id) || target.room_id !== roomId) {
+    throw new NodeClientError("Decrypted reply target is invalid", "invalid_message_relation");
+  }
+  return target.message_id;
 }

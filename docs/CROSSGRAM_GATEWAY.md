@@ -34,7 +34,8 @@ supports:
 - event signature and authenticated MLS sender verification;
 - atomic owner-only JSON state persistence;
 - a structural CrossGram `IMPlatform` adapter for dialogs, text/media send,
-  authenticated media download, history, users and polling subscriptions.
+  authenticated media download, encrypted reply references, history, users and
+  polling subscriptions.
 
 Image, voice and file are one encrypted attachment primitive. MIME type,
 dimensions and duration control presentation; the server never interprets
@@ -136,7 +137,7 @@ schema: the gateway remains a replaceable client endpoint.
 
 - validate the portal wrapper against a pinned CrossGram checkout in CI;
 - translate EdgeChat message requests into CrossGram request objects;
-- map read receipts and message references;
+- map read receipts, edits, deletion and reactions;
 - add chunk-addressable encryption for efficient large-media range reads;
 - replace one-second polling with WebSocket wakeups while retaining `/sync` as
   the durable delivery path.

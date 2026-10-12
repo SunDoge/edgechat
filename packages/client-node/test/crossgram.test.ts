@@ -21,27 +21,28 @@ const room = {
 describe("EdgeChatCrossgramPlatform", () => {
   it("maps rooms and decrypted messages to CrossGram's platform shape", async () => {
     let pulled = false;
-    const event = { event_id: "$one:example.com", room_id: room.room_id, sender: "@bob:example.com", device_id: "bob-phone",
+    const event = { event_id: "$one12345:example.com", room_id: room.room_id, sender: "@bob:example.com", device_id: "bob-phone",
       seq: 1, type: "message.text", created_at: 2_000, ciphertext: "ciphertext", metadata: { mls_epoch: 1 }, signature: "signature" } as RoomEvent;
+    const replyToId = "$target123:example.com" as const;
     const client: EdgeChatGatewayClient = {
       userId: "@alice:example.com",
       rooms: vi.fn(async () => [room]),
-      pull: vi.fn(async () => pulled ? [] : (pulled = true, [{ event, payload: {}, text: "hello from Bob", attachments: [] }])),
+      pull: vi.fn(async () => pulled ? [] : (pulled = true, [{ event, payload: {}, text: "hello from Bob", attachments: [], replyToId }])),
       acknowledgeDeliveries: vi.fn(async () => undefined),
-      sendText: vi.fn(async () => ({ event_id: "$two:example.com", seq: 2 })),
-      sendAttachments: vi.fn(async () => ({ event_id: "$media:example.com", seq: 3, attachments: [] })),
+      sendText: vi.fn(async () => ({ event_id: "$two12345:example.com" as const, seq: 2 })),
+      sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     const platform = new EdgeChatCrossgramPlatform(client, { now: () => 3_000 });
     expect((await platform.getDialogs()).dialogs[0].conversation).toMatchObject({ id: room.room_id, title: "Bob", kind: "direct" });
     const incoming = await platform.pollOnce();
-    expect(incoming[0].message).toMatchObject({ id: "$one:example.com", senderId: "@bob:example.com", outgoing: false,
-      content: { parts: [{ type: "text", text: "hello from Bob" }] } });
-    const sent = await platform.sendMessage({}, { id: room.room_id }, { parts: [{ type: "text", text: "reply" }] });
-    expect(client.sendText).toHaveBeenCalledWith(room.room_id, "reply");
-    expect(sent).toMatchObject({ id: "$two:example.com", outgoing: true, nativeOrderKey: "0000000000000002" });
+    expect(incoming[0].message).toMatchObject({ id: "$one12345:example.com", senderId: "@bob:example.com", outgoing: false,
+      content: { parts: [{ type: "text", text: "hello from Bob" }] }, replyToId });
+    const sent = await platform.sendMessage({}, { id: room.room_id }, { parts: [{ type: "text", text: "reply" }], replyToId: event.event_id });
+    expect(client.sendText).toHaveBeenCalledWith(room.room_id, "reply", { replyToId: event.event_id });
+    expect(sent).toMatchObject({ id: "$two12345:example.com", outgoing: true, nativeOrderKey: "0000000000000002", replyToId: event.event_id });
     const history = await platform.getHistory({}, { id: room.room_id });
-    expect(history.messages.map((message) => message.id)).toEqual(["$two:example.com", "$one:example.com"]);
+    expect(history.messages.map((message) => message.id)).toEqual(["$two12345:example.com", "$one12345:example.com"]);
     platform.close();
   });
 
@@ -49,12 +50,12 @@ describe("EdgeChatCrossgramPlatform", () => {
     const bytes = new TextEncoder().encode("media bytes");
     const attachment = { id: "A".repeat(32), name: "note.ogg", type: "audio/ogg", size: bytes.length,
       key: "K".repeat(43), nonce: "N".repeat(16), duration_ms: 2_500 };
-    const sendAttachments = vi.fn(async () => ({ event_id: "$media:example.com", seq: 2, attachments: [attachment] }));
+    const sendAttachments = vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 2, attachments: [attachment] }));
     const client: EdgeChatGatewayClient = {
       userId: "@alice:example.com",
       rooms: vi.fn(async () => [room]), pull: vi.fn(async () => []),
       acknowledgeDeliveries: vi.fn(async () => undefined),
-      sendText: vi.fn(async () => ({ event_id: "$text:example.com", seq: 1 })),
+      sendText: vi.fn(async () => ({ event_id: "$text1234:example.com" as const, seq: 1 })),
       sendAttachments,
       downloadAttachment: vi.fn(async () => bytes.buffer),
     };
@@ -85,8 +86,8 @@ describe("EdgeChatCrossgramPlatform", () => {
       rooms: vi.fn(async () => [room]),
       pull: vi.fn(async () => acknowledged ? [] : [{ event, payload: {}, text: "retry me", attachments: [] }]),
       acknowledgeDeliveries,
-      sendText: vi.fn(async () => ({ event_id: "$text:example.com", seq: 2 })),
-      sendAttachments: vi.fn(async () => ({ event_id: "$media:example.com", seq: 3, attachments: [] })),
+      sendText: vi.fn(async () => ({ event_id: "$text1234:example.com" as const, seq: 2 })),
+      sendAttachments: vi.fn(async () => ({ event_id: "$media123:example.com" as const, seq: 3, attachments: [] })),
       downloadAttachment: vi.fn(async () => new ArrayBuffer(0)),
     };
     let reportPollError!: (error: unknown) => void;

@@ -1,4 +1,4 @@
-import type { RoomEvent, RoomId, UserId } from "@edgechat/protocol";
+import { isNamespacedMessageId, type MessageId, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
 import type { ServerRoom } from "@edgechat/sync";
 import type { DecryptedNodeMessage, NodeAttachment, NodeAttachmentInput, NodeEdgeChatClient, SendNodeMessageResult } from "./index.js";
 
@@ -26,6 +26,7 @@ export type CrossgramMessage = {
   timestamp: number;
   nativeOrderKey: string;
   outgoing: boolean;
+  replyToId?: string;
   metadata: Record<string, string | number | boolean | null>;
 };
 export type CrossgramEvent = { type: "message"; message: CrossgramMessage; conversation: CrossgramConversation };
@@ -33,15 +34,15 @@ export type CrossgramMediaSource = { size?: number; stream(options?: { signal?: 
 export type CrossgramMessageInput = { parts: Array<
   | { type: "text"; text: string }
   | { type: "media"; media: { kind: "image" | "file"; name?: string; mimeType?: string; size?: number; width?: number; height?: number; duration?: number; voice?: boolean; source: CrossgramMediaSource } }
-> };
+>; replyToId?: string };
 
 export interface EdgeChatGatewayClient {
   readonly userId: UserId;
   rooms(): Promise<ServerRoom[]>;
   pull(): Promise<DecryptedNodeMessage[]>;
   acknowledgeDeliveries(eventIds: readonly string[]): Promise<void>;
-  sendText(roomId: RoomId, text: string): Promise<{ event_id: string; seq: number }>;
-  sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text?: string): Promise<SendNodeMessageResult>;
+  sendText(roomId: RoomId, text: string, options?: { replyToId?: MessageId }): Promise<{ event_id: MessageId; seq: number }>;
+  sendAttachments(roomId: RoomId, inputs: readonly NodeAttachmentInput[], text?: string, options?: { replyToId?: MessageId }): Promise<SendNodeMessageResult>;
   downloadAttachment(attachment: NodeAttachment): Promise<ArrayBuffer>;
 }
 
@@ -108,7 +109,7 @@ export class EdgeChatCrossgramPlatform {
       await this.refreshRooms();
       const incoming = await this.client.pull();
       for (const item of incoming) {
-        const message = this.messageFromEvent(item.event, item.text, item.attachments);
+        const message = this.messageFromEvent(item.event, item.text, item.attachments, item.replyToId);
         if (!message.content.parts.length) {
           await this.client.acknowledgeDeliveries([item.event.event_id]);
           continue;
@@ -174,7 +175,9 @@ export class EdgeChatCrossgramPlatform {
     await this.refreshRooms();
     const room = this.roomsById.get(conversation.id);
     if (!room) throw new Error(`Unknown EdgeChat room: ${conversation.id}`);
-    let accepted: { event_id: string; seq: number }; let attachments: NodeAttachment[] = [];
+    if (content.replyToId !== undefined && !isNamespacedMessageId(content.replyToId)) throw new Error("EdgeChat reply target is invalid");
+    const options = content.replyToId ? { replyToId: content.replyToId } : undefined;
+    let accepted: { event_id: MessageId; seq: number }; let attachments: NodeAttachment[] = [];
     if (mediaParts.length) {
       const inputs: NodeAttachmentInput[] = [];
       for (const [index, part] of mediaParts.entries()) {
@@ -184,11 +187,15 @@ export class EdgeChatCrossgramPlatform {
           ...(part.media.width && part.media.height ? { width: part.media.width, height: part.media.height } : {}),
           ...(part.media.duration ? { duration_ms: Math.max(1, Math.round(part.media.duration * 1_000)) } : {}) });
       }
-      const result = await this.client.sendAttachments(room.room_id, inputs, text);
+      const result = options
+        ? await this.client.sendAttachments(room.room_id, inputs, text, options)
+        : await this.client.sendAttachments(room.room_id, inputs, text);
       accepted = result; attachments = result.attachments;
-    } else accepted = await this.client.sendText(room.room_id, text);
+    } else accepted = options
+      ? await this.client.sendText(room.room_id, text, options)
+      : await this.client.sendText(room.room_id, text);
     const event = { event_id: accepted.event_id, room_id: room.room_id, sender: this.client.userId, seq: accepted.seq, created_at: this.now() } as RoomEvent;
-    const message = this.messageFromEvent(event, text, attachments);
+    const message = this.messageFromEvent(event, text, attachments, options?.replyToId);
     this.remember(message);
     return message;
   }
@@ -221,7 +228,7 @@ export class EdgeChatCrossgramPlatform {
       selfRole: self?.role === "owner" ? "owner" : "member", metadata: { edgechatRoomId: room.room_id } };
   }
 
-  private messageFromEvent(event: Pick<RoomEvent, "event_id" | "room_id" | "sender" | "seq" | "created_at">, text: string, attachments: readonly NodeAttachment[]): CrossgramMessage {
+  private messageFromEvent(event: Pick<RoomEvent, "event_id" | "room_id" | "sender" | "seq" | "created_at">, text: string, attachments: readonly NodeAttachment[], replyToId?: MessageId): CrossgramMessage {
     const room = this.roomsById.get(event.room_id);
     const sender = room?.members.find((member) => member.user_id === event.sender);
     return {
@@ -236,6 +243,7 @@ export class EdgeChatCrossgramPlatform {
       timestamp: Math.floor(event.created_at / 1_000),
       nativeOrderKey: String(event.seq).padStart(16, "0"),
       outgoing: event.sender === this.client.userId,
+      ...(replyToId ? { replyToId } : {}),
       metadata: { edgechatSeq: event.seq, edgechatEventId: event.event_id },
     };
   }

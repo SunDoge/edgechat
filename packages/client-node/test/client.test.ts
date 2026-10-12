@@ -192,20 +192,42 @@ describe("NodeEdgeChatClient", () => {
     alice.close(); bob.close();
   });
 
+  it("keeps reply references inside the authenticated MLS payload", async () => {
+    const server = testServer();
+    const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
+    const bob = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Bob", fetch: server.fetcher });
+    const roomId = await alice.createRoom([bob.userId]);
+    const original = await alice.sendText(roomId, "original");
+    const [received] = await bob.pull();
+    expect(received?.event.event_id).toBe(original.event_id);
+    await bob.acknowledgeDeliveries([original.event_id]);
+
+    const reply = await bob.sendText(roomId, "encrypted reply", { replyToId: original.event_id });
+    const [recovered] = await alice.pull();
+    expect(recovered).toMatchObject({
+      text: "encrypted reply",
+      replyToId: original.event_id,
+      event: { event_id: reply.event_id, room_id: roomId, seq: 2 },
+      payload: { relation: { type: "reply", target: { kind: "message", message_id: original.event_id, room_id: roomId } } },
+    });
+    alice.close(); bob.close();
+  });
+
   it("encrypts attachments before upload and authenticates them after durable recovery", async () => {
     const server = testServer();
     const alice = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Alice", fetch: server.fetcher });
     const bob = await NodeEdgeChatClient.register({ baseUrl: "https://chat.example.com", displayName: "Bob", fetch: server.fetcher });
     const roomId = await alice.createRoom([bob.userId]);
     const cleartext = new TextEncoder().encode("not visible to the object store");
-    const sent = await alice.sendAttachments(roomId, [{ name: "voice.webm", type: "audio/webm", bytes: cleartext, duration_ms: 1_250 }], "listen");
+    const replyToId = "$target123:example.com" as const;
+    const sent = await alice.sendAttachments(roomId, [{ name: "voice.webm", type: "audio/webm", bytes: cleartext, duration_ms: 1_250 }], "listen", { replyToId });
     expect(sent.seq).toBe(1);
     const stored = server.attachment(sent.attachments[0]!.id)!;
     expect(stored.byteLength).toBe(cleartext.byteLength + 16);
     expect(new TextDecoder().decode(stored)).not.toContain("not visible");
 
     const [message] = await bob.pull();
-    expect(message).toMatchObject({ text: "listen", event: { type: "message.file" },
+    expect(message).toMatchObject({ text: "listen", replyToId, event: { type: "message.file" },
       attachments: [{ name: "voice.webm", type: "audio/webm", size: cleartext.byteLength, duration_ms: 1_250 }] });
     await expect(bob.downloadAttachment(message!.attachments[0]!)).resolves.toEqual(cleartext.buffer);
 
