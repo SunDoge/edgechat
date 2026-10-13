@@ -4,8 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  "placement": { "mode": "smart" },
   "vars": {
-    "SERVER_NAME": "localhost",
+    "SERVER_NAME": "edgechat.groundsaunter.workers.dev",
     "OBJECT_STORE_PROVIDER": "r2",
     "OBJECT_STORE_OPERATION_LOGGING": "false",
     "USER_OBJECT_QUOTA_BYTES": "2147483648",
@@ -14,8 +15,8 @@
     "USER_EVENT_LIMIT": "1000000",
     "ARCHIVE_COMPACTION_ENABLED": "false",
     "EVENT_RECEIPT_KEY_ID": "v1",
-    "VAPID_SUBJECT": "mailto:admin@example.com",
-    "VAPID_PUBLIC_KEY": ""
+    "VAPID_SUBJECT": "mailto:groundsaunter@outlook.com",
+    "VAPID_PUBLIC_KEY": "BJpt5_hyYI1Sw9Y23umidveelUrdPCLViHzwq-xRqTxYjXvTWww9DwfVVoTcnkDa4O_yGgEDmxMXuXLVG6QJsNw"
   },
   "assets": {
     "directory": "../web/dist",
@@ -26,7 +27,7 @@
   "d1_databases": [{
     "binding": "DB",
     "database_name": "edgechat-db",
-    "database_id": "00000000-0000-0000-0000-000000000000",
+    "database_id": "0c0f8ec8-7292-4a49-85fc-67f876118ec3",
     "migrations_dir": "migrations"
   }],
   "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "edgechat-archive" }],
@@ -43,6 +44,7 @@
     "enabled": true,
     "logs": { "head_sampling_rate": 1 },
     "traces": { "enabled": true, "head_sampling_rate": 0.05 }
-  },
-  "triggers": { "crons": ["17 3 * * *"] }
+  }
+  // Re-enable when this account has a free Cron slot:
+  // "triggers": { "crons": ["17 3 * * *"] }
 }
