@@ -7,7 +7,7 @@ import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limi
 import type { Env } from "../src/env";
 import { HttpError } from "../src/http";
 import { cleanupExpiredPasskeyChallenges } from "../src/passkeys";
-import { cleanupExpiredAuthenticationState } from "../src/auth";
+import { PASSWORD_ITERATIONS, cleanupExpiredAuthenticationState } from "../src/auth";
 
 function b64url(bytes: ArrayBuffer): string {
   let value = ""; for (const byte of new Uint8Array(bytes)) value += String.fromCharCode(byte);
@@ -38,6 +38,10 @@ function archiveV3Ciphertext(deviceId: string, startSeq: number, endSeq: number)
   view.setUint32(20, 32); view.setUint32(24, 1); view.setUint32(28, startSeq); view.setUint32(32, endSeq); view.setUint32(36, 2);
   bytes.set(envelope, 40); return bytes;
 }
+
+it("keeps PBKDF2 within the Cloudflare Workers production ceiling", () => {
+  expect(PASSWORD_ITERATIONS).toBe(100_000);
+});
 
 it("enables archive compaction only through an explicit server capability", () => {
   expect(archiveCompactionEnabled({ ARCHIVE_COMPACTION_ENABLED: "true" })).toBe(true);

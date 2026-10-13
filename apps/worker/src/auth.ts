@@ -3,7 +3,10 @@ import type { UserId } from "@edgechat/protocol";
 import { b64url, fromB64url, HttpError, randomId, sha256 } from "./http";
 import { createDatabase } from "./database";
 
-const PASSWORD_ITERATIONS = 120_000;
+// Cloudflare Workers' production WebCrypto rejects PBKDF2 iteration counts
+// above 100,000. Opaque accounts use random 256-bit credentials, so the
+// platform maximum is sufficient here without reducing their entropy.
+export const PASSWORD_ITERATIONS = 100_000;
 const SESSION_MS = 30 * 24 * 60 * 60 * 1_000;
 const AUTH_CLEANUP_BATCH = 500;
 
