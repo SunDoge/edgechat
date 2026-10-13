@@ -439,6 +439,14 @@ cd ../..
 pnpm run deploy
 ```
 
+Scheduled maintenance lives in the reusable `runScheduledTasks()` function.
+The Worker's own `scheduled()` handler and the private named
+`ScheduledTasksService` RPC entrypoint both call that function, so an
+account-level Cron Worker can consolidate triggers through a Service Binding
+without exposing an HTTP maintenance endpoint. Scheduled work is idempotent;
+remove the standalone trigger only after the central dispatcher has been
+observed invoking the RPC successfully.
+
 Use at least 32 random bytes for `OPERATOR_TOKEN`; it protects the storage-operations API and is intentionally separate from user sessions. Do not reuse the checked-in all-zero D1 placeholder. Keep the VAPID private JWK, Operator token, and any future recovery secrets out of source control.
 
 ## Implemented API surface

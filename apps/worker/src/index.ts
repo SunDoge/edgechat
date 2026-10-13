@@ -1,5 +1,6 @@
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, currentServerProtocol, deviceSessionProofBytes, isClientEventEnvelope, isNamespacedRoomId, isNamespacedUserId, isRoomEventEnvelope, MAX_ATTACHMENT_CIPHERTEXT_BYTES, MAX_EVENT_CIPHERTEXT_LENGTH, MAX_MESSAGE_ATTACHMENTS, MIN_SUPPORTED_PROTOCOL_VERSION, normalizeLocalUserId, PROTOCOL_VERSION, roomEventTypes, type ClientEvent, type Device, type DeviceSessionChallenge, type DraftEnvelope, type EventAcceptanceReceipt, type RoomEvent, type RoomId, type RoomSummary, type ServerProtocolCapabilities, type UserId, type UserProfile } from "@edgechat/protocol";
 import { batch } from "@sundoge/kysely-d1";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { sql } from "kysely";
 import { authenticate, cleanupExpiredAuthenticationState, createSession, passwordHash, validatePublicKeys, verifyPassword } from "./auth";
 import { createDatabase } from "./database";
@@ -6169,6 +6170,86 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   throw new HttpError(404, "Not found", "not_found");
 }
 
+export type ScheduledTaskInvocation = {
+  scheduled_time: number;
+  cron: string;
+};
+
+export type ScheduledTaskResult = {
+  status: "ok";
+  completed_at: number;
+};
+
+export async function runScheduledTasks(env: Env, _invocation: ScheduledTaskInvocation): Promise<ScheduledTaskResult> {
+  await Promise.all([
+    purgeUncommittedAttachments(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "purged uncommitted attachments", count }));
+    }),
+    processPendingAttachmentDeletions(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "deleted attachments for message tombstones", count }));
+    }),
+    processPendingR2Writes(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "deleted abandoned R2 writes", count }));
+    }),
+    cleanupStaleEventStorageClaims(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "reconciled stale event storage claims", count }));
+    }),
+    processProfileAvatarDeletions(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "deleted replaced profile avatars", count }));
+    }),
+    processPendingRepairObjectCleanups(env).then((result) => {
+      if (result.attempted) console.log(JSON.stringify({ message: "processed corrupt repair object cleanup", ...result }));
+    }),
+    cleanupExpiredKeyPackages(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "deleted expired MLS KeyPackages", count }));
+    }),
+    cleanupMessageRequestRateWindows(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "deleted expired message request rate windows", count }));
+    }),
+    cleanupLoginFailureState(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "deleted expired login failure state", count }));
+    }),
+    cleanupAccountAppeals(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "deleted expired account appeals", count }));
+    }),
+    cleanupExpiredDeviceLinks(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "cleaned expired device links", count }));
+    }),
+    cleanupExpiredDeviceSessionChallenges(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "cleaned expired device session challenges", count }));
+    }),
+    cleanupExpiredAuthenticationState(env).then((count) => {
+      if (count.sessions || count.ws_tickets) console.log(JSON.stringify({ message: "cleaned expired authentication state", ...count }));
+    }),
+    cleanupExpiredPasskeyChallenges(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "cleaned expired passkey challenges", count }));
+    }),
+    cleanupExpiredRoomPeerRecoveries(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "cleaned expired peer recoveries", count }));
+    }),
+    auditRoomHistory(env).then((result) => {
+      if (result.gaps) console.log(JSON.stringify({ message: "detected repairable room history gaps", ...result }));
+    }),
+    processAccountDeletions(env).then((count) => {
+      if (count) console.log(JSON.stringify({ message: "processed account deletion jobs", count }));
+    }),
+    processRoomRetention(env).then(async (result) => {
+      const stagedObjects = await stageRetentionObjectDeletions(env);
+      const deletedObjects = await processRetentionObjectDeletions(env);
+      if (result.events || stagedObjects || deletedObjects) console.log(JSON.stringify({
+        message: "applied room retention", ...result, staged_objects: stagedObjects, deleted_objects: deletedObjects,
+      }));
+    }),
+  ]);
+  return { status: "ok", completed_at: Date.now() };
+}
+
+export class ScheduledTasksService extends WorkerEntrypoint<Env> {
+  async runScheduledTasks(invocation: ScheduledTaskInvocation): Promise<ScheduledTaskResult> {
+    return runScheduledTasks(this.env, invocation);
+  }
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const isApi = new URL(request.url).pathname.startsWith("/api/");
@@ -6190,66 +6271,7 @@ export default {
       return hardenApiResponse(json({ error: "Internal server error", code: "internal_error", request_id: requestId }, 500), responseHeaders);
     }
   },
-  async scheduled(_controller, env, ctx): Promise<void> {
-    ctx.waitUntil(Promise.all([
-      purgeUncommittedAttachments(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "purged uncommitted attachments", count }));
-      }),
-      processPendingAttachmentDeletions(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "deleted attachments for message tombstones", count }));
-      }),
-      processPendingR2Writes(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "deleted abandoned R2 writes", count }));
-      }),
-      cleanupStaleEventStorageClaims(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "reconciled stale event storage claims", count }));
-      }),
-      processProfileAvatarDeletions(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "deleted replaced profile avatars", count }));
-      }),
-      processPendingRepairObjectCleanups(env).then((result) => {
-        if (result.attempted) console.log(JSON.stringify({ message: "processed corrupt repair object cleanup", ...result }));
-      }),
-      cleanupExpiredKeyPackages(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "deleted expired MLS KeyPackages", count }));
-      }),
-      cleanupMessageRequestRateWindows(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "deleted expired message request rate windows", count }));
-      }),
-      cleanupLoginFailureState(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "deleted expired login failure state", count }));
-      }),
-      cleanupAccountAppeals(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "deleted expired account appeals", count }));
-      }),
-      cleanupExpiredDeviceLinks(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "cleaned expired device links", count }));
-      }),
-      cleanupExpiredDeviceSessionChallenges(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "cleaned expired device session challenges", count }));
-      }),
-      cleanupExpiredAuthenticationState(env).then((count) => {
-        if (count.sessions || count.ws_tickets) console.log(JSON.stringify({ message: "cleaned expired authentication state", ...count }));
-      }),
-      cleanupExpiredPasskeyChallenges(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "cleaned expired passkey challenges", count }));
-      }),
-      cleanupExpiredRoomPeerRecoveries(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "cleaned expired peer recoveries", count }));
-      }),
-      auditRoomHistory(env).then((result) => {
-        if (result.gaps) console.log(JSON.stringify({ message: "detected repairable room history gaps", ...result }));
-      }),
-      processAccountDeletions(env).then((count) => {
-        if (count) console.log(JSON.stringify({ message: "processed account deletion jobs", count }));
-      }),
-      processRoomRetention(env).then(async (result) => {
-        const stagedObjects = await stageRetentionObjectDeletions(env);
-        const deletedObjects = await processRetentionObjectDeletions(env);
-        if (result.events || stagedObjects || deletedObjects) console.log(JSON.stringify({
-          message: "applied room retention", ...result, staged_objects: stagedObjects, deleted_objects: deletedObjects,
-        }));
-      }),
-    ]).then(() => undefined));
+  async scheduled(controller, env, _ctx): Promise<void> {
+    await runScheduledTasks(env, { scheduled_time: controller.scheduledTime, cron: controller.cron });
   },
 } satisfies ExportedHandler<Env>;

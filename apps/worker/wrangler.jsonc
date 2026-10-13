@@ -45,6 +45,7 @@
     "logs": { "head_sampling_rate": 1 },
     "traces": { "enabled": true, "head_sampling_rate": 0.05 }
   }
-  // Re-enable when this account has a free Cron slot:
+  // ScheduledTasksService is called by the account-level cron-worker. Re-enable
+  // this standalone trigger only when operating EdgeChat without that dispatcher:
   // "triggers": { "crons": ["17 3 * * *"] }
 }
