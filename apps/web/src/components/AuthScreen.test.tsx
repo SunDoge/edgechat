@@ -50,6 +50,24 @@ describe("AuthScreen account identity", () => {
     expect(document.body.textContent).toContain("账户凭据");
   });
 
+  it("does not rewrite the focused display-name value on every input event", () => {
+    renderAuth();
+    const displayName = document.querySelector<HTMLInputElement>("#display-name")!;
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!;
+    let reactiveWrites = 0;
+    Object.defineProperty(displayName, "value", {
+      configurable: true,
+      get: () => descriptor.get!.call(displayName) as string,
+      set: (value: string) => { reactiveWrites += 1; descriptor.set!.call(displayName, value); },
+    });
+    displayName.value = "测";
+    reactiveWrites = 0;
+    displayName.dispatchEvent(new InputEvent("input", { bubbles: true, data: "测", inputType: "insertText" }));
+    expect(reactiveWrites).toBe(0);
+    expect(displayName.value).toBe("测");
+    expect(document.activeElement === displayName || document.activeElement === document.body).toBe(true);
+  });
+
   it("accepts either the short account name or full user ID on login", () => {
     renderAuth();
     const loginTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')]

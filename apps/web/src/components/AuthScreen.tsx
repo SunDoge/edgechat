@@ -1,4 +1,4 @@
-import { Show, Suspense, createSignal, lazy, onMount } from "solid-js";
+import { Show, Suspense, createSignal, lazy, onMount, untrack } from "solid-js";
 import { IconQrcode, IconShieldLock, IconSwitchHorizontal, IconUpload } from "@tabler/icons-solidjs";
 import { encodeBase64Url, OpenMlsMessagingCore, type DeviceIdentity, type WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import { deviceSessionProofBytes } from "@edgechat/protocol";
@@ -44,6 +44,12 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
   const [localIdentityAvailable, setLocalIdentityAvailable] = createSignal(false);
   const [localAccountCredential, setLocalAccountCredential] = createSignal("");
   const [passkeysSupported, setPasskeysSupported] = createSignal(false);
+
+  function updateUsername(event: InputEvent & { currentTarget: HTMLInputElement; target: Element }) {
+    const normalized = event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, "");
+    if (event.currentTarget.value !== normalized) event.currentTarget.value = normalized;
+    setUsername(normalized);
+  }
 
   onMount(() => {
     setPasskeysSupported(browserSupportsWebAuthn());
@@ -171,8 +177,8 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
       <div class="flex gap-2"><button type="button" disabled={appealBusy()} class="h-10 rounded-lg bg-white px-3 text-sm font-medium text-ink ring-1 ring-black/10" onClick={() => void refreshAppealStatus()}>{appealBusy() ? t("auth.appeal.status.loading") : t("auth.appeal.status.refresh")}</button><button type="button" class="h-10 px-3 text-sm font-medium text-muted" onClick={() => { localStorage.removeItem(appealReceiptKey); setAppealReceipt(""); setAppealStatus(null); }}>{t("auth.appeal.submit.again")}</button></div>
     </div>}>
       <form class="grid gap-4" onSubmit={submitAppeal}>
-        <Input label={t("auth.appeal.username")} id="appeal-username" name="appeal_username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username" required/>
-        <Show when={!localAccountCredential()} fallback={<p class="rounded-lg bg-brand-soft px-3 py-2.5 text-xs/5 text-brand">{t("auth.accountCredential.local")}</p>}><Input label={t("auth.appeal.password")} id="appeal-password" name="appeal_password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" required/></Show>
+        <Input label={t("auth.appeal.username")} id="appeal-username" name="appeal_username" value={untrack(username)} onInput={updateUsername} placeholder="@alice:example.com" autocomplete="username" required/>
+        <Show when={!localAccountCredential()} fallback={<p class="rounded-lg bg-brand-soft px-3 py-2.5 text-xs/5 text-brand">{t("auth.accountCredential.local")}</p>}><Input label={t("auth.appeal.password")} id="appeal-password" name="appeal_password" type="password" value={untrack(password)} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" required/></Show>
         <label class="grid gap-2 text-sm font-medium text-ink" for="appeal-category">{t("auth.appeal.category")}<select id="appeal-category" class="h-11 rounded-lg bg-white px-3 text-sm ring-1 ring-inset ring-black/10 focus:outline-2 focus:outline-brand" value={appealCategory()} onChange={(event) => setAppealCategory(event.currentTarget.value as AccountAppealCategory)}><option value="login_locked">{t("auth.appeal.category.loginLocked")}</option><option value="device_lost">{t("auth.appeal.category.deviceLost")}</option><option value="account_access">{t("auth.appeal.category.accountAccess")}</option></select></label>
         <p class="text-xs/5 text-muted">{t("auth.appeal.passwordNotice")}</p>
         <Show when={appealError()}><p role="alert" class="text-sm text-red-600">{appealError()}</p></Show>
@@ -204,14 +210,14 @@ export function AuthScreen(props: { profileId: string; accountHint?: string | nu
     </div></Show>
     <form class="grid gap-5" onSubmit={submit}>
       <Show when={mode() === "register"} fallback={<>
-        <Show when={!finishingRestore}><Input label={t("auth.accountIdentifier")} id="username" name="username" value={username()} onInput={(event) => setUsername(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9_.@:-]/g, ""))} placeholder="@alice:example.com" autocomplete="username webauthn" required autofocus={!restoredUserHint}/></Show>
+        <Show when={!finishingRestore}><Input label={t("auth.accountIdentifier")} id="username" name="username" value={untrack(username)} onInput={updateUsername} placeholder="@alice:example.com" autocomplete="username webauthn" required autofocus={!restoredUserHint}/></Show>
         <Show when={!localAccountCredential()} fallback={<div class="rounded-lg bg-brand-soft px-3 py-3 text-sm/6 text-brand">{t("auth.accountCredential.local")}</div>}>
-          <Input label={t("auth.loginPassword")} id="password" name="password" type="password" value={password()} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" aria-describedby="login-password-help" required autofocus={Boolean(restoredUserHint)}/>
+          <Input label={t("auth.loginPassword")} id="password" name="password" type="password" value={untrack(password)} onInput={(event) => setPassword(event.currentTarget.value)} minLength={10} autocomplete="current-password" aria-describedby="login-password-help" required autofocus={Boolean(restoredUserHint)}/>
           <p id="login-password-help" class="text-xs/5 text-muted">{t("auth.loginPasswordHint")}</p>
         </Show>
       </>}>
         <div class="grid gap-1.5">
-          <Input label={t("auth.displayName")} id="display-name" name="display_name" value={displayName()} onInput={(event) => setDisplayName(event.currentTarget.value)} maxLength={80} autocomplete="nickname" aria-describedby="display-name-help" required autofocus/>
+          <Input label={t("auth.displayName")} id="display-name" name="display_name" value={untrack(displayName)} onInput={(event) => setDisplayName(event.currentTarget.value)} maxLength={80} autocomplete="nickname" aria-describedby="display-name-help" required autofocus/>
           <p id="display-name-help" class="text-xs/5 text-muted">{t("auth.displayNameHint")}</p>
         </div>
       </Show>
