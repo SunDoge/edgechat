@@ -3,7 +3,7 @@ import { IconShieldLock } from "@tabler/icons-react";
 import { ToggleButton, ToggleButtonGroup } from "react-aria-components";
 import type { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import type { ApiClient } from "@edgechat/sync";
-import { loadIdentity } from "../../web/src/vault";
+import { loadIdentity } from "@edgechat/client-storage/vault";
 import { authenticate, continueDeviceSession, normalizeAccountIdentifier, validateAuthDraft, type AuthMode, type AuthResult } from "./auth-model";
 import { ActionButton, TextInput } from "./ui";
 

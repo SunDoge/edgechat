@@ -1,0 +1,13 @@
+{
+  "name": "@edgechat/message-content",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@edgechat/client-storage": "workspace:*",
+    "@edgechat/protocol": "workspace:*"
+  },
+  "devDependencies": { "typescript": "latest" }
+}

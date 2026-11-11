@@ -7,10 +7,14 @@
     "dev": "vite --port 5174",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke:local": "node e2e/messaging-smoke.mjs"
   },
   "dependencies": {
+    "@edgechat/client-runtime": "workspace:*",
+    "@edgechat/client-storage": "workspace:*",
     "@edgechat/db": "workspace:*",
+    "@edgechat/message-content": "workspace:*",
     "@edgechat/messaging-core": "workspace:*",
     "@edgechat/protocol": "workspace:*",
     "@edgechat/sync": "workspace:*",
@@ -32,6 +36,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "latest",
     "jsdom": "^30.1.1",
+    "playwright": "^1.63.0",
     "tailwindcss": "^4.3.3",
     "typescript": "latest",
     "vite": "^8.3.1",

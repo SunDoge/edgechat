@@ -2,7 +2,7 @@ import { encodeBase64Url, OpenMlsMessagingCore, type DeviceIdentity, type WebCry
 import type { ApiClient, SessionIdentity } from "@edgechat/sync";
 import { deviceSessionProofBytes } from "@edgechat/protocol";
 import { maxLength, minLength, object, pipe, safeParse, string, trim } from "valibot";
-import { loadIdentity, saveIdentity } from "../../web/src/vault";
+import { loadIdentity, saveIdentity } from "@edgechat/client-storage/vault";
 
 export type AuthMode = "register" | "login";
 
@@ -36,6 +36,7 @@ async function prepareDevice(profileId: string, core: WebCryptoMessagingCore) {
   const identity = existing ?? await core.createIdentity();
   const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
   const publicKeys = await core.exportPublicIdentity(identity);
+  const mlsKeyPackages = mls.generateKeyPackages(12);
   const stored = { ...identity, mlsState: mls.exportState() };
   await saveIdentity(profileId, stored);
   return {
@@ -45,7 +46,7 @@ async function prepareDevice(profileId: string, core: WebCryptoMessagingCore) {
       device_id: identity.deviceId,
       display_name: navigator.userAgent.includes("Mobile") ? "移动设备" : "浏览器",
       ...publicKeys,
-      mls_key_packages: mls.generateKeyPackages(12),
+      mls_key_packages: mlsKeyPackages,
       ...(identity.deviceCredential ? { device_credential: identity.deviceCredential } : {}),
     },
   };

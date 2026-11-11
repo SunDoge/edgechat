@@ -1,0 +1,21 @@
+{
+  "name": "@edgechat/client-storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./local-profiles": "./src/local-profiles.ts",
+    "./vault": "./src/vault.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@edgechat/messaging-core": "workspace:*",
+    "dexie": "^4.4.6"
+  },
+  "devDependencies": {
+    "typescript": "latest"
+  }
+}

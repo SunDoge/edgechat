@@ -7,8 +7,8 @@ export default defineConfig({
   publicDir: "../web/public",
   server: {
     proxy: {
-      "/api": { target: "http://localhost:8787", ws: true },
-      "/avatars": { target: "http://localhost:8787" },
+      "/api": { target: process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8787", ws: true },
+      "/avatars": { target: process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8787" },
     },
   },
 });

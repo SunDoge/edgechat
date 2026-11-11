@@ -1,16 +1,27 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { IconMessageCircle, IconRefresh } from "@tabler/icons-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { IconMessageCircle, IconPlus, IconRefresh } from "@tabler/icons-react";
 import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
+import { BrowserMessagingRuntime, type RuntimeSnapshot } from "@edgechat/client-runtime";
+import type { LocalMessage } from "@edgechat/db";
+import type { RoomId } from "@edgechat/protocol";
 import { ApiClient } from "@edgechat/sync";
 import { useStore } from "zustand";
-import type { LocalProfile } from "../../web/src/local-profiles";
-import { bindLocalProfile } from "../../web/src/local-profiles";
+import { bindLocalProfile, type LocalProfile } from "@edgechat/client-storage/local-profiles";
 import { AuthScreen } from "./AuthScreen";
 import type { AuthResult } from "./auth-model";
 import { ActionButton } from "./ui";
 import { createAppStore } from "./app-store";
+import { ConversationView } from "./ConversationView";
+import { NewConversationDialog } from "./NewConversationDialog";
 
 type Props = { profile: LocalProfile; initialToken: string | null };
+
+function titleForRoom(room: RuntimeSnapshot["rooms"][number], ownUserId: string): string {
+  if (room.name) return room.name;
+  if (room.purpose === "saved") return "已保存消息";
+  return room.members.filter((member) => member.user_id !== ownUserId).map((member) => member.display_name).join("、") || "对话";
+}
+
 export function App({ profile, initialToken }: Props) {
   const api = useMemo(() => new ApiClient("", initialToken), [initialToken]);
   const core = useMemo(() => new WebCryptoMessagingCore(), []);
@@ -19,50 +30,113 @@ export function App({ profile, initialToken }: Props) {
   const rooms = useStore(store, (state) => state.rooms);
   const loadingRooms = useStore(store, (state) => state.loadingRooms);
   const error = useStore(store, (state) => state.error);
-  const { setSessionState, setRooms, setLoadingRooms, setError } = store.getState();
+  const connection = useStore(store, (state) => state.connection);
+  const actions = useMemo(() => {
+    const { setConnection, setError, setRooms, setSessionState } = store.getState();
+    return { setConnection, setError, setRooms, setSessionState };
+  }, [store]);
   const [checkingSession, setCheckingSession] = useState(Boolean(initialToken));
+  const [runtime, setRuntime] = useState<BrowserMessagingRuntime | null>(null);
+  const runtimeRef = useRef<BrowserMessagingRuntime | null>(null);
+  const [selectedId, setSelectedId] = useState<RoomId | null>(null);
+  const selectedRef = useRef<RoomId | null>(null);
+  const [messages, setMessages] = useState<LocalMessage[]>([]);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [newConversation, setNewConversation] = useState(false);
 
-  const loadRooms = useCallback(async () => {
-    setLoadingRooms(true); setError("");
-    try { setRooms((await api.rooms()).rooms); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "无法读取对话"); }
-    finally { setLoadingRooms(false); }
-  }, [api]);
+  selectedRef.current = selectedId;
+
+  const readMessages = useCallback(async (active: BrowserMessagingRuntime, roomId: RoomId) => {
+    setLoadingMessages(true);
+    try { setMessages(await active.messages(roomId)); }
+    catch (cause) { actions.setError(cause instanceof Error ? cause.message : "无法读取本机消息"); }
+    finally { setLoadingMessages(false); }
+  }, [actions]);
+
+  const attachRuntime = useCallback((active: BrowserMessagingRuntime, token: string) => {
+    runtimeRef.current = active; setRuntime(active);
+    const applySnapshot = () => {
+      const snapshot = active.snapshot();
+      actions.setSessionState({ session: snapshot.session, token });
+      actions.setRooms(snapshot.rooms);
+      actions.setConnection(snapshot.connection);
+    };
+    const roomsChanged = () => applySnapshot();
+    const messagesChanged = (received: Event) => {
+      const roomId = (received as CustomEvent<{ roomId?: RoomId }>).detail?.roomId;
+      if (selectedRef.current && (!roomId || roomId === selectedRef.current)) void readMessages(active, selectedRef.current);
+    };
+    active.addEventListener("state", applySnapshot);
+    active.addEventListener("rooms", roomsChanged);
+    active.addEventListener("messages", messagesChanged);
+    applySnapshot();
+    return () => {
+      active.removeEventListener("state", applySnapshot);
+      active.removeEventListener("rooms", roomsChanged);
+      active.removeEventListener("messages", messagesChanged);
+    };
+  }, [actions, readMessages]);
 
   useEffect(() => {
-    if (!initialToken) return;
-    let active = true;
-    void api.me().then((session) => {
-      if (!active) return;
-      setSessionState({ session, token: initialToken });
-      void loadRooms();
+    if (!initialToken) { setCheckingSession(false); return; }
+    let cleanup: (() => void) | undefined; let active = true;
+    void BrowserMessagingRuntime.open({ profileId: profile.profile_id, accessToken: initialToken, api }).then((next) => {
+      if (!active) { void next.close(); return; }
+      cleanup = attachRuntime(next, initialToken);
     }).catch(() => api.setToken(null)).finally(() => { if (active) setCheckingSession(false); });
-    return () => { active = false; };
-  }, [api, initialToken, loadRooms]);
+    return () => { active = false; cleanup?.(); const current = runtimeRef.current; runtimeRef.current = null; if (current) void current.close(); };
+  }, [api, attachRuntime, initialToken, profile.profile_id]);
+
+  useEffect(() => {
+    if (!runtime || !selectedId) { setMessages([]); return; }
+    void readMessages(runtime, selectedId);
+  }, [readMessages, runtime, selectedId]);
 
   async function authenticated(result: AuthResult) {
     api.setToken(result.token);
-    setSessionState({ session: result.session, token: result.token });
     await bindLocalProfile(profile.profile_id, {
       user_id: result.session.user_id,
       display_name: result.session.display_name,
       device_id: result.session.device_id,
       access_token: result.token,
     });
-    await loadRooms();
+    result.mls.destroy();
+    const active = await BrowserMessagingRuntime.open({ profileId: profile.profile_id, accessToken: result.token, api });
+    attachRuntime(active, result.token);
   }
 
-  if (checkingSession) return <main className="grid min-h-dvh place-items-center bg-white text-sm text-muted" role="status">正在恢复会话…</main>;
-  if (!sessionState) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={(result) => void authenticated(result)} />;
+  async function loadOlder() {
+    if (!runtime || !selectedId || !messages[0]) return;
+    const older = await runtime.olderMessages(selectedId, Number(messages[0].seq));
+    if (!older.length) return;
+    const known = new Set(messages.map((message) => message.message_id));
+    setMessages((current) => [...older.filter((message) => !known.has(message.message_id)), ...current]);
+  }
 
+  async function send(text: string, files: File[]) {
+    if (!runtime || !selectedId) return;
+    actions.setError("");
+    try {
+      if (files.length) await runtime.sendFiles(selectedId, files, text);
+      else await runtime.sendText(selectedId, text);
+    } catch (cause) {
+      actions.setError(cause instanceof Error ? cause.message : "消息发送失败");
+    }
+  }
+
+  if (checkingSession) return <main className="grid min-h-dvh place-items-center bg-white text-sm text-muted" role="status">正在恢复本机消息与加密状态…</main>;
+  if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={(result) => void authenticated(result)} />;
+
+  const selected = rooms.find((room) => room.room_id === selectedId) ?? null;
   return <main className="grid min-h-dvh bg-chat antialiased md:grid-cols-[20rem_1fr]">
-    <aside className="border-r border-black/5 bg-white">
-      <header className="flex h-16 items-center justify-between border-b border-black/5 px-4"><div><h1 className="font-semibold text-ink">消息</h1><p className="text-xs text-muted">{sessionState.session.display_name}</p></div><ActionButton variant="icon" aria-label="刷新对话" onPress={() => void loadRooms()}><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} /></ActionButton></header>
+    <aside className={`${selected ? "hidden md:block" : "block"} border-r border-black/5 bg-white`}>
+      <header className="flex min-h-16 items-center justify-between border-b border-black/5 px-4 py-2"><div className="min-w-0"><h1 className="font-semibold text-ink">消息</h1><p className="truncate text-xs text-muted" title={sessionState.session.user_id}>{sessionState.session.user_id}</p><p className="text-[11px] text-muted">{connection === "online" ? "已连接" : connection === "offline" ? "离线，可查看和发送" : "正在同步"}</p></div><div className="flex shrink-0"><ActionButton variant="icon" aria-label="刷新对话" onPress={() => void runtime.refreshRooms()}><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} /></ActionButton><ActionButton variant="icon" aria-label="新建对话" onPress={() => setNewConversation(true)}><IconPlus className="size-5" /></ActionButton></div></header>
       {error && <p role="alert" className="m-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
       <nav aria-label="对话列表" className="p-2">
-        {rooms.length ? rooms.map((room) => <ActionButton key={room.room_id} variant="quiet" className="flex min-h-16 h-auto w-full items-center justify-start gap-3 rounded-xl text-left"><span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft text-brand"><IconMessageCircle className="size-5" /></span><span className="min-w-0"><strong className="block truncate text-sm text-ink">{room.name || room.room_id}</strong><span className="block truncate text-xs text-muted">端到端加密</span></span></ActionButton>) : !loadingRooms && <div className="px-4 py-12 text-center"><p className="text-sm font-medium text-ink">还没有对话</p><p className="mt-1 text-xs/5 text-muted">聊天视图正在迁移到 React。</p></div>}
+        {rooms.length ? rooms.map((room) => <ActionButton key={room.room_id} variant="quiet" onPress={() => setSelectedId(room.room_id)} className="flex min-h-16 h-auto w-full items-center justify-start gap-3 rounded-xl text-left"><span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft text-brand"><IconMessageCircle className="size-5" /></span><span className="min-w-0"><strong className="block truncate text-sm text-ink">{titleForRoom(room, sessionState.session.user_id)}</strong><span className="block truncate text-xs text-muted">{room.kind === "group" ? `${room.members.length} 位成员` : "端到端加密"}</span></span></ActionButton>) : <div className="px-4 py-12 text-center"><p className="text-sm font-medium text-ink">还没有对话</p><p className="mt-1 text-xs/5 text-muted">可以先在现有客户端创建对话；新建对话正在迁移。</p></div>}
       </nav>
     </aside>
-    <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>
+    {selected ? <ConversationView runtime={runtime} room={selected} session={sessionState.session} messages={messages} loading={loadingMessages} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}
+    {newConversation && <NewConversationDialog runtime={runtime} onClose={() => setNewConversation(false)} onCreated={(roomId) => { setNewConversation(false); setSelectedId(roomId); }} />}
   </main>;
 }

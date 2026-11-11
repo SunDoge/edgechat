@@ -1,0 +1,23 @@
+{
+  "name": "@edgechat/client-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@edgechat/client-storage": "workspace:*",
+    "@edgechat/db": "workspace:*",
+    "@edgechat/message-content": "workspace:*",
+    "@edgechat/messaging-core": "workspace:*",
+    "@edgechat/protocol": "workspace:*",
+    "@edgechat/sync": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "vitest": "^4.1.11"
+  }
+}
