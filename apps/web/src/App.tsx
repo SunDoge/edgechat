@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconBookmark, IconMessageCircle, IconPlus, IconRefresh, IconSearch, IconSettings } from "@tabler/icons-react";
+import { IconBookmark, IconDotsVertical, IconMessageCircle, IconPlus, IconRefresh, IconSearch, IconSettings } from "@tabler/icons-react";
+import { Menu, MenuItem, MenuTrigger, Popover } from "react-aria-components";
 import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import { BrowserMessagingRuntime, type RuntimeSnapshot } from "@edgechat/client-runtime";
 import { applyPwaUpdate, dismissPwaUpdate, subscribePwaUpdates, type PwaUpdateState } from "@edgechat/client-runtime/pwa-lifecycle";
@@ -196,12 +197,33 @@ export function App({ profile, initialToken }: Props) {
   if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={(result) => void authenticated(result)} />;
 
   const selected = rooms.find((room) => room.room_id === selectedId) ?? null;
-  return <main className="grid min-h-dvh bg-chat antialiased md:grid-cols-[20rem_1fr]">
-    <aside className={`${selected ? "hidden md:block" : "block"} border-r border-black/5 bg-white`}>
-      <header className="flex min-h-16 items-center justify-between border-b border-black/5 px-4 py-2"><div className="min-w-0"><h1 className="font-semibold text-ink">消息</h1><p className="truncate text-xs text-muted" title={sessionState.session.user_id}>{sessionState.session.user_id}</p><p className="text-[11px] text-muted">{connection === "online" ? "已连接" : connection === "offline" ? "离线，可查看和发送" : "正在同步"}</p></div><div className="flex shrink-0"><ActionButton variant="icon" aria-label="搜索所有消息" onPress={() => setSearchRoomId("all")}><IconSearch className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="已保存消息" onPress={() => void openSavedMessages()}><IconBookmark className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="设置" onPress={() => setSettingsOpen(true)}><IconSettings className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="刷新对话" onPress={() => void runtime.refreshRooms()}><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} /></ActionButton><ActionButton variant="icon" aria-label="新建对话" onPress={() => setNewConversation(true)}><IconPlus className="size-5" /></ActionButton></div></header>
+  return <main className="grid min-h-dvh min-w-0 overflow-hidden bg-chat antialiased md:grid-cols-[20rem_minmax(0,1fr)]">
+    <aside className={`${selected ? "hidden md:block" : "block"} min-w-0 overflow-hidden border-r border-black/5 bg-white`}>
+      <header className="flex min-h-16 min-w-0 items-center justify-between border-b border-black/5 px-3 pb-2 pt-[max(.5rem,env(safe-area-inset-top))] sm:px-4">
+        <div className="min-w-0 flex-1"><h1 className="font-semibold text-ink">消息</h1><p className="truncate text-xs text-muted" title={sessionState.session.user_id}>{sessionState.session.user_id}</p><p className="text-[11px] text-muted">{connection === "online" ? "已连接" : connection === "offline" ? "离线，可查看和发送" : "正在同步"}</p></div>
+        <div className="hidden shrink-0 md:flex"><ActionButton variant="icon" aria-label="搜索所有消息" onPress={() => setSearchRoomId("all")}><IconSearch className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="已保存消息" onPress={() => void openSavedMessages()}><IconBookmark className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="设置" onPress={() => setSettingsOpen(true)}><IconSettings className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="刷新对话" onPress={() => void runtime.refreshRooms()}><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} /></ActionButton><ActionButton variant="icon" aria-label="新建对话" onPress={() => setNewConversation(true)}><IconPlus className="size-5" /></ActionButton></div>
+        <div className="flex shrink-0 md:hidden">
+          <ActionButton variant="icon" aria-label="搜索所有消息" onPress={() => setSearchRoomId("all")}><IconSearch className="size-5" /></ActionButton>
+          <ActionButton variant="icon" aria-label="新建对话" onPress={() => setNewConversation(true)}><IconPlus className="size-5" /></ActionButton>
+          <MenuTrigger>
+            <ActionButton variant="icon" aria-label="更多操作"><IconDotsVertical className="size-5" /></ActionButton>
+            <Popover placement="bottom end" className="z-50 min-w-44 rounded-xl bg-white p-1 shadow-xl ring-1 ring-black/10 outline-none">
+              <Menu aria-label="更多操作" onAction={(key) => {
+                if (key === "saved") void openSavedMessages();
+                if (key === "settings") setSettingsOpen(true);
+                if (key === "refresh") void runtime.refreshRooms();
+              }} className="outline-none">
+                <MenuItem id="saved" className="flex min-h-11 cursor-default items-center gap-3 rounded-lg px-3 text-sm text-ink outline-none focus:bg-neutral-100"><IconBookmark className="size-5" />已保存消息</MenuItem>
+                <MenuItem id="refresh" className="flex min-h-11 cursor-default items-center gap-3 rounded-lg px-3 text-sm text-ink outline-none focus:bg-neutral-100"><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} />刷新对话</MenuItem>
+                <MenuItem id="settings" className="flex min-h-11 cursor-default items-center gap-3 rounded-lg px-3 text-sm text-ink outline-none focus:bg-neutral-100"><IconSettings className="size-5" />设置</MenuItem>
+              </Menu>
+            </Popover>
+          </MenuTrigger>
+        </div>
+      </header>
       {error && <p role="alert" className="m-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
       <nav aria-label="对话列表" className="p-2">
-        {rooms.length ? rooms.map((room) => <ActionButton key={room.room_id} variant="quiet" onPress={() => setSelectedId(room.room_id)} className="flex min-h-16 h-auto w-full items-center justify-start gap-3 rounded-xl text-left"><span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft text-brand"><IconMessageCircle className="size-5" /></span><span className="min-w-0"><strong className="block truncate text-sm text-ink">{titleForRoom(room, sessionState.session.user_id)}</strong><span className="block truncate text-xs text-muted">{room.kind === "group" ? `${room.members.length} 位成员` : "端到端加密"}</span></span></ActionButton>) : <div className="px-4 py-12 text-center"><p className="text-sm font-medium text-ink">还没有对话</p><p className="mt-1 text-xs/5 text-muted">可以先在现有客户端创建对话；新建对话正在迁移。</p></div>}
+        {rooms.length ? rooms.map((room) => <ActionButton key={room.room_id} variant="quiet" onPress={() => setSelectedId(room.room_id)} className="flex min-h-16 h-auto w-full items-center justify-start gap-3 rounded-xl text-left"><span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft text-brand"><IconMessageCircle className="size-5" /></span><span className="min-w-0"><strong className="block truncate text-sm text-ink">{titleForRoom(room, sessionState.session.user_id)}</strong><span className="block truncate text-xs text-muted">{room.kind === "group" ? `${room.members.length} 位成员` : "端到端加密"}</span></span></ActionButton>) : <div className="px-4 py-12 text-center"><p className="text-sm font-medium text-ink">还没有对话</p><p className="mt-1 text-xs/5 text-muted">点右上角的加号，开始一段端到端加密对话。</p></div>}
       </nav>
     </aside>
     {selected ? <ConversationView runtime={runtime} room={selected} session={sessionState.session} messages={messages} loading={loadingMessages} jumpMessageId={jumpMessageId} onJumpComplete={completeJump} onSearch={() => setSearchRoomId(selected.room_id)} onResolveRequest={resolveMessageRequest} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}

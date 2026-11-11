@@ -76,6 +76,7 @@ function MessageRow({ runtime, message, own }: { runtime: BrowserMessagingRuntim
 
 export function ConversationView({ runtime, room, session, messages, loading, jumpMessageId, onJumpComplete, onSearch, onResolveRequest, onBack, onSend, onLoadOlder }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
@@ -86,8 +87,49 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
   const previousFirst = useRef<string | null>(null);
   const olderAnchor = useRef<{ height: number; top: number; first: string | null } | null>(null);
   const virtualizer = useVirtualizer({ count: messages.length, getScrollElement: () => scrollRef.current, estimateSize: () => 76, overscan: 8, getItemKey: (index) => messages[index]!.message_id });
+  const virtualizerRef = useRef(virtualizer);
+  const messageCountRef = useRef(messages.length);
+  virtualizerRef.current = virtualizer;
+  messageCountRef.current = messages.length;
   const requestCannotSend = room.request_status === "rejected" || (room.request_status === "pending"
     && (room.request_role === "recipient" || room.request_message_sent || messages.some((message) => message.sender === session.user_id)));
+
+  useLayoutEffect(() => {
+    const composer = composerRef.current;
+    if (!composer) return;
+    composer.style.height = "auto";
+    const height = Math.min(128, Math.max(44, composer.scrollHeight));
+    composer.style.height = `${height}px`;
+    composer.style.overflowY = composer.scrollHeight > 128 ? "auto" : "hidden";
+  }, [text]);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    const root = document.documentElement;
+    let frame = 0;
+    const update = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        root.style.setProperty("--edgechat-viewport-height", `${Math.round(viewport?.height ?? window.innerHeight)}px`);
+        root.style.setProperty("--edgechat-viewport-top", `${Math.round(viewport?.offsetTop ?? 0)}px`);
+        if (document.activeElement === composerRef.current && messageCountRef.current) {
+          virtualizerRef.current.scrollToIndex(messageCountRef.current - 1, { align: "end" });
+        }
+      });
+    };
+    update();
+    viewport?.addEventListener("resize", update);
+    viewport?.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      viewport?.removeEventListener("resize", update);
+      viewport?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      root.style.removeProperty("--edgechat-viewport-height");
+      root.style.removeProperty("--edgechat-viewport-top");
+    };
+  }, []);
 
   useEffect(() => {
     if (!messages.length) return;
@@ -156,8 +198,8 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
   }
 
   const virtualItems = virtualizer.getVirtualItems();
-  return <section className="grid h-dvh min-h-0 grid-rows-[auto_1fr_auto] bg-chat" aria-label="当前对话">
-    <div className="bg-white"><header className="flex min-h-16 items-center gap-2 border-b border-black/5 px-2 sm:px-4">
+  return <section className="fixed inset-x-0 top-[var(--edgechat-viewport-top,0px)] grid h-[var(--edgechat-viewport-height,100dvh)] min-h-0 grid-rows-[auto_1fr_auto] bg-chat md:static md:h-dvh" aria-label="当前对话">
+    <div className="bg-white pt-[env(safe-area-inset-top)] md:pt-0"><header className="flex min-h-16 items-center gap-2 border-b border-black/5 px-2 sm:px-4">
       <ActionButton variant="icon" aria-label="返回对话列表" onPress={onBack} className="md:hidden"><IconArrowLeft className="size-5" /></ActionButton>
       <div className="min-w-0 flex-1"><h1 className="truncate font-semibold text-ink">{roomTitle(room, session.user_id)}</h1><p className="text-xs text-muted">端到端加密 · {room.purpose === "saved" ? "仅自己的设备" : `${room.members.length} 位成员`}</p></div>
       <ActionButton variant="icon" aria-label="搜索当前对话" onPress={onSearch}><IconSearch className="size-5" /></ActionButton>
@@ -177,7 +219,7 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
       <div className="flex items-end gap-1.5">
         <FileTrigger allowsMultiple onSelect={addFiles}><ActionButton variant="icon" aria-label="添加附件" isDisabled={requestCannotSend}><IconPaperclip className="size-5" /></ActionButton></FileTrigger>
         {!files.length && <VoiceRecorder contextId={room.room_id} disabled={sending || requestCannotSend} onRecorded={(file) => setFiles([file])} onError={setComposerError} />}
-        <TextField aria-label="消息输入" value={text} onChange={setText} isDisabled={requestCannotSend} className="min-w-0 flex-1"><TextArea rows={1} onKeyDown={keyDown} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} placeholder={requestCannotSend ? "等待消息请求被接受" : "写一条消息"} className="max-h-32 min-h-11 w-full resize-none rounded-2xl bg-neutral-100 px-4 py-2.5 text-base/6 text-ink outline-none focus:ring-2 focus:ring-brand disabled:text-muted" /></TextField>
+        <TextField aria-label="消息输入" value={text} onChange={setText} isDisabled={requestCannotSend} className="min-w-0 flex-1"><TextArea ref={composerRef} rows={1} onKeyDown={keyDown} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} placeholder={requestCannotSend ? "等待消息请求被接受" : "写一条消息"} className="max-h-32 min-h-11 w-full resize-none rounded-2xl bg-neutral-100 px-4 py-2.5 text-base/6 text-ink outline-none focus:ring-2 focus:ring-brand disabled:text-muted" /></TextField>
         <ActionButton variant="icon" aria-label="发送" isDisabled={sending || requestCannotSend || (!text.trim() && !files.length)} onPress={() => void submit()} className="bg-brand text-white hover:bg-brand-strong disabled:bg-neutral-200 disabled:text-neutral-400"><IconSend className="size-5" /></ActionButton>
       </div>
     </div>

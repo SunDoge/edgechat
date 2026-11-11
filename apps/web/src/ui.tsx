@@ -17,7 +17,7 @@ export function ActionButton({ variant = "primary", className = "", ...props }: 
   const variants = {
     primary: "bg-brand px-3 font-semibold text-white hover:bg-brand-strong disabled:bg-neutral-300",
     quiet: "px-3 font-medium text-ink hover:bg-neutral-100",
-    icon: "grid size-10 place-items-center rounded-full text-ink hover:bg-neutral-100",
+    icon: "grid size-11 place-items-center rounded-full text-ink hover:bg-neutral-100",
   } as const;
   return <AriaButton {...props} className={`h-11 rounded-lg text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 ${variants[variant]} ${className}`} />;
 }

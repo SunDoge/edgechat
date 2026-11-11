@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import assert from "node:assert/strict";
 
 const baseUrl = process.env.EDGECHAT_WEB_URL ?? "http://localhost:5174";
 const browser = await chromium.launch({ headless: true });
@@ -69,6 +70,46 @@ try {
   await bob.page.getByLabel("消息输入").fill(savedText);
   await bob.page.getByRole("button", { name: "发送" }).click();
   await bob.page.getByText(savedText, { exact: true }).waitFor({ timeout: 15_000 });
+
+  // Compact layout regression: the account identifier must not expand the
+  // list header over its actions, and the composer must grow before scrolling.
+  await bob.page.setViewportSize({ width: 320, height: 568 });
+  await bob.page.getByRole("button", { name: "返回对话列表" }).click();
+  const compactList = await bob.page.evaluate(() => ({
+    innerWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+    visibleActions: [...document.querySelectorAll("header button")]
+      .filter((element) => element.getBoundingClientRect().width > 0)
+      .map((element) => ({ label: element.getAttribute("aria-label"), width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height })),
+  }));
+  assert.equal(compactList.scrollWidth, compactList.innerWidth);
+  assert.deepEqual(compactList.visibleActions.map((action) => action.label), ["搜索所有消息", "新建对话", "更多操作"]);
+  assert.ok(compactList.visibleActions.every((action) => action.width >= 44 && action.height >= 44));
+  await bob.page.getByRole("button", { name: "更多操作" }).click();
+  await bob.page.getByRole("menuitem", { name: "已保存消息" }).click();
+  const longDraft = "移动端输入框应该随多行文字增长。".repeat(8);
+  await bob.page.getByLabel("消息输入").fill(longDraft);
+  const compactChat = await bob.page.evaluate(() => {
+    const composer = document.querySelector("textarea")?.getBoundingClientRect();
+    return {
+      innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      composerHeight: composer?.height ?? 0,
+      viewportHeight: getComputedStyle(document.documentElement).getPropertyValue("--edgechat-viewport-height").trim(),
+    };
+  });
+  assert.equal(compactChat.scrollWidth, compactChat.innerWidth);
+  assert.ok(compactChat.composerHeight > 44 && compactChat.composerHeight <= 128);
+  assert.equal(compactChat.viewportHeight, "568px");
+  await bob.page.setViewportSize({ width: 568, height: 320 });
+  await bob.page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue("--edgechat-viewport-height").trim() === "320px");
+  const landscapeChat = await bob.page.evaluate(() => ({
+    innerWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+    conversationHeight: document.querySelector('section[aria-label="当前对话"]')?.getBoundingClientRect().height ?? 0,
+  }));
+  assert.equal(landscapeChat.scrollWidth, landscapeChat.innerWidth);
+  assert.equal(landscapeChat.conversationHeight, 320);
   console.log(JSON.stringify({ ok: true, alice: alice.userId, bob: bob.userId, text }));
 } catch (error) {
   for (const [index, context] of contexts.entries()) {
