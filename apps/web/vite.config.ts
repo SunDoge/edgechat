@@ -1,22 +1,9 @@
 import { defineConfig, type Plugin } from "vite";
+import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import solid from "vite-plugin-solid";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { precacheAssetPaths, renderServiceWorker } from "./build-service-worker.ts";
-
-const ONNX_WASM_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/ort-wasm-simd-threaded.asyncify.wasm";
-
-function omitExternalOnnxWasm(): Plugin {
-  return {
-    name: "edgechat-omit-external-onnx-wasm",
-    generateBundle(_options, bundle) {
-      for (const [fileName, output] of Object.entries(bundle)) {
-        if (output.type === "asset" && fileName.includes("ort-wasm-simd-threaded.asyncify") && fileName.endsWith(".wasm")) delete bundle[fileName];
-      }
-    },
-  };
-}
+import { precacheAssetPaths, renderServiceWorker } from "./build-service-worker.js";
 
 function buildServiceWorker(): Plugin {
   return {
@@ -32,18 +19,11 @@ function buildServiceWorker(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [tailwindcss(), solid(), omitExternalOnnxWasm(), buildServiceWorker()],
-  server: { proxy: {
-    "/api": { target: "http://localhost:8787", ws: true },
-    "/avatars": { target: "http://localhost:8787" },
-  } },
-  worker: { format: "es" },
-  experimental: {
-    renderBuiltUrl(filename) {
-      if (filename.includes("ort-wasm-simd-threaded.asyncify") && filename.endsWith(".wasm")) {
-        return ONNX_WASM_URL;
-      }
-      return { relative: true };
+  plugins: [tailwindcss(), react(), buildServiceWorker()],
+  server: {
+    proxy: {
+      "/api": { target: process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8787", ws: true },
+      "/avatars": { target: process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8787" },
     },
   },
 });

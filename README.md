@@ -12,7 +12,7 @@ The PWA is the install-free baseline client and commits to text, image, recorded
 ## Architecture
 
 ```text
-SolidJS PWA
+React PWA
 ├── UI / VisualViewport / IME-safe composer
 ├── PGlite worker ── OPFS AHP (IndexedDB fallback)
 ├── local plaintext FTS
@@ -54,25 +54,27 @@ included in ordinary test or release commands.
 ## Repository
 
 ```text
-apps/web                  SolidJS + Vite PWA
+apps/web                  React + Vite PWA
 apps/worker               Worker, Room Durable Object, D1 migrations, R2 APIs
 packages/protocol         IDs, event envelopes, codecs, federation boundary
 packages/messaging-core   OpenMLS Rust/Wasm state machine + device support crypto
 packages/bot-sdk          Node.js E2EE SDK for personal notification bots
 packages/db               PGlite schema and dedicated database worker
 packages/sync             REST/WS sync engine and archive range decoder
-packages/ui               Tailwind class contracts + Solid chat adapters
+packages/client-runtime   framework-neutral browser messaging runtime
+packages/client-storage   local profile, vault, and browser storage adapters
+packages/message-content  validated message and media payload contracts
 ```
 
 Worker D1 access is centered on Kysely through [`@sundoge/kysely-d1`](https://github.com/sundoge/kysely-d1), with schema types generated from the migrations by `kysely-codegen`. A small number of direct D1 prepared statements remain where one atomic batch needs conditional `INSERT … SELECT`/compare-and-swap semantics; the Room Durable Object also uses its own colocated SQLite storage rather than D1.
 
 ## Frontend boundary
 
-The visual layer uses SolidJS and Tailwind CSS v4. Theme tokens live in `apps/web/src/styles.css`; reusable, framework-neutral class contracts are exported from `@edgechat/ui/styles`. Components in `@edgechat/ui` are thin Solid browser-behavior adapters for VisualViewport, scroll anchoring, textarea sizing, and IME-safe submission.
+The visual layer uses React 19, Tailwind CSS v4, React Aria Components, TanStack Virtual, and a small Zustand store. Theme tokens live in `apps/web/src/styles.css`. Crypto, sync, persistence, media processing, and Cloudflare orchestration remain outside React in framework-neutral packages.
 
 Keyboard and assistive-technology behavior is part of the client contract: dialogs isolate background content and trap focus, action menus implement labelled Arrow/Home/End/Escape navigation, selected conversations retain native button semantics, and disabled composers expose their reason. The current interface is `zh-Hans`; the remaining deployed screen-reader/browser/zoom matrix and future string-catalog boundary are documented in [`docs/ACCESSIBILITY.md`](docs/ACCESSIBILITY.md). These behaviors are entirely local and create no D1, R2, or S3 traffic.
 
-SolidJS is confined to `apps/web` and `packages/ui`; the protocol, crypto, database, sync, and Worker packages remain framework-independent. Complete static class strings are preferred over dynamically constructed Tailwind class names so monorepo source detection remains deterministic.
+The production PWA intentionally promises a smaller browser-safe surface: registration/login, direct and small-group rooms, Saved Messages, MLS-encrypted text and attachments, image/audio/file previews, local persistence and text search, realtime plus durable recovery, Push controls, and install/update handling. Settings explicitly identify browser or not-yet-ported capabilities. Complete static class strings are preferred over dynamically constructed Tailwind class names so monorepo source detection remains deterministic.
 
 Image semantic search is default-off and lazy-loaded. Only the explicit **允许下载并开启** action allows its exact model/runtime bundle to be fetched on first use; ordinary image viewing, indexing, text search, application startup and PWA installation make no model request. The consent record is profile-scoped and bound to the CLIP repository commit, quantization, Transformers.js version and ONNX Runtime build. Changing any downloadable artifact therefore returns the feature to off instead of silently fetching an upgrade. The CLIP request uses a full immutable Hugging Face commit revision, and the browser dependency/runtime URLs use exact versions. They are not stored in R2. Turning the feature off terminates its Worker and removes image vectors from the current profile's PGlite database. The shared model download remains under browser-managed site/cache storage and must be removed through browser site-data controls when the user wants those bytes reclaimed. The runtime is served from jsDelivr because the upstream 4.3.0 asyncify Wasm exceeds Cloudflare Workers' per-static-asset limit, while Transformers.js maintains its own browser cache for subsequent/offline use. Operators that require a fully self-hosted first run should mirror these immutable public artifacts on a dedicated static origin and update the CSP; do not put them into each user's R2 quota.
 
@@ -499,7 +501,7 @@ Protocol/control events remain in the encrypted event stream but are filtered fr
 
 ## Tests
 
-Use `pnpm check` for the fast repository-wide development gate. Before a release, install the pinned Firefox/WebKit runtimes once with `pnpm browser:install:matrix` and run `pnpm check:release`. The release gate adds the production dependency audit, an isolated local Worker messaging smoke, and both three-engine browser matrices while reusing the production Web build emitted by `pnpm check`. All browser phases are loopback-only. The messaging smoke uses a temporary local D1/R2/Durable Object state directory, while the remaining browser phases make no Worker or object-store request; none contacts Cloudflare or an external S3 provider.
+Use `pnpm check` for the repository-wide type, unit, migration, generated-schema, and production-build gate. `pnpm check:release` additionally runs the production dependency audit and the two-device React/MLS browser smoke against an explicitly started local Worker. The smoke covers registration, a direct room, realtime receive, message-request acceptance, reload recovery from OPFS/PGlite, local full-text search, encrypted attachments, and Saved Messages. The former Solid-specific cross-browser harnesses described below are retained only as historical design evidence and are not current commands; equivalent React cross-browser coverage remains release follow-up work.
 
 The suite covers native and generated-Wasm OpenMLS group creation, Welcome join, application messages, add/remove Commits, state snapshot restore, application replay, ciphertext/Commit tampering, wrong-group delivery, out-of-order generations, stale Commits, post-removal isolation, strict TLS framing, and malformed snapshot/input rejection; persist-before-publish KeyPackage replenishment, room-scoped claim retries and stale reservation cleanup; capability-protected device links, explicit approval, key-possession claim, spare-KeyPackage transfer, chunk-authenticated ECDH history handoff, exact R2 quota return/cron cleanup, stable fingerprint/link parsing, exact-fingerprint peer trust downgrade, and PGlite link outboxes; per-room device-removal jobs, exact-Commit local recovery, stale-epoch rejection, session invalidation and hibernated WebSocket closure; stable reply/quote references, bounded encrypted quote snapshots, sender-only edits, latest-writer reaction reduction, encrypted read projections and malformed-event quarantine; authenticated ephemeral typing that leaves D1/R2 untouched; personal-bot provisioning, room scope, revocation, SDK ciphertext-only transport and recipient decryption; destination-scoped zero-copy attachment forwarding, source retraction retention, final-reference reclamation, and exact-event retry idempotency; pre-KeyPackage message-request reservation, one-text/no-R2 quarantine, metadata-only reporting and audited Operator resolution; layered login throttling, exact lock state, Operator-token isolation, audited idempotent login unlock, D1-only storage totals, per-user quota enforcement and reset; bounded-memory offline D1/R2 reconciliation, paginated API access, recent-write suppression and stale-intent classification; plus room sequence monotonicity, duplicate event idempotency, membership checks, sender-only tombstones with idempotent R2 attachment reclamation, ciphertext-only D1 persistence, local PGlite FTS, attachment tamper rejection, authenticated zstd range-segment decoding, decompression bounds, compaction lease serialization/failure release, partial range selection, globally scoped IDs/federation rejection, variable-height timeline range calculation, scroll anchoring, and CJK IME Enter behavior. The sync engine is structured so WebSocket is disposable and durable catch-up is always the recovery path.
 

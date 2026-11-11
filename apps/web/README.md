@@ -1,8 +1,6 @@
-# EdgeChat React client
+# EdgeChat web client
 
-This is the in-progress replacement for `@edgechat/web`. It intentionally runs
-on a separate development port until the first messaging milestone has feature
-parity with the deployed Solid client.
+This is the production React PWA served by the Cloudflare Worker.
 
 ## Boundaries
 
@@ -20,10 +18,11 @@ Do not move encryption, sync, or database transactions into React hooks.
 
 ```sh
 pnpm dev:worker
-pnpm dev:web:react
+pnpm dev:web
 ```
 
-The React client currently supports account registration, login, device-session
-continuation, session restoration, and room-list loading. The production build
-continues to use `@edgechat/web` until chat send/receive and offline recovery are
-ported and verified.
+The PWA supports registration/login, session restoration, direct and small-group
+rooms, Saved Messages, MLS-encrypted text and attachments, local persistence and
+full-text search, WebSocket plus durable sync recovery, Web Push controls, and
+PWA install/update handling. Browser-specific limitations are displayed in the
+settings screen rather than silently hiding unavailable capabilities.

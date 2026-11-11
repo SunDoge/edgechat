@@ -291,7 +291,7 @@ OpenMLS state handling, RoomDO ordering, durable sync, or realtime delivery:
 EDGECHAT_LOAD_MESSAGES=100 pnpm run load:local
 ```
 
-The command builds the real Rust/Wasm core and Solid application, migrates a
+The command builds the real Rust/Wasm core and React application, migrates a
 temporary local D1 database, starts Wrangler with temporary local R2 state, and
 drives two independent Chromium profiles through registration, room setup,
 contact-request acceptance, MLS encryption, event admission, realtime receipt,

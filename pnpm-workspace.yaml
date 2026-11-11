@@ -14,3 +14,9 @@ allowBuilds:
   esbuild: true
   protobufjs: false
   workerd: true
+
+# SunDoge currently declares the pre-v5 Workers type package even though its
+# D1 adapter only consumes the structurally compatible D1Database surface.
+peerDependencyRules:
+  allowedVersions:
+    "@cloudflare/workers-types": ">=4"
