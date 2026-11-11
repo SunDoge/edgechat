@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { ensureActiveLocalProfile, localProfileToken } from "@edgechat/client-storage/local-profiles";
+import { registerPwaServiceWorker } from "@edgechat/client-runtime/pwa-lifecycle";
 import { App } from "./App";
 import "./styles.css";
 
@@ -15,3 +16,5 @@ void start().catch((cause) => {
   const root = document.getElementById("root");
   if (root) root.textContent = cause instanceof Error ? cause.message : "EdgeChat 无法启动";
 });
+
+if (import.meta.env.PROD) window.addEventListener("load", () => void registerPwaServiceWorker());

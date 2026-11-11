@@ -1878,6 +1878,11 @@ describe("single-server durable delivery", () => {
     const headers = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
     expect((await SELF.fetch("https://edgechat.test/api/v1/rooms", { method: "POST", headers,
       body: JSON.stringify({ room_id: roomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }) })).status).toBe(201);
+    const unrelatedDevice = await device("unrelated-room-device");
+    const unrelated = await register("unrelated_room_owner", unrelatedDevice);
+    const unrelatedRoomId = "!unrelated-room-01:localhost" as RoomId;
+    expect((await SELF.fetch("https://edgechat.test/api/v1/rooms", { method: "POST", headers: { authorization: `Bearer ${unrelated.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ room_id: unrelatedRoomId, kind: "direct", members: [], mls_welcome: "welcome", mls_ratchet_tree: "tree", mls_epoch: 1, mls_recipients: [], mls_claim_ids: [] }) })).status).toBe(201);
     const archiveDevices = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/devices`, { headers });
     expect(archiveDevices.status, await archiveDevices.clone().text()).toBe(200);
     expect(await archiveDevices.json()).toMatchObject({ devices: [{ device_id: account.device_id, user_id: account.user_id, display_name: "repair-device", kind: "user", signing_key: { kty: "EC", crv: "P-256" }, encryption_key: { kty: "EC", crv: "P-256" }, revoked_at: null }] });

@@ -20,6 +20,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@edgechat/client-runtime':
+        specifier: workspace:*
+        version: link:../../packages/client-runtime
       '@edgechat/client-storage':
         specifier: workspace:*
         version: link:../../packages/client-storage
@@ -285,6 +288,9 @@ importers:
       '@edgechat/sync':
         specifier: workspace:*
         version: link:../sync
+      dexie:
+        specifier: ^4.4.6
+        version: 4.4.6
     devDependencies:
       typescript:
         specifier: latest

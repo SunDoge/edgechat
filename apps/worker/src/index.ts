@@ -2020,6 +2020,7 @@ async function listRoomDevices(env: Env, auth: AuthContext, roomId: RoomId): Pro
     .innerJoin("devices as d", "d.device_id", "rd.device_id")
     .innerJoin("users as u", "u.user_id", "rd.user_id")
     .select(["rd.device_id", "rd.user_id", "d.display_name", "d.kind", "d.signing_key", "d.encryption_key", "d.created_at", "d.revoked_at"])
+    .where("rd.room_id", "=", roomId)
     .where("rd.removed_at", "is", null).where("d.revoked_at", "is", null)
     .where("u.deletion_requested_at", "is", null).where("u.deleted_at", "is", null)
     .orderBy("rd.device_id").limit(1_001).execute();
@@ -2032,6 +2033,7 @@ async function listRoomSigningKeys(env: Env, auth: AuthContext, roomId: RoomId):
   const rows = await createDatabase(env.DB).selectFrom("room_devices as rd")
     .innerJoin("devices as d", "d.device_id", "rd.device_id")
     .select(["rd.device_id", "rd.user_id", "d.signing_key"])
+    .where("rd.room_id", "=", roomId)
     .orderBy("rd.device_id").limit(1_001).execute();
   if (rows.length > 1_000) throw new HttpError(409, "Room has too many historical device keys", "room_device_limit");
   return json({ keys: rows.map((row) => ({ ...row, signing_key: JSON.parse(row.signing_key) as JsonWebKey })) });

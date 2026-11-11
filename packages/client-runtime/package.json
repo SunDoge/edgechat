@@ -3,7 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./archive-segment-cache": "./src/archive-segment-cache.ts",
+    "./key-package-replenishment": "./src/key-package-replenishment.ts",
+    "./pwa-lifecycle": "./src/pwa-lifecycle.ts",
+    "./push-subscription": "./src/push-subscription.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
@@ -14,7 +20,8 @@
     "@edgechat/message-content": "workspace:*",
     "@edgechat/messaging-core": "workspace:*",
     "@edgechat/protocol": "workspace:*",
-    "@edgechat/sync": "workspace:*"
+    "@edgechat/sync": "workspace:*",
+    "dexie": "^4.4.6"
   },
   "devDependencies": {
     "typescript": "latest",

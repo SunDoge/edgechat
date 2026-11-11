@@ -1,7 +1,7 @@
 import { loadIdentity, saveIdentity } from "@edgechat/client-storage/vault";
-import { LocalDatabase, type LocalMessage } from "@edgechat/db";
-import { assertMessageEnvelope, createMessagePayload, messageText, normalizeMessagePayload, type AttachmentMetadata, type MessagePayload } from "@edgechat/message-content";
-import { decodeBase64Url, encodeBase64Url, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
+import { LocalDatabase, type LocalMessage, type LocalMessageWindow, type SearchResult } from "@edgechat/db";
+import { assertMessageEnvelope, createMessagePayload, embeddedImagePreviewByteLength, messageText, normalizeMessagePayload, prepareImageMetadata, type AttachmentMetadata, type MessagePayload } from "@edgechat/message-content";
+import { decodeBase64Url, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
 import {
   canonicalEventBytes,
   isDeliveryReceiptPayload,
@@ -24,15 +24,20 @@ import {
 } from "@edgechat/protocol";
 import {
   ApiClient,
+  ArchiveCoordinator,
+  ArchiveSegmentBuilder,
   LocalProjectionPersistenceError,
   LocalStagingIntegrityError,
   OutboxEngine,
   SyncEngine,
   createAttachmentId,
+  type ArchiveSegmentDescriptor,
   type ServerRoom,
   type SessionIdentity,
 } from "@edgechat/sync";
 import { stagedMlsPosition } from "./crypto-state";
+import { replenishMlsKeyPackages } from "./key-package-replenishment";
+import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -91,10 +96,13 @@ export class BrowserMessagingRuntime extends EventTarget {
   private mls: OpenMlsMessagingCore;
   private sync: SyncEngine | null = null;
   private outbox: OutboxEngine | null = null;
+  private archive: ArchiveCoordinator | null = null;
+  private readonly archiveCache: ArchiveSegmentCiphertextCache;
   private roomsState: ServerRoom[] = [];
   private connectionState: RuntimeConnection = "starting";
   private mlsTail: Promise<void> = Promise.resolve();
   private discoveryTimer: ReturnType<typeof setInterval> | null = null;
+  private keyPackageTimer: ReturnType<typeof setInterval> | null = null;
   private readonly resumeDiscovery = () => {
     if (document.visibilityState === "visible" && navigator.onLine) void this.sync?.catchUp();
   };
@@ -109,6 +117,7 @@ export class BrowserMessagingRuntime extends EventTarget {
     this.session = session;
     this.identity = identity;
     this.mls = mls;
+    this.archiveCache = new ArchiveSegmentCiphertextCache(options.profileId);
   }
 
   static async open(options: BrowserRuntimeOptions): Promise<BrowserMessagingRuntime> {
@@ -146,6 +155,15 @@ export class BrowserMessagingRuntime extends EventTarget {
 
   async olderMessages(roomId: RoomId, beforeSeq: number, limit = 100): Promise<LocalMessage[]> {
     return (await this.db.messagesBefore(roomId, beforeSeq, limit)).reverse();
+  }
+
+  async messageWindow(roomId: RoomId, targetSeq: number): Promise<LocalMessageWindow> {
+    return this.db.messageWindow(roomId, targetSeq);
+  }
+
+  async search(query: string, roomId?: RoomId): Promise<SearchResult[]> {
+    const normalized = query.trim().slice(0, 200);
+    return normalized ? this.db.search(normalized, roomId) : [];
   }
 
   async refreshRooms(): Promise<readonly ServerRoom[]> {
@@ -211,19 +229,80 @@ export class BrowserMessagingRuntime extends EventTarget {
     return roomId;
   }
 
+  async ensureSavedRoom(): Promise<ServerRoom> {
+    const existing = this.roomsState.find((room) => room.purpose === "saved");
+    if (existing) return existing;
+    const remote = (await this.api.rooms()).rooms.find((room) => room.purpose === "saved");
+    if (remote) { await this.refreshRooms(); return this.roomsState.find((room) => room.room_id === remote.room_id) ?? remote; }
+
+    const roomId = `!${encodeBase64Url(crypto.getRandomValues(new Uint8Array(18)))}:${serverName(this.session)}` as RoomId;
+    const claimed = await this.api.claimMlsKeyPackages([], roomId);
+    const created = await this.exclusiveMls(async () => {
+      const result = this.mls.createGroup(roomId, claimed.key_packages.map((item) => item.key_package));
+      await this.persistMls();
+      return result;
+    });
+    try {
+      await this.api.createRoom({
+        room_id: roomId,
+        kind: "group",
+        purpose: "saved",
+        name: null,
+        members: [],
+        mls_welcome: created.welcome,
+        mls_ratchet_tree: created.ratchet_tree,
+        mls_epoch: created.epoch,
+        mls_recipients: claimed.key_packages.map((item) => item.device_id),
+        mls_claim_ids: claimed.key_packages.map((item) => item.claim_id),
+      });
+    } catch (cause) {
+      const recovered = (await this.api.rooms().catch(() => null))?.rooms.find((room) => room.purpose === "saved");
+      if (!recovered) throw cause;
+    }
+    await this.refreshRooms();
+    const saved = this.roomsState.find((room) => room.purpose === "saved");
+    if (!saved) throw new Error("Saved Messages is not available yet");
+    return saved;
+  }
+
+  async resolveMessageRequest(roomId: RoomId, decision: "accepted" | "rejected"): Promise<void> {
+    if (decision === "accepted") await this.api.acceptMessageRequest(roomId);
+    else await this.api.rejectMessageRequest(roomId);
+    await this.refreshRooms();
+  }
+
   async sendFiles(roomId: RoomId, files: readonly File[], text = ""): Promise<EventId> {
     if (!files.length || files.some((file) => !file.size || !file.name)) throw new RangeError("At least one non-empty file is required");
+    const limits = this.session.protocol?.limits;
+    const maxFiles = limits?.max_attachments_per_message ?? 10;
+    const maxFileBytes = limits?.max_attachment_plaintext_bytes ?? 25 * 1024 * 1024;
+    const maxMessageBytes = limits?.max_message_attachment_plaintext_bytes ?? 100 * 1024 * 1024;
+    if (files.length > maxFiles) throw new RangeError(`A message can contain at most ${maxFiles} attachments`);
+    if (files.some((file) => file.size > maxFileBytes)) throw new RangeError("An attachment exceeds the server size limit");
+    if (files.reduce((total, file) => total + file.size, 0) > maxMessageBytes) throw new RangeError("Attachments exceed the per-message size limit");
     const eventId = `$${crypto.randomUUID()}:${serverName(this.session)}` as EventId;
     const ids = files.map(() => createAttachmentId());
     const cleanup = await this.db.stageAttachmentSendCleanup(eventId, roomId, ids);
     const attachments: AttachmentMetadata[] = [];
+    let previewBudget = 40 * 1024;
     let admitted = false;
     try {
       for (const [index, file] of files.entries()) {
         const id = ids[index]!;
+        const image = await prepareImageMetadata(file, previewBudget);
+        if (image.preview) previewBudget -= embeddedImagePreviewByteLength(image.preview);
         const encrypted = await this.core.encryptAttachment(await file.arrayBuffer(), id);
         const uploaded = await this.api.uploadAttachment(roomId, encrypted.ciphertext, id);
-        attachments.push({ id: uploaded.attachment_id, name: file.name, type: file.type || "application/octet-stream", size: file.size, key: encrypted.key, nonce: encrypted.nonce });
+        attachments.push({
+          id: uploaded.attachment_id,
+          name: file.name,
+          type: file.type || "application/octet-stream",
+          size: file.size,
+          key: encrypted.key,
+          nonce: encrypted.nonce,
+          ...(image.dimensions ?? {}),
+          ...(image.preview ? { preview: image.preview } : {}),
+        });
       }
       const payload = createMessagePayload(eventId as MessageId, text.trim(), attachments);
       await this.enqueueEncryptedEvent({ eventId, roomId, type: "message.file", payload: payload as unknown as Record<string, unknown>, plaintext: messageText(payload), metadata: attachments.length === 1 ? { attachment_id: attachments[0]!.id } : { attachment_ids: attachments.map((item) => item.id) } });
@@ -252,11 +331,13 @@ export class BrowserMessagingRuntime extends EventTarget {
     this.closed = true;
     if (this.discoveryTimer) clearInterval(this.discoveryTimer);
     this.discoveryTimer = null;
+    if (this.keyPackageTimer) clearInterval(this.keyPackageTimer);
+    this.keyPackageTimer = null;
     document.removeEventListener("visibilitychange", this.resumeDiscovery);
     window.removeEventListener("online", this.resumeDiscovery);
     this.connectionState = "stopped";
-    await Promise.allSettled([this.sync?.quiesce(), this.outbox?.quiesce(), this.mlsTail]);
-    this.sync = null; this.outbox = null;
+    await Promise.allSettled([this.sync?.quiesce(), this.outbox?.quiesce(), this.archive?.quiesce(), this.mlsTail]);
+    this.sync = null; this.outbox = null; this.archive = null;
     this.mls.destroy();
     await this.db.close();
     this.emit("state");
@@ -276,17 +357,34 @@ export class BrowserMessagingRuntime extends EventTarget {
       const event = (received as CustomEvent<RoomEvent>).detail;
       this.emit("messages", { roomId: event.room_id });
     });
-    this.sync = new SyncEngine(this.api, this.db, (event) => this.processEvent(event), async () => { await this.refreshRooms(); });
+    this.sync = new SyncEngine(
+      this.api,
+      this.db,
+      (event) => this.processEvent(event),
+      async () => { await this.refreshRooms(); },
+      undefined,
+      (roomId, segment, envelope) => this.resolveArchiveKey(roomId, segment, envelope),
+      false,
+      this.db,
+    );
     this.sync.addEventListener("processed", (received) => {
       const event = (received as CustomEvent<RoomEvent>).detail;
       this.roomsState = this.roomsState.map((room) => room.room_id === event.room_id ? { ...room, current_seq: Math.max(room.current_seq, event.seq) } : room);
+      if (event.seq % 25 === 0) void this.archive?.compact(event.room_id).catch(() => undefined);
       this.emit("messages", { roomId: event.room_id }); this.emit("rooms");
     });
     this.sync.addEventListener("transport", (received) => {
       const connected = Boolean((received as CustomEvent<{ connected: boolean }>).detail.connected);
       this.connectionState = connected ? "online" : "offline"; this.emit("state");
     });
-    this.sync.addEventListener("error", () => { this.connectionState = "offline"; this.emit("state"); });
+    this.sync.addEventListener("error", (received) => {
+      this.connectionState = "offline";
+      this.emit("state");
+      this.dispatchEvent(new CustomEvent("runtime-error", { detail: (received as CustomEvent<unknown>).detail }));
+    });
+    this.sync.addEventListener("quarantined", (received) => {
+      this.dispatchEvent(new CustomEvent("runtime-error", { detail: (received as CustomEvent<{ error: unknown }>).detail.error }));
+    });
     await this.outbox.start();
     for (const room of this.roomsState) void this.sync.connectRoom(room.room_id);
     await this.sync.start();
@@ -295,15 +393,57 @@ export class BrowserMessagingRuntime extends EventTarget {
     this.discoveryTimer = setInterval(() => {
       if (document.visibilityState === "visible" && navigator.onLine) void this.sync?.catchUp();
     }, ROOM_DISCOVERY_INTERVAL_MS);
+    const replenish = () => replenishMlsKeyPackages({
+      api: this.api,
+      mls: this.mls,
+      persist: () => this.persistMls(),
+      exclusive: (operation) => this.exclusiveMls(operation),
+    });
+    void replenish().catch(() => undefined);
+    this.keyPackageTimer = setInterval(() => {
+      if (navigator.onLine) void replenish().catch(() => undefined);
+    }, 30 * 60_000);
+    if (this.session.archive_compaction_enabled) {
+      this.archive = new ArchiveCoordinator(this.api, this.db, new ArchiveSegmentBuilder(), (input) => this.wrapArchiveKey(input), this.archiveCache);
+      void this.archive.reconcilePendingUploads().then(() => this.archive?.reconcileRetentionAcks()).catch(() => undefined);
+      this.roomsState.forEach((room, index) => window.setTimeout(() => void this.archive?.compact(room.room_id).catch(() => undefined), 2_000 + index * 500));
+    }
     this.connectionState = navigator.onLine ? "online" : "offline";
     this.emit("state");
+  }
+
+  private async resolveArchiveKey(roomId: RoomId, segment: ArchiveSegmentDescriptor, envelope: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+    const cached = await this.db.archiveKey(segment.segment_id);
+    if (cached) {
+      if (cached.room_id !== roomId || cached.start_seq !== segment.start_seq || cached.end_seq !== segment.end_seq) {
+        throw new LocalStagingIntegrityError("Cached archive key does not match its signed manifest");
+      }
+      return cached.segment_key;
+    }
+    const key = await openArchiveSegmentKey(envelope, {
+      room_id: roomId,
+      segment_id: segment.segment_id,
+      start_seq: segment.start_seq,
+      end_seq: segment.end_seq,
+    }, this.identity);
+    await this.db.saveArchiveKey(roomId, segment.segment_id, key, segment.start_seq, segment.end_seq);
+    return key;
+  }
+
+  private async wrapArchiveKey(input: { room_id: RoomId; segment_id: string; start_seq: number; end_seq: number; segment_key: Uint8Array<ArrayBuffer> }): Promise<Uint8Array<ArrayBuffer>> {
+    const { devices } = await this.api.roomDevices(input.room_id);
+    if (!devices.some((device) => device.device_id === this.identity.deviceId)) throw new Error("This device is not an archive recipient");
+    return sealArchiveSegmentKey(input, input.segment_key, devices.map((device) => ({ device_id: device.device_id, encryption_key: device.encryption_key })));
   }
 
   private async authenticateEvent(event: RoomEvent): Promise<void> {
     let key = await this.db.roomDeviceSigningKey(event.room_id, event.device_id);
     if (!key) {
       const response = await this.api.roomSigningKeys(event.room_id);
-      await this.db.saveRoomDeviceSigningKeys(event.room_id, response.keys);
+      try { await this.db.saveRoomDeviceSigningKeys(event.room_id, response.keys); }
+      catch (cause) {
+        throw new LocalStagingIntegrityError(cause instanceof Error ? cause.message : "Invalid room signing-key directory");
+      }
       key = await this.db.roomDeviceSigningKey(event.room_id, event.device_id);
     }
     if (!key || key.user_id !== event.sender) throw new LocalStagingIntegrityError("Room event signer is not an active room device");

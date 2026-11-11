@@ -25,6 +25,7 @@
     "load:local": "node scripts/local-messaging-smoke.mjs --load"
   },
   "dependencies": {
+    "@edgechat/client-runtime": "workspace:*",
     "@edgechat/client-storage": "workspace:*",
     "@edgechat/db": "workspace:*",
     "@edgechat/messaging-core": "workspace:*",

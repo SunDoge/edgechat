@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconMessageCircle, IconPlus, IconRefresh } from "@tabler/icons-react";
+import { IconBookmark, IconMessageCircle, IconPlus, IconRefresh, IconSearch, IconSettings } from "@tabler/icons-react";
 import { WebCryptoMessagingCore } from "@edgechat/messaging-core";
 import { BrowserMessagingRuntime, type RuntimeSnapshot } from "@edgechat/client-runtime";
-import type { LocalMessage } from "@edgechat/db";
+import { applyPwaUpdate, dismissPwaUpdate, subscribePwaUpdates, type PwaUpdateState } from "@edgechat/client-runtime/pwa-lifecycle";
+import { disablePush, reconcilePush, setActivePushProfile, type PushStatus } from "@edgechat/client-runtime/push-subscription";
+import type { LocalMessage, SearchResult } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
 import { ApiClient } from "@edgechat/sync";
 import { useStore } from "zustand";
@@ -13,6 +15,8 @@ import { ActionButton } from "./ui";
 import { createAppStore } from "./app-store";
 import { ConversationView } from "./ConversationView";
 import { NewConversationDialog } from "./NewConversationDialog";
+import { SearchDialog } from "./SearchDialog";
+import { SettingsDialog } from "./SettingsDialog";
 
 type Props = { profile: LocalProfile; initialToken: string | null };
 
@@ -40,11 +44,31 @@ export function App({ profile, initialToken }: Props) {
   const runtimeRef = useRef<BrowserMessagingRuntime | null>(null);
   const [selectedId, setSelectedId] = useState<RoomId | null>(null);
   const selectedRef = useRef<RoomId | null>(null);
+  const skipNextRoomRead = useRef<RoomId | null>(null);
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [newConversation, setNewConversation] = useState(false);
+  const [searchRoomId, setSearchRoomId] = useState<RoomId | "all" | null>(null);
+  const [jumpMessageId, setJumpMessageId] = useState<string | null>(null);
+  const [pwaUpdate, setPwaUpdate] = useState<PwaUpdateState>("idle");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pushStatus, setPushStatus] = useState<PushStatus>("off");
+  const [pushBusy, setPushBusy] = useState(false);
+  const completeJump = useCallback(() => setJumpMessageId(null), []);
 
   selectedRef.current = selectedId;
+
+  useEffect(() => subscribePwaUpdates(setPwaUpdate), []);
+
+  useEffect(() => {
+    if (!runtime) return;
+    let active = true;
+    void setActivePushProfile(profile.profile_id)
+      .then(() => reconcilePush(runtime.api, runtime.session.vapid_public_key))
+      .then((status) => { if (active) setPushStatus(status); })
+      .catch(() => { if (active) setPushStatus("error"); });
+    return () => { active = false; };
+  }, [profile.profile_id, runtime]);
 
   const readMessages = useCallback(async (active: BrowserMessagingRuntime, roomId: RoomId) => {
     setLoadingMessages(true);
@@ -66,14 +90,20 @@ export function App({ profile, initialToken }: Props) {
       const roomId = (received as CustomEvent<{ roomId?: RoomId }>).detail?.roomId;
       if (selectedRef.current && (!roomId || roomId === selectedRef.current)) void readMessages(active, selectedRef.current);
     };
+    const runtimeError = (received: Event) => {
+      const cause = (received as CustomEvent<unknown>).detail;
+      actions.setError(cause instanceof Error ? cause.message : "加密同步暂时中断");
+    };
     active.addEventListener("state", applySnapshot);
     active.addEventListener("rooms", roomsChanged);
     active.addEventListener("messages", messagesChanged);
+    active.addEventListener("runtime-error", runtimeError);
     applySnapshot();
     return () => {
       active.removeEventListener("state", applySnapshot);
       active.removeEventListener("rooms", roomsChanged);
       active.removeEventListener("messages", messagesChanged);
+      active.removeEventListener("runtime-error", runtimeError);
     };
   }, [actions, readMessages]);
 
@@ -89,6 +119,7 @@ export function App({ profile, initialToken }: Props) {
 
   useEffect(() => {
     if (!runtime || !selectedId) { setMessages([]); return; }
+    if (skipNextRoomRead.current === selectedId) { skipNextRoomRead.current = null; return; }
     void readMessages(runtime, selectedId);
   }, [readMessages, runtime, selectedId]);
 
@@ -124,19 +155,59 @@ export function App({ profile, initialToken }: Props) {
     }
   }
 
+  async function openSavedMessages() {
+    actions.setError("");
+    try { setSelectedId((await runtime?.ensureSavedRoom())?.room_id ?? null); }
+    catch (cause) { actions.setError(cause instanceof Error ? cause.message : "无法打开已保存消息"); }
+  }
+
+  async function openSearchResult(result: SearchResult) {
+    if (!runtime) return;
+    setSearchRoomId(null);
+    skipNextRoomRead.current = result.room_id;
+    setSelectedId(result.room_id);
+    setJumpMessageId(result.message_id);
+    const window = await runtime.messageWindow(result.room_id, Number(result.seq));
+    setMessages(window.messages);
+  }
+
+  async function resolveMessageRequest(decision: "accepted" | "rejected") {
+    if (!runtime || !selectedId) return;
+    await runtime.resolveMessageRequest(selectedId, decision);
+  }
+
+  async function enablePush() {
+    if (!runtime) return;
+    setPushBusy(true);
+    try { setPushStatus(await reconcilePush(runtime.api, runtime.session.vapid_public_key, true)); }
+    catch { setPushStatus("error"); }
+    finally { setPushBusy(false); }
+  }
+
+  async function turnOffPush() {
+    if (!runtime) return;
+    setPushBusy(true);
+    try { await disablePush(runtime.api); setPushStatus("off"); }
+    catch { setPushStatus("error"); }
+    finally { setPushBusy(false); }
+  }
+
   if (checkingSession) return <main className="grid min-h-dvh place-items-center bg-white text-sm text-muted" role="status">正在恢复本机消息与加密状态…</main>;
   if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={(result) => void authenticated(result)} />;
 
   const selected = rooms.find((room) => room.room_id === selectedId) ?? null;
   return <main className="grid min-h-dvh bg-chat antialiased md:grid-cols-[20rem_1fr]">
     <aside className={`${selected ? "hidden md:block" : "block"} border-r border-black/5 bg-white`}>
-      <header className="flex min-h-16 items-center justify-between border-b border-black/5 px-4 py-2"><div className="min-w-0"><h1 className="font-semibold text-ink">消息</h1><p className="truncate text-xs text-muted" title={sessionState.session.user_id}>{sessionState.session.user_id}</p><p className="text-[11px] text-muted">{connection === "online" ? "已连接" : connection === "offline" ? "离线，可查看和发送" : "正在同步"}</p></div><div className="flex shrink-0"><ActionButton variant="icon" aria-label="刷新对话" onPress={() => void runtime.refreshRooms()}><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} /></ActionButton><ActionButton variant="icon" aria-label="新建对话" onPress={() => setNewConversation(true)}><IconPlus className="size-5" /></ActionButton></div></header>
+      <header className="flex min-h-16 items-center justify-between border-b border-black/5 px-4 py-2"><div className="min-w-0"><h1 className="font-semibold text-ink">消息</h1><p className="truncate text-xs text-muted" title={sessionState.session.user_id}>{sessionState.session.user_id}</p><p className="text-[11px] text-muted">{connection === "online" ? "已连接" : connection === "offline" ? "离线，可查看和发送" : "正在同步"}</p></div><div className="flex shrink-0"><ActionButton variant="icon" aria-label="搜索所有消息" onPress={() => setSearchRoomId("all")}><IconSearch className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="已保存消息" onPress={() => void openSavedMessages()}><IconBookmark className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="设置" onPress={() => setSettingsOpen(true)}><IconSettings className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="刷新对话" onPress={() => void runtime.refreshRooms()}><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} /></ActionButton><ActionButton variant="icon" aria-label="新建对话" onPress={() => setNewConversation(true)}><IconPlus className="size-5" /></ActionButton></div></header>
       {error && <p role="alert" className="m-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
       <nav aria-label="对话列表" className="p-2">
         {rooms.length ? rooms.map((room) => <ActionButton key={room.room_id} variant="quiet" onPress={() => setSelectedId(room.room_id)} className="flex min-h-16 h-auto w-full items-center justify-start gap-3 rounded-xl text-left"><span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft text-brand"><IconMessageCircle className="size-5" /></span><span className="min-w-0"><strong className="block truncate text-sm text-ink">{titleForRoom(room, sessionState.session.user_id)}</strong><span className="block truncate text-xs text-muted">{room.kind === "group" ? `${room.members.length} 位成员` : "端到端加密"}</span></span></ActionButton>) : <div className="px-4 py-12 text-center"><p className="text-sm font-medium text-ink">还没有对话</p><p className="mt-1 text-xs/5 text-muted">可以先在现有客户端创建对话；新建对话正在迁移。</p></div>}
       </nav>
     </aside>
-    {selected ? <ConversationView runtime={runtime} room={selected} session={sessionState.session} messages={messages} loading={loadingMessages} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}
+    {selected ? <ConversationView runtime={runtime} room={selected} session={sessionState.session} messages={messages} loading={loadingMessages} jumpMessageId={jumpMessageId} onJumpComplete={completeJump} onSearch={() => setSearchRoomId(selected.room_id)} onResolveRequest={resolveMessageRequest} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}
     {newConversation && <NewConversationDialog runtime={runtime} onClose={() => setNewConversation(false)} onCreated={(roomId) => { setNewConversation(false); setSelectedId(roomId); }} />}
+    {searchRoomId && <SearchDialog runtime={runtime} roomId={searchRoomId === "all" ? undefined : searchRoomId} onClose={() => setSearchRoomId(null)} onOpenResult={(result) => void openSearchResult(result)} />}
+    {settingsOpen && <SettingsDialog runtime={runtime} pushStatus={pushStatus} pushBusy={pushBusy} onEnablePush={enablePush} onDisablePush={turnOffPush} onClose={() => setSettingsOpen(false)} />}
+    {pwaUpdate !== "idle" && <aside className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-40 flex w-[min(92vw,28rem)] -translate-x-1/2 items-center gap-3 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-xl" aria-live="polite"><p className="min-w-0 flex-1">{pwaUpdate === "applying" ? "正在应用更新…" : "新版本已准备好"}</p>{pwaUpdate === "ready" && <><ActionButton variant="quiet" onPress={dismissPwaUpdate} className="h-9 text-white hover:bg-white/10">稍后</ActionButton><ActionButton onPress={() => applyPwaUpdate()} className="h-9 bg-white text-ink hover:bg-neutral-100">更新</ActionButton></>}</aside>}
   </main>;
 }
