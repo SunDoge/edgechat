@@ -1,0 +1,6 @@
+@import "../../web/src/styles.css";
+
+button,
+input {
+  font: inherit;
+}

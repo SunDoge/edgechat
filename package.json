@@ -10,6 +10,8 @@
   "scripts": {
     "dev": "pnpm --parallel --filter @edgechat/web --filter @edgechat/worker dev",
     "dev:web": "pnpm run build:core && pnpm --filter @edgechat/web dev",
+    "dev:web:react": "pnpm run build:core && pnpm --filter @edgechat/web-react dev",
+    "build:web:react": "pnpm run build:core && pnpm --filter @edgechat/web-react build",
     "dev:worker": "pnpm --filter @edgechat/worker dev",
     "preview:prepare": "pnpm run build:core && pnpm --filter @edgechat/web build && pnpm --filter @edgechat/worker preview:assets",
     "preview": "pnpm run preview:prepare && pnpm --filter @edgechat/worker preview",
