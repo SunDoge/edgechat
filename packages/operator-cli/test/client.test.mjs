@@ -12,6 +12,13 @@ test("parses finite and indefinite retention policies", () => {
   assert.equal(parseArguments(["retention", "!room:example.com", "--days", "indefinite"], env).retentionDays, null);
 });
 
+test("accepts pnpm run's explicit option separator", () => {
+  const env = { EDGECHAT_URL: "https://chat.example.com", EDGECHAT_OPERATOR_TOKEN: "secret" };
+  assert.deepEqual(parseArguments(["--", "invites"], env), {
+    command: "invites", baseUrl: env.EDGECHAT_URL, token: "secret", limit: 50, all: false,
+  });
+});
+
 test("sends the operator token only as an authorization header", async () => {
   let captured;
   const client = new OperatorClient({

@@ -36,6 +36,7 @@ function integer(value, label, minimum, maximum) {
 }
 
 export function parseArguments(argv, env = process.env) {
+  if (argv[0] === "--") argv = argv.slice(1);
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { help: true };
   const command = argv[0];
   if (!new Set(["readiness", "invites", "invite-create", "invite-revoke", "rooms", "storage", "reports", "report", "appeals", "appeal", "retention", "login-locks", "login-unlock"]).has(command)) throw new Error(`Unknown command: ${command}`);
