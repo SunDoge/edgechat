@@ -40,6 +40,30 @@ test("fetches the D1-only readiness snapshot without pagination", async () => {
   assert.equal(captured.init.headers.authorization, "Bearer secret");
 });
 
+test("creates, lists, and revokes registration invitations without putting secrets in URLs", async () => {
+  const env = { EDGECHAT_URL: "https://chat.example.com", EDGECHAT_OPERATOR_TOKEN: "secret" };
+  const options = parseArguments(["invite-create", "--uses", "3", "--days", "7", "--label", "friends"], env);
+  assert.equal(options.maxUses, 3);
+  assert.equal(options.inviteDays, 7);
+  assert.equal(options.label, "friends");
+  const requests = [];
+  const fetchImpl = async (url, init = {}) => {
+    requests.push({ url, init });
+    return new Response(JSON.stringify(init.method === "POST" ? { invite_id: "invite_abc", code: "ec_secret" } : { invites: [] }));
+  };
+  const created = await run(options, fetchImpl);
+  assert.equal(created.code, "ec_secret");
+  assert.equal(requests[0].url, "https://chat.example.com/api/v1/operator/invites");
+  assert.equal(requests[0].url.includes("ec_secret"), false);
+  assert.deepEqual(JSON.parse(requests[0].init.body).label, "friends");
+
+  await run(parseArguments(["invites"], env), fetchImpl);
+  await run(parseArguments(["invite-revoke", "invite_abc"], env), fetchImpl);
+  assert.equal(requests[1].url, "https://chat.example.com/api/v1/operator/invites");
+  assert.equal(requests[2].url, "https://chat.example.com/api/v1/operator/invites/invite_abc");
+  assert.equal(requests[2].init.method, "DELETE");
+});
+
 test("follows bounded room pagination when --all is requested", async () => {
   const urls = [];
   const fetchImpl = async (url) => {

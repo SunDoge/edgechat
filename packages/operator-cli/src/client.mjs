@@ -48,6 +48,21 @@ export class OperatorClient {
     return this.request("/api/v1/operator/readiness");
   }
 
+  invites() {
+    return this.request("/api/v1/operator/invites");
+  }
+
+  createInvite({ label = "", maxUses = 1, expiresAt = null } = {}) {
+    return this.request("/api/v1/operator/invites", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label, max_uses: maxUses, expires_at: expiresAt }),
+    });
+  }
+
+  revokeInvite(inviteId) {
+    return this.request(`/api/v1/operator/invites/${encodeURIComponent(inviteId)}`, { method: "DELETE" });
+  }
+
   reports({ limit = 50, cursor, status = "open" } = {}) {
     const query = new URLSearchParams({ limit: String(limit), status });
     if (cursor) query.set("cursor", cursor);

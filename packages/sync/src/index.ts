@@ -176,6 +176,8 @@ export class ApiClient {
   getToken(): string | null { return this.token; }
   openRealtime(url: URL): RealtimeSocket { return this.networkRoute.openRealtime(url); }
 
+  registrationConfig() { return this.request<{ mode: "open" | "invite" | "closed" }>("/api/v1/registration"); }
+
   register(payload: Record<string, unknown>) { return this.sessionRequest<SessionIdentity & { access_token: string }>("/api/v1/register", { method: "POST", body: JSON.stringify(payload) }); }
   async registerOpaque(payload: Record<string, unknown>) {
     const init = { method: "POST", body: JSON.stringify(payload) } satisfies RequestInit;

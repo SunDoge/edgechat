@@ -32,6 +32,7 @@ type SemanticTables = {
   room_peer_recoveries: { status: "pending" | "transferring" | "ready" | "complete" | "cancelled" };
   room_reports: { category: "spam" | "abuse" | "other"; status: Generated<"open" | "confirmed" | "dismissed"> };
   rooms: { kind: "direct" | "group"; purpose: Generated<"chat" | "saved"> };
+  registration_invites: { max_uses: number; use_count: Generated<number> };
   sync_log: { kind: "room.event" | "device.event" | "room.event.available" };
   users: { account_mode: Generated<"password" | "opaque">; invitation_policy: Generated<"everyone" | "shared_rooms" | "nobody"> };
 };

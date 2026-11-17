@@ -69,6 +69,54 @@ const REPAIR_OBJECT_CLEANUP_RETRY_MS = 5 * 60 * 1_000;
 const REPAIR_OBJECT_CLEANUP_BATCH = 100;
 const visibleMessageEventTypes = new Set(["message.text", "message.file", "message.contact"]);
 
+type RegistrationMode = "open" | "invite" | "closed";
+
+function registrationMode(env: Pick<Env, "REGISTRATION_MODE">): RegistrationMode {
+  return env.REGISTRATION_MODE === "open" || env.REGISTRATION_MODE === "closed" ? env.REGISTRATION_MODE : "invite";
+}
+
+async function registrationInviteHash(body: Record<string, unknown>, env: Env): Promise<string | null> {
+  const mode = registrationMode(env);
+  if (mode === "closed") throw new HttpError(403, "Registration is closed", "registration_closed");
+  if (mode === "open") return null;
+  const code = typeof body.invite_code === "string" && body.invite_code.length <= 128 ? body.invite_code.trim() : "";
+  if (!/^ec_[A-Za-z0-9_-]{43}$/.test(code)) throw new HttpError(403, "A valid invitation code is required", "invalid_invite");
+  const tokenHash = await sha256(code);
+  const active = await createDatabase(env.DB).selectFrom("registration_invites").select("invite_id")
+    .where("token_hash", "=", tokenHash).where("revoked_at", "is", null)
+    .where((expression) => expression.or([expression("expires_at", "is", null), expression("expires_at", ">", Date.now())]))
+    .whereRef("use_count", "<", "max_uses").executeTakeFirst();
+  if (!active) throw new HttpError(403, "Invitation code is invalid, expired, or already used", "invalid_invite");
+  return tokenHash;
+}
+
+function registrationUserInsert(db: ReturnType<typeof createDatabase>, user: {
+  user_id: UserId; localpart: string; display_name: string; bio: string; account_mode?: "opaque";
+  password_hash: string; password_salt: string; created_at: number;
+}, inviteHash: string | null, now: number) {
+  if (!inviteHash) return db.insertInto("users").values(user);
+  return db.insertInto("users")
+    .columns(["user_id", "localpart", "display_name", "bio", "account_mode", "password_hash", "password_salt", "created_at"])
+    .expression(db.selectFrom("registration_invites").select([
+      sql<string>`${user.user_id}`.as("user_id"), sql<string>`${user.localpart}`.as("localpart"),
+      sql<string>`${user.display_name}`.as("display_name"), sql<string>`${user.bio}`.as("bio"),
+      sql<string>`${user.account_mode ?? "password"}`.as("account_mode"), sql<string>`${user.password_hash}`.as("password_hash"),
+      sql<string>`${user.password_salt}`.as("password_salt"), sql<number>`${user.created_at}`.as("created_at"),
+    ]).where("token_hash", "=", inviteHash).where("revoked_at", "is", null)
+      .where((expression) => expression.or([expression("expires_at", "is", null), expression("expires_at", ">", now)]))
+      .whereRef("use_count", "<", "max_uses"));
+}
+
+function registrationInviteUseQueries(db: ReturnType<typeof createDatabase>, inviteHash: string | null, userId: UserId, now: number) {
+  if (!inviteHash) return [];
+  return [
+    db.insertInto("registration_invite_uses").columns(["invite_id", "user_id", "used_at"])
+      .expression(db.selectFrom("registration_invites").select(["invite_id", sql<string>`${userId}`.as("user_id"), sql<number>`${now}`.as("used_at")])
+        .where("token_hash", "=", inviteHash)),
+    db.updateTable("registration_invites").set({ use_count: sql<number>`use_count + 1`, last_used_at: now }).where("token_hash", "=", inviteHash),
+  ];
+}
+
 function validateArchiveV3Envelope(bytes: Uint8Array, totalBytes: number, startSeq: number, endSeq: number, uploaderDeviceId: string, activeDeviceIds: Set<string>): void {
   const invalid = () => { throw new HttpError(400, "Invalid archive segment v3 envelope", "invalid_segment_envelope"); };
   const exactBase64Url = (value: unknown, byteLength: number): value is string => {
@@ -447,6 +495,43 @@ function requiredPositiveSafeInteger(body: Record<string, unknown>, key: string)
   const value = body[key];
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new HttpError(400, `Invalid ${key}`, "invalid_input");
   return value as number;
+}
+
+async function operatorCreateRegistrationInvite(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request, 2_048);
+  const label = body.label === undefined ? "" : stringField(body, "label", 80).trim();
+  const maxUses = body.max_uses === undefined ? 1 : requiredPositiveSafeInteger(body, "max_uses");
+  if (maxUses > 1_000) throw new HttpError(400, "max_uses cannot exceed 1000", "invalid_input");
+  const expiresAt = body.expires_at === undefined || body.expires_at === null ? null : requiredPositiveSafeInteger(body, "expires_at");
+  if (expiresAt !== null && expiresAt <= Date.now()) throw new HttpError(400, "expires_at must be in the future", "invalid_input");
+  const code = `ec_${randomId(32)}`;
+  const inviteId = `invite_${randomId(18)}`;
+  const createdAt = Date.now();
+  await createDatabase(env.DB).insertInto("registration_invites").values({
+    invite_id: inviteId, token_hash: await sha256(code), label, max_uses: maxUses,
+    use_count: 0, expires_at: expiresAt, revoked_at: null, created_at: createdAt, last_used_at: null,
+  }).execute();
+  return json({ invite_id: inviteId, code, label, max_uses: maxUses, use_count: 0, expires_at: expiresAt, created_at: createdAt }, 201);
+}
+
+async function operatorRegistrationInvites(env: Env): Promise<Response> {
+  const rows = await createDatabase(env.DB).selectFrom("registration_invites")
+    .select(["invite_id", "label", "max_uses", "use_count", "expires_at", "revoked_at", "created_at", "last_used_at"])
+    .orderBy("created_at", "desc").limit(100).execute();
+  return json({ registration_mode: registrationMode(env), invites: rows });
+}
+
+async function operatorRevokeRegistrationInvite(env: Env, inviteId: string): Promise<Response> {
+  if (!/^invite_[A-Za-z0-9_-]{24}$/.test(inviteId)) throw new HttpError(400, "Invalid invitation ID", "invalid_input");
+  const revokedAt = Date.now();
+  const result = await createDatabase(env.DB).updateTable("registration_invites").set({ revoked_at: revokedAt })
+    .where("invite_id", "=", inviteId).where("revoked_at", "is", null).executeTakeFirst();
+  if (!result.numUpdatedRows) {
+    const existing = await createDatabase(env.DB).selectFrom("registration_invites").select("revoked_at").where("invite_id", "=", inviteId).executeTakeFirst();
+    if (!existing) throw new HttpError(404, "Invitation not found", "invite_not_found");
+    return json({ invite_id: inviteId, revoked_at: existing.revoked_at });
+  }
+  return json({ invite_id: inviteId, revoked_at: revokedAt });
 }
 
 async function operatorSetStorageLimit(request: Request, env: Env, userId: UserId, remove: boolean): Promise<Response> {
@@ -1543,6 +1628,7 @@ async function register(request: Request, env: Env): Promise<Response> {
   const device = body.device as Record<string, unknown> | undefined;
   if (!/^[a-z0-9_][a-z0-9_.-]{1,30}$/.test(localpart)) throw new HttpError(400, "Invalid username", "invalid_username");
   await limitUnauthenticatedRequest(request, env, "register", localpart);
+  const inviteHash = await registrationInviteHash(body, env);
   if (!device || typeof device !== "object") throw new HttpError(400, "Device is required", "invalid_device");
   const deviceId = stringField(device, "device_id", 96);
   const deviceName = stringField(device, "display_name", 60);
@@ -1557,11 +1643,13 @@ async function register(request: Request, env: Env): Promise<Response> {
   try {
     const db = createDatabase(env.DB);
     await batch(env.DB, [
-      db.insertInto("users").values({ user_id: userId, localpart, display_name: displayName, bio: "", password_hash: credential.hash, password_salt: credential.salt, created_at: now }),
+      registrationUserInsert(db, { user_id: userId, localpart, display_name: displayName, bio: "", password_hash: credential.hash, password_salt: credential.salt, created_at: now }, inviteHash, now),
       db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, device_credential_hash: await sha256(deviceCredential), created_at: now, last_seen_at: now, revoked_at: null }),
       ...(await keyPackageInserts(db, deviceId, packages, now)),
+      ...registrationInviteUseQueries(db, inviteHash, userId, now),
     ]);
   } catch (error) {
+    if (inviteHash) await registrationInviteHash(body, env);
     if (error instanceof Error && error.message.includes("UNIQUE")) throw new HttpError(409, "Username or device already exists", "already_exists");
     throw error;
   }
@@ -1613,6 +1701,7 @@ async function registerOpaqueAccount(request: Request, env: Env): Promise<Respon
   const retryInput = { deviceId, signingKey, encryptionKey, accountCredential, deviceCredential };
   const replay = await replayOpaqueRegistration(env, retryInput);
   if (replay) return replay;
+  const inviteHash = await registrationInviteHash(body, env);
   const db = createDatabase(env.DB);
   const localpart = `u_${randomId(18).toLowerCase()}`;
   const credential = await passwordHash(accountCredential);
@@ -1620,11 +1709,13 @@ async function registerOpaqueAccount(request: Request, env: Env): Promise<Respon
   const now = Date.now();
   try {
     await batch(env.DB, [
-      db.insertInto("users").values({ user_id: userId, localpart, display_name: displayName, bio: "", account_mode: "opaque", password_hash: credential.hash, password_salt: credential.salt, created_at: now }),
+      registrationUserInsert(db, { user_id: userId, localpart, display_name: displayName, bio: "", account_mode: "opaque", password_hash: credential.hash, password_salt: credential.salt, created_at: now }, inviteHash, now),
       db.insertInto("devices").values({ device_id: deviceId, user_id: userId, display_name: deviceName, signing_key: signingKey, encryption_key: encryptionKey, device_credential_hash: await sha256(deviceCredential), created_at: now, last_seen_at: now, revoked_at: null }),
       ...(await keyPackageInserts(db, deviceId, packages, now)),
+      ...registrationInviteUseQueries(db, inviteHash, userId, now),
     ]);
   } catch (error) {
+    if (inviteHash) await registrationInviteHash(body, env);
     if (error instanceof Error && error.message.includes("UNIQUE")) {
       // A concurrent byte-identical retry may have committed between the
       // lookup and this batch. Re-enter once through the authoritative lookup
@@ -5855,7 +5946,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     const shardIndex = Number(publicDeviceLinkHistoryShard[2]);
     return request.method === "GET" ? downloadDeviceLinkHistoryShard(request, env, linkId, shardIndex, ctx) : acknowledgeDeviceLinkHistoryShard(request, env, linkId, shardIndex);
   }
-  if (path === "/api/v1/health" && request.method === "GET") return json({ ok: true, server_name: env.SERVER_NAME, federation: false, protocol: protocolCapabilities(env) });
+  if (path === "/api/v1/registration" && request.method === "GET") return json({ mode: registrationMode(env) });
+  if (path === "/api/v1/health" && request.method === "GET") return json({ ok: true, server_name: env.SERVER_NAME, federation: false, registration: registrationMode(env), protocol: protocolCapabilities(env) });
   if (path.startsWith("/api/v1/operator/")) {
     await limitUnauthenticatedRequest(request, env, "operator", request.headers.get("authorization") ?? "missing");
     await requireOperator(request, env);
@@ -5865,6 +5957,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (path === "/api/v1/operator/reports" && request.method === "GET") return operatorReports(url, env);
     if (path === "/api/v1/operator/appeals" && request.method === "GET") return operatorAppeals(url, env);
     if (path === "/api/v1/operator/login-locks" && request.method === "GET") return operatorLoginLocks(url, env);
+    if (path === "/api/v1/operator/invites" && request.method === "GET") return operatorRegistrationInvites(env);
+    if (path === "/api/v1/operator/invites" && request.method === "POST") return operatorCreateRegistrationInvite(request, env);
     const reportResolution = path.match(/^\/api\/v1\/operator\/reports\/([^/]+)$/);
     if (reportResolution && request.method === "PUT") return operatorResolveReport(request, env, decodeURIComponent(reportResolution[1]));
     const appealResolution = path.match(/^\/api\/v1\/operator\/appeals\/([^/]+)$/);
@@ -5884,6 +5978,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (userLoginUnlock && request.method === "POST") {
       return operatorUnlockLogin(request, env, decodeURIComponent(userLoginUnlock[1]) as UserId);
     }
+    const registrationInvite = path.match(/^\/api\/v1\/operator\/invites\/([^/]+)$/);
+    if (registrationInvite && request.method === "DELETE") return operatorRevokeRegistrationInvite(env, decodeURIComponent(registrationInvite[1]));
     throw new HttpError(404, "Not found", "not_found");
   }
   let auth: AuthContext;

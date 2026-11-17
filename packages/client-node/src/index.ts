@@ -74,6 +74,7 @@ export type RegisterNodeClientOptions = {
   baseUrl: string;
   displayName: string;
   deviceName?: string;
+  inviteCode?: string;
   store?: NodeClientStateStore;
   fetch?: typeof globalThis.fetch;
 };
@@ -181,6 +182,7 @@ export class NodeEdgeChatClient {
     try {
       const session = await api.registerOpaque({
         display_name: options.displayName,
+        ...(options.inviteCode ? { invite_code: options.inviteCode } : {}),
         account_credential: accountCredential,
         device: {
           device_id: deviceId,

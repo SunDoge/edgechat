@@ -12,6 +12,9 @@ Environment:
 
 Commands:
   readiness
+  invites
+  invite-create [--uses N] [--days N] [--label TEXT]
+  invite-revoke INVITE_ID
   rooms [--policy POLICY] [--limit N] [--cursor ROOM_ID] [--all]
   storage [--limit N] [--cursor USER_ID] [--all]
   reports [--status open|confirmed|dismissed|all] [--limit N] [--cursor REPORT_ID] [--all]
@@ -35,16 +38,17 @@ function integer(value, label, minimum, maximum) {
 export function parseArguments(argv, env = process.env) {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { help: true };
   const command = argv[0];
-  if (!new Set(["readiness", "rooms", "storage", "reports", "report", "appeals", "appeal", "retention", "login-locks", "login-unlock"]).has(command)) throw new Error(`Unknown command: ${command}`);
+  if (!new Set(["readiness", "invites", "invite-create", "invite-revoke", "rooms", "storage", "reports", "report", "appeals", "appeal", "retention", "login-locks", "login-unlock"]).has(command)) throw new Error(`Unknown command: ${command}`);
   const values = { command, baseUrl: env.EDGECHAT_URL ?? "", token: env.EDGECHAT_OPERATOR_TOKEN ?? "", limit: 50, all: false };
   let index = 1;
-  if (command === "retention" || command === "report" || command === "appeal" || command === "login-unlock") {
+  if (command === "retention" || command === "report" || command === "appeal" || command === "login-unlock" || command === "invite-revoke") {
     const id = argv[index++];
-    const idLabel = command === "retention" ? "ROOM_ID" : command === "report" ? "REPORT_ID" : command === "appeal" ? "APPEAL_ID" : "USER_ID";
+    const idLabel = command === "retention" ? "ROOM_ID" : command === "report" ? "REPORT_ID" : command === "appeal" ? "APPEAL_ID" : command === "invite-revoke" ? "INVITE_ID" : "USER_ID";
     if (!id || id.startsWith("--")) throw new Error(`${command} requires ${idLabel}`);
     if (command === "retention") values.roomId = id;
     else if (command === "report") values.reportId = id;
     else if (command === "appeal") values.appealId = id;
+    else if (command === "invite-revoke") values.inviteId = id;
     else values.userId = id;
   }
   while (index < argv.length) {
@@ -59,8 +63,11 @@ export function parseArguments(argv, env = process.env) {
     else if (arg === "--status") values.status = value;
     else if (arg === "--resolution") values.resolution = value;
     else if (arg === "--note") values.note = value;
-    else if (arg === "--days") values.retentionDays = value === "indefinite" ? null : integer(value, "--days", 1, 36_500);
+    else if (arg === "--days" && command === "retention") values.retentionDays = value === "indefinite" ? null : integer(value, "--days", 1, 36_500);
     else if (arg === "--minimum-device-copies") values.minimumDeviceCopies = integer(value, "--minimum-device-copies", 1, 10);
+    else if (arg === "--uses") values.maxUses = integer(value, "--uses", 1, 1000);
+    else if (arg === "--label") values.label = value;
+    else if (arg === "--days" && command === "invite-create") values.inviteDays = integer(value, "--days", 1, 3650);
     else throw new Error(`Unknown option: ${arg}`);
   }
   if (!values.baseUrl) throw new Error("EDGECHAT_URL is required");
@@ -82,6 +89,9 @@ export function parseArguments(argv, env = process.env) {
   if (command === "retention" && (values.policy || values.cursor || values.all || values.limit !== 50)) throw new Error("pagination options are not valid for retention");
   if (command === "login-unlock" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status)) throw new Error("pagination options are not valid for login-unlock");
   if (command === "readiness" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status || values.resolution || values.note || values.unlockLogin)) throw new Error("options are not valid for readiness");
+  if ((command === "invites" || command === "invite-revoke") && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status || values.resolution || values.note || values.unlockLogin || values.maxUses || values.label || values.inviteDays)) throw new Error("options are not valid for this invite command");
+  if (command === "invite-create" && (values.policy || values.cursor || values.all || values.limit !== 50 || values.status || values.resolution || values.note || values.unlockLogin)) throw new Error("only --uses, --days, and --label are valid for invite-create");
+  if (command !== "invite-create" && (values.maxUses || values.label || values.inviteDays)) throw new Error("invite options require invite-create");
   if (command !== "retention" && (values.retentionDays !== undefined || values.minimumDeviceCopies !== undefined)) throw new Error("retention options require the retention command");
   if (command === "retention" && values.minimumDeviceCopies !== undefined && values.retentionDays === undefined) throw new Error("--minimum-device-copies requires --days");
   return values;
@@ -103,6 +113,12 @@ async function allPages(first, loadNext, collection) {
 export async function run(options, fetchImpl = globalThis.fetch) {
   const client = new OperatorClient({ baseUrl: options.baseUrl, token: options.token, fetchImpl });
   if (options.command === "readiness") return client.readiness();
+  if (options.command === "invites") return client.invites();
+  if (options.command === "invite-create") return client.createInvite({
+    label: options.label ?? "", maxUses: options.maxUses ?? 1,
+    expiresAt: options.inviteDays ? Date.now() + options.inviteDays * 24 * 60 * 60_000 : null,
+  });
+  if (options.command === "invite-revoke") return client.revokeInvite(options.inviteId);
   if (options.command === "report") return client.resolveReport(options.reportId, { resolution: options.resolution, note: options.note });
   if (options.command === "appeal") return client.resolveAppeal(options.appealId, { resolution: options.resolution, unlockLogin: options.unlockLogin, note: options.note });
   if (options.command === "login-unlock") return client.unlockLogin(options.userId, { note: options.note });

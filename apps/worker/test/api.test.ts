@@ -326,6 +326,60 @@ async function registerOpaque(displayName: string, currentDevice: Awaited<Return
   return response.json() as Promise<{ access_token: string; user_id: UserId; device_id: string; device_credential: string; account_credential: string; account_mode: "opaque"; display_name: string }>;
 }
 
+it("requires hashed operator-issued invitations and consumes a single-use code atomically", async () => {
+  const invitedEnv = { ...(env as unknown as Env), REGISTRATION_MODE: "invite" } satisfies Env;
+  const fetchInvited = async (path: string, init?: RequestInit) => {
+    const context = createExecutionContext();
+    const response = await worker.fetch(new Request(`https://edgechat.test${path}`, init) as Parameters<typeof worker.fetch>[0], invitedEnv, context);
+    await waitOnExecutionContext(context);
+    return response;
+  };
+  expect(await fetchInvited("/api/v1/registration").then((response) => response.json())).toEqual({ mode: "invite" });
+
+  const created = await fetchInvited("/api/v1/operator/invites", {
+    method: "POST", headers: { authorization: "Bearer operator-test-token-with-at-least-32-bytes", "content-type": "application/json" },
+    body: JSON.stringify({ label: "single use", max_uses: 1, expires_at: Date.now() + 60_000 }),
+  });
+  expect(created.status, await created.clone().text()).toBe(201);
+  const invitation = await created.json() as { invite_id: string; code: string };
+  expect(invitation.code).toMatch(/^ec_[A-Za-z0-9_-]{43}$/);
+  const stored = await env.DB.prepare("SELECT token_hash FROM registration_invites WHERE invite_id = ?").bind(invitation.invite_id).first<{ token_hash: string }>();
+  expect(stored?.token_hash).not.toBe(invitation.code);
+
+  const payload = async (name: string) => {
+    const currentDevice = await device(`invited-${name}-${crypto.randomUUID()}`);
+    return {
+      display_name: name, invite_code: invitation.code,
+      account_credential: b64url(crypto.getRandomValues(new Uint8Array(32)).buffer),
+      device: { ...currentDevice.body, device_credential: b64url(crypto.getRandomValues(new Uint8Array(32)).buffer) },
+    };
+  };
+  const [alicePayload, bobPayload] = await Promise.all([payload("Alice"), payload("Bob")]);
+  const missing = await fetchInvited("/api/v1/register/opaque", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...alicePayload, invite_code: undefined }),
+  });
+  expect(missing.status).toBe(403);
+  expect(await missing.json()).toMatchObject({ code: "invalid_invite" });
+  const [alice, bob] = await Promise.all([
+    fetchInvited("/api/v1/register/opaque", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(alicePayload) }),
+    fetchInvited("/api/v1/register/opaque", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bobPayload) }),
+  ]);
+  expect([alice.status, bob.status].sort()).toEqual([201, 403]);
+  const failed = alice.status === 403 ? alice : bob;
+  expect(await failed.json()).toMatchObject({ code: "invalid_invite" });
+  expect(await env.DB.prepare("SELECT use_count FROM registration_invites WHERE invite_id = ?").bind(invitation.invite_id).first()).toEqual({ use_count: 1 });
+  expect(await env.DB.prepare("SELECT count(*) AS count FROM registration_invite_uses WHERE invite_id = ?").bind(invitation.invite_id).first()).toEqual({ count: 1 });
+
+  const successfulPayload = alice.status === 201 ? alicePayload : bobPayload;
+  const replay = await fetchInvited("/api/v1/register/opaque", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(successfulPayload) });
+  expect(replay.status, await replay.clone().text()).toBe(200);
+
+  const revoked = await fetchInvited(`/api/v1/operator/invites/${invitation.invite_id}`, {
+    method: "DELETE", headers: { authorization: "Bearer operator-test-token-with-at-least-32-bytes" },
+  });
+  expect(revoked.status).toBe(200);
+});
+
 it("replays opaque registration after a lost response without creating another account", async () => {
   const r2Before = (await env.ARCHIVE.list()).objects.length;
   const currentDevice = await device(`opaque-register-retry-${crypto.randomUUID()}`);

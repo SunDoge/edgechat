@@ -7,6 +7,7 @@ export type Env = {
   ROOMS: DurableObjectNamespace<RoomDurableObject>;
   ASSETS: Fetcher;
   SERVER_NAME: string;
+  REGISTRATION_MODE?: string;
   VAPID_SUBJECT: string;
   VAPID_PUBLIC_KEY: string;
   ARCHIVE_COMPACTION_ENABLED: string;

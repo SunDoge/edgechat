@@ -13,18 +13,22 @@ export type AuthResult = {
   mls: OpenMlsMessagingCore;
 };
 
-const registrationDraft = object({ displayName: pipe(string(), trim(), minLength(1), maxLength(80)) });
+const registrationDraft = object({
+  displayName: pipe(string(), trim(), minLength(1), maxLength(80)),
+  inviteCode: pipe(string(), trim(), minLength(1), maxLength(128)),
+});
 const loginDraft = object({
   username: pipe(string(), trim(), minLength(1)),
   password: pipe(string(), minLength(10)),
 });
 
-export function validateAuthDraft(input: { mode: AuthMode; displayName: string; username: string; password: string }): string | null {
+export function validateAuthDraft(input: { mode: AuthMode; registrationMode?: "open" | "invite" | "closed"; displayName: string; inviteCode?: string; username: string; password: string }): string | null {
   const result = input.mode === "register"
-    ? safeParse(registrationDraft, { displayName: input.displayName })
+    ? safeParse(registrationDraft, { displayName: input.displayName, inviteCode: input.registrationMode === "open" ? "open-registration" : input.inviteCode ?? "" })
     : safeParse(loginDraft, { username: normalizeAccountIdentifier(input.username), password: input.password });
   if (result.success) return null;
-  return input.mode === "register" ? "请输入显示名称" : "请输入账户标识和至少 10 位的登录密码";
+  if (input.mode === "register") return input.displayName.trim() ? "请输入有效的邀请码" : "请输入显示名称";
+  return "请输入账户标识和至少 10 位的登录密码";
 }
 
 export function normalizeAccountIdentifier(value: string): string {
@@ -56,6 +60,7 @@ export async function authenticate(input: {
   mode: AuthMode;
   profileId: string;
   displayName: string;
+  inviteCode?: string;
   username: string;
   password: string;
   api: ApiClient;
@@ -72,6 +77,7 @@ export async function authenticate(input: {
     await saveIdentity(input.profileId, stored);
     result = await input.api.registerOpaque({
       display_name: input.displayName.trim(),
+      ...(input.inviteCode?.trim() ? { invite_code: input.inviteCode.trim() } : {}),
       account_credential: accountCredential,
       device,
     });

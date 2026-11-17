@@ -127,14 +127,14 @@ export class BrowserMessagingRuntime extends EventTarget {
     await db.open();
     const identity = await loadIdentity(options.profileId);
     if (!identity?.mlsState) { db.close(); throw new Error("Device MLS state is unavailable"); }
+    const cached = await db.cachedSession<SessionIdentity>();
     let session: SessionIdentity;
-    try {
-      session = await api.me();
-      await db.cacheSession(session);
-    } catch (cause) {
-      const cached = await db.cachedSession<SessionIdentity>();
-      if (!cached || cached.device_id !== identity.deviceId || navigator.onLine) { db.close(); throw cause; }
-      session = cached;
+    if (cached?.device_id === identity.deviceId) session = cached;
+    else {
+      try {
+        session = await api.me();
+        await db.cacheSession(session);
+      } catch (cause) { db.close(); throw cause; }
     }
     if (session.device_id !== identity.deviceId) { db.close(); throw new Error("Session belongs to another device"); }
     const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
@@ -346,11 +346,7 @@ export class BrowserMessagingRuntime extends EventTarget {
   private async start(): Promise<void> {
     await this.db.bindAccount(this.session.user_id, this.session.display_name);
     await this.restoreOutgoingTransitions();
-    try { await this.refreshRooms(); }
-    catch (cause) {
-      if (navigator.onLine) throw cause;
-      this.roomsState = await this.db.cachedRooms<ServerRoom>();
-    }
+    this.roomsState = await this.db.cachedRooms<ServerRoom>();
     this.outbox = new OutboxEngine(this.api, this.db);
     this.outbox.addEventListener("changed", () => this.emit("messages"));
     this.outbox.addEventListener("sent", (received) => {
@@ -386,8 +382,11 @@ export class BrowserMessagingRuntime extends EventTarget {
       this.dispatchEvent(new CustomEvent("runtime-error", { detail: (received as CustomEvent<{ error: unknown }>).detail.error }));
     });
     await this.outbox.start();
+    void this.sync.start();
     for (const room of this.roomsState) void this.sync.connectRoom(room.room_id);
-    await this.sync.start();
+    if (navigator.onLine) void this.refreshRooms().catch((cause) => {
+      this.dispatchEvent(new CustomEvent("runtime-error", { detail: cause }));
+    });
     document.addEventListener("visibilitychange", this.resumeDiscovery);
     window.addEventListener("online", this.resumeDiscovery);
     this.discoveryTimer = setInterval(() => {

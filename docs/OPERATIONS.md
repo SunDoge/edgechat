@@ -5,6 +5,23 @@ read the R2/S3 bucket to render a dashboard. Provider inspection is reserved for
 an explicit offline integrity audit because bucket scans consume billable
 operations and do not scale as a health check.
 
+## Registration invitations
+
+Production uses `REGISTRATION_MODE=invite`. Create a code and copy its plaintext
+value from this one response; D1 stores only its SHA-256 hash:
+
+```bash
+EDGECHAT_URL=https://chat.example.com \
+EDGECHAT_OPERATOR_TOKEN="$OPERATOR_TOKEN" \
+pnpm run operator -- invite-create --uses 1 --days 7 --label "Alice"
+```
+
+Use `pnpm run operator -- invites` to inspect use counts and expiry metadata, and
+`pnpm run operator -- invite-revoke INVITE_ID` to stop further use. Invitation
+codes grant account creation only; they do not join rooms, bypass room ACLs, or
+transfer MLS keys. Existing accounts and approved device-link flows are not
+affected when registration is invitation-only or closed.
+
 ## Readiness snapshot and SLOs
 
 Run:

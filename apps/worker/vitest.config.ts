@@ -9,6 +9,7 @@ export default defineConfig({
     miniflare: { bindings: {
       TEST_MIGRATIONS: migrations,
       SERVER_NAME: "localhost",
+      REGISTRATION_MODE: "open",
       OPERATOR_TOKEN: "operator-test-token-with-at-least-32-bytes",
       ARCHIVE_COMPACTION_ENABLED: "true",
       EVENT_RECEIPT_KEY_ID: "test-v1",

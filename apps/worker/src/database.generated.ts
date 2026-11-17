@@ -486,6 +486,24 @@ export interface PushSubscriptions {
   updated_at: number;
 }
 
+export interface RegistrationInvites {
+  created_at: number;
+  expires_at: number | null;
+  invite_id: string;
+  label: Generated<string>;
+  last_used_at: number | null;
+  max_uses: number;
+  revoked_at: number | null;
+  token_hash: string;
+  use_count: Generated<number>;
+}
+
+export interface RegistrationInviteUses {
+  invite_id: string;
+  used_at: number;
+  user_id: string;
+}
+
 export interface RetentionObjectDeletions {
   attempts: Generated<number>;
   ciphertext_bytes: number;
@@ -735,6 +753,8 @@ export interface DB {
   profile_avatar_deletions: ProfileAvatarDeletions;
   profile_avatar_repair_jobs: ProfileAvatarRepairJobs;
   push_subscriptions: PushSubscriptions;
+  registration_invite_uses: RegistrationInviteUses;
+  registration_invites: RegistrationInvites;
   retention_object_deletions: RetentionObjectDeletions;
   room_device_keys: RoomDeviceKeys;
   room_devices: RoomDevices;

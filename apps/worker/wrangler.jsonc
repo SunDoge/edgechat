@@ -7,6 +7,7 @@
   "placement": { "mode": "smart" },
   "vars": {
     "SERVER_NAME": "edgechat.groundsaunter.workers.dev",
+    "REGISTRATION_MODE": "invite",
     "OBJECT_STORE_PROVIDER": "r2",
     "OBJECT_STORE_OPERATION_LOGGING": "false",
     "USER_OBJECT_QUOTA_BYTES": "2147483648",

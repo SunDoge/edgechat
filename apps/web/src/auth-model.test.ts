@@ -7,7 +7,9 @@ describe("normalizeAccountIdentifier", () => {
   });
 
   it("validates auth input at the UI boundary", () => {
-    expect(validateAuthDraft({ mode: "register", displayName: "   ", username: "", password: "" })).toBe("请输入显示名称");
+    expect(validateAuthDraft({ mode: "register", registrationMode: "invite", displayName: "   ", inviteCode: "", username: "", password: "" })).toBe("请输入显示名称");
+    expect(validateAuthDraft({ mode: "register", registrationMode: "invite", displayName: "Alice", inviteCode: "", username: "", password: "" })).toBe("请输入有效的邀请码");
+    expect(validateAuthDraft({ mode: "register", registrationMode: "open", displayName: "Alice", username: "", password: "" })).toBeNull();
     expect(validateAuthDraft({ mode: "login", displayName: "", username: "@alice:example.com", password: "short" })).toContain("至少 10 位");
     expect(validateAuthDraft({ mode: "login", displayName: "", username: "@alice:example.com", password: "long-enough" })).toBeNull();
   });

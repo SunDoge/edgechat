@@ -220,6 +220,10 @@
     {
       "file": "0055_event_storage_quotas.sql",
       "sha256": "3eb7b847c4bacceeb29086d8f086e93ddbac9cab7da00d6ef9678036fa6ec432"
+    },
+    {
+      "file": "0056_registration_invites.sql",
+      "sha256": "901e0c0c5ea7f0875737c381cc8777124385276b504098136e5905b829a7b0ee"
     }
   ]
 }
