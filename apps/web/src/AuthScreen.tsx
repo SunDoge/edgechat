@@ -69,9 +69,9 @@ export function AuthScreen({ profileId, api, core, onReady }: Props) {
     }
   }
 
-  return <main className="isolate grid min-h-dvh place-items-center bg-white px-6 py-10 antialiased">
-    <section className="w-full max-w-xs">
-      <header className="mb-10 text-center"><span className="text-xl font-semibold tracking-tight text-ink">EdgeChat</span></header>
+  return <main className="auth-background isolate grid h-dvh place-items-center overflow-y-auto px-3 py-6 antialiased sm:px-6 sm:py-10">
+    <section className="w-full max-w-sm rounded-3xl bg-white px-5 py-7 shadow-xl shadow-brand-strong/10 ring-1 ring-brand-strong/8 sm:px-8">
+      <header className="mb-7 flex items-center gap-3"><img src="/icon.svg" alt="" width="44" height="44" /><span className="text-xl font-semibold tracking-tight text-ink">EdgeChat</span></header>
       {pairing ? <Suspense fallback={<p role="status">正在打开设备配对…</p>}><DevicePairing profileId={profileId} api={api} core={core} onReady={onReady} onBack={() => setPairing(false)} /></Suspense> : <>
       <ToggleButtonGroup selectionMode="single" selectedKeys={[mode]} onSelectionChange={(keys) => { const value = [...keys][0]; if (value === "register" || value === "login") setMode(value); }} className="mb-8 grid grid-cols-2 rounded-lg bg-neutral-100 p-1" aria-label="账户操作">
         {(["register", "login"] as const).map((value) => <ToggleButton key={value} id={value} className="h-9 rounded-md text-sm font-medium text-muted outline-none selected:bg-white selected:text-ink selected:shadow-sm focus-visible:ring-2 focus-visible:ring-brand">{value === "register" ? "注册" : "登录"}</ToggleButton>)}

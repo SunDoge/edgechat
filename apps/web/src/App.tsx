@@ -197,10 +197,10 @@ export function App({ profile, initialToken }: Props) {
   if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={authenticated} />;
 
   const selected = rooms.find((room) => room.room_id === selectedId) ?? null;
-  return <main className="grid min-h-dvh min-w-0 overflow-hidden bg-chat antialiased md:grid-cols-[20rem_minmax(0,1fr)]">
-    <aside className={`${selected ? "hidden md:block" : "block"} min-w-0 overflow-hidden border-r border-black/5 bg-white`}>
+  return <main className="grid h-dvh min-w-0 overflow-hidden bg-chat antialiased md:grid-cols-[20rem_minmax(0,1fr)]">
+    <aside className={`${selected ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-col overflow-hidden border-r border-brand-strong/10 bg-white`}>
       <header className="flex min-h-16 min-w-0 items-center justify-between border-b border-black/5 px-3 pb-2 pt-[max(.5rem,env(safe-area-inset-top))] sm:px-4">
-        <div className="min-w-0 flex-1"><h1 className="font-semibold text-ink">消息</h1><p className="truncate text-xs text-muted" title={sessionState.session.user_id}>{sessionState.session.user_id}</p><p className="text-[11px] text-muted">{connection === "online" ? "已连接" : connection === "offline" ? "离线，可查看和发送" : "正在同步"}</p></div>
+        <div className="min-w-0 flex-1"><h1 className="text-lg font-semibold tracking-tight text-ink">消息</h1><p className="truncate text-xs text-muted" title={sessionState.session.user_id}>{sessionState.session.user_id}</p><p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted"><span aria-hidden="true" className={`size-1.5 rounded-full ${connection === "online" ? "bg-emerald-600" : "bg-amber-500"}`} />{connection === "online" ? "已连接" : connection === "offline" ? "离线，可查看和发送" : "正在同步"}</p></div>
         <div className="hidden shrink-0 md:flex"><ActionButton variant="icon" aria-label="搜索所有消息" onPress={() => setSearchRoomId("all")}><IconSearch className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="已保存消息" onPress={() => void openSavedMessages()}><IconBookmark className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="设置" onPress={() => setSettingsOpen(true)}><IconSettings className="size-5" /></ActionButton><ActionButton variant="icon" aria-label="刷新对话" onPress={() => void runtime.refreshRooms()}><IconRefresh className={`size-5 ${loadingRooms ? "animate-spin" : ""}`} /></ActionButton><ActionButton variant="icon" aria-label="新建对话" onPress={() => setNewConversation(true)}><IconPlus className="size-5" /></ActionButton></div>
         <div className="flex shrink-0 md:hidden">
           <ActionButton variant="icon" aria-label="搜索所有消息" onPress={() => setSearchRoomId("all")}><IconSearch className="size-5" /></ActionButton>
@@ -222,7 +222,7 @@ export function App({ profile, initialToken }: Props) {
         </div>
       </header>
       {error && <p role="alert" className="m-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-      <nav aria-label="对话列表" className="p-2">
+      <nav aria-label="对话列表" className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
         {rooms.length ? rooms.map((room) => <ActionButton key={room.room_id} variant="quiet" onPress={() => setSelectedId(room.room_id)} className="flex min-h-16 h-auto w-full items-center justify-start gap-3 rounded-xl text-left"><span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft text-brand"><IconMessageCircle className="size-5" /></span><span className="min-w-0"><strong className="block truncate text-sm text-ink">{titleForRoom(room, sessionState.session.user_id)}</strong><span className="block truncate text-xs text-muted">{room.kind === "group" ? `${room.members.length} 位成员` : "端到端加密"}</span></span></ActionButton>) : <div className="px-4 py-12 text-center"><p className="text-sm font-medium text-ink">还没有对话</p><p className="mt-1 text-xs/5 text-muted">点右上角的加号，开始一段端到端加密对话。</p></div>}
       </nav>
     </aside>

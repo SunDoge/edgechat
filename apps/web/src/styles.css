@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 @theme {
-  --color-ink: #18181b;
-  --color-muted: #71717a;
+  --color-ink: #192c49;
+  --color-muted: #54647b;
   --color-line: rgb(24 24 27 / 0.10);
-  --color-brand: #2563eb;
-  --color-brand-strong: #1d4ed8;
-  --color-brand-soft: #eff6ff;
-  --color-chat: #f7f7f5;
+  --color-brand: #274aa2;
+  --color-brand-strong: #192c68;
+  --color-brand-soft: #eaf0fb;
+  --color-chat: #f1f4f9;
   --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --shadow-composer: 0 1px 2px rgb(24 24 27 / 0.06), 0 5px 16px rgb(24 24 27 / 0.05);
@@ -26,6 +26,10 @@
 
 @utility chat-viewport { min-height: 0; }
 @utility message-list { min-height: 0; scrollbar-gutter: stable; }
+
+@utility auth-background {
+  background: radial-gradient(ellipse at 50% 0%, #dce8ff, transparent 65%), #f1f4f9;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
