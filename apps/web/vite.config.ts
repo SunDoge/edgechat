@@ -20,6 +20,7 @@ function buildServiceWorker(): Plugin {
 
 export default defineConfig({
   plugins: [tailwindcss(), react(), buildServiceWorker()],
+  optimizeDeps: { include: ["@chatui/core/es/components/Input/index.js"] },
   server: {
     proxy: {
       "/api": { target: process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8787", ws: true },

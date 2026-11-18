@@ -11,6 +11,7 @@
     "smoke:local": "node e2e/messaging-smoke.mjs"
   },
   "dependencies": {
+    "@chatui/core": "3.9.0",
     "@edgechat/client-runtime": "workspace:*",
     "@edgechat/client-storage": "workspace:*",
     "@edgechat/db": "workspace:*",

@@ -11,6 +11,8 @@ ignoredOptionalDependencies:
 
 allowBuilds:
   better-sqlite3: true
+  core-js: false
+  core-js-pure: false
   esbuild: true
   protobufjs: false
   workerd: true
