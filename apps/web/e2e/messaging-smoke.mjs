@@ -6,6 +6,12 @@ const browser = await chromium.launch({ headless: true });
 const contexts = [];
 
 function observe(page, label) {
+  page.on("response", async (response) => {
+    if (response.status() >= 400 && new URL(response.url()).pathname.startsWith("/api/v1/device-links/")) {
+      const body = await response.json().catch(() => ({}));
+      console.error(`[${label}:pairing] ${response.status()} ${body.code ?? ""} ${body.message ?? ""}`);
+    }
+  });
   page.on("console", (message) => {
     if (message.type() === "error") console.error(`[${label}:console] ${message.text()}`);
   });
@@ -70,6 +76,39 @@ try {
   await bob.page.getByLabel("消息输入").fill(savedText);
   await bob.page.getByRole("button", { name: "发送" }).click();
   await bob.page.getByText(savedText, { exact: true }).waitFor({ timeout: 15_000 });
+
+  const linkedContext = await browser.newContext();
+  contexts.push(linkedContext);
+  const linked = await linkedContext.newPage();
+  observe(linked, "linked");
+  await linked.goto(baseUrl);
+  await linked.getByRole("button", { name: "添加这台设备到已有账户" }).click();
+  await linked.getByRole("button", { name: "生成配对编号" }).click();
+  const code = await linked.locator("code").first().textContent({ timeout: 30_000 });
+  assert.ok(code);
+  await bob.page.getByRole("button", { name: "设置", exact: true }).click();
+  await bob.page.getByLabel("新设备配对编号").fill(code);
+  await bob.page.getByRole("button", { name: "查看配对请求" }).click();
+  await bob.page.getByRole("button", { name: "指纹一致，批准设备" }).click();
+  await bob.page.getByText(/设备已批准/).waitFor({ timeout: 30_000 });
+  await bob.page.getByRole("button", { name: "关闭设置" }).click();
+  await linked.reload();
+  await linked.getByRole("button", { name: "添加这台设备到已有账户" }).click();
+  assert.equal(await linked.locator("code").first().textContent(), code);
+  await linked.getByRole("button", { name: "检查配对进度" }).click();
+  const linkedIdentity = linked.locator('header p[title^="@"]');
+  await linkedIdentity.waitFor({ timeout: 30_000 });
+  assert.equal(await linkedIdentity.getAttribute("title"), bob.userId);
+  await linked.getByRole("button", { name: "已保存消息", exact: true }).first().click();
+  await linked.getByText(savedText, { exact: true }).waitFor({ timeout: 20_000 });
+  const linkedText = `Linked device ${Date.now()}`;
+  await linked.getByLabel("消息输入").fill(linkedText);
+  await linked.getByRole("button", { name: "发送" }).click();
+  await bob.page.getByText(linkedText, { exact: true }).waitFor({ timeout: 20_000 });
+  const followup = `Original device ${Date.now()}`;
+  await bob.page.getByLabel("消息输入").fill(followup);
+  await bob.page.getByRole("button", { name: "发送" }).click();
+  await linked.getByText(followup, { exact: true }).waitFor({ timeout: 20_000 });
 
   // Compact layout regression: the account identifier must not expand the
   // list header over its actions, and the composer must grow before scrolling.

@@ -3,6 +3,7 @@ import { LocalDatabase, type LocalMessage, type LocalMessageWindow, type SearchR
 import { assertMessageEnvelope, createMessagePayload, embeddedImagePreviewByteLength, messageText, normalizeMessagePayload, prepareImageMetadata, type AttachmentMetadata, type MessagePayload } from "@edgechat/message-content";
 import { decodeBase64Url, encodeBase64Url, openArchiveSegmentKey, sealArchiveSegmentKey, OpenMlsMessagingCore, WebCryptoMessagingCore, type DeviceIdentity } from "@edgechat/messaging-core";
 import {
+  acceptedEventMatchesClientEvent,
   canonicalEventBytes,
   isDeliveryReceiptPayload,
   isMessageDeletePayload,
@@ -32,12 +33,15 @@ import {
   SyncEngine,
   createAttachmentId,
   type ArchiveSegmentDescriptor,
+  type DeviceLinkPreview,
   type ServerRoom,
   type SessionIdentity,
 } from "@edgechat/sync";
 import { stagedMlsPosition } from "./crypto-state";
 import { replenishMlsKeyPackages } from "./key-package-replenishment";
 import { ArchiveSegmentCiphertextCache } from "./archive-segment-cache";
+import { AttachmentCiphertextCache } from "./attachment-cache";
+import { sealAccountCredential } from "@edgechat/messaging-core";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -98,6 +102,7 @@ export class BrowserMessagingRuntime extends EventTarget {
   private outbox: OutboxEngine | null = null;
   private archive: ArchiveCoordinator | null = null;
   private readonly archiveCache: ArchiveSegmentCiphertextCache;
+  private readonly attachmentCache: AttachmentCiphertextCache;
   private roomsState: ServerRoom[] = [];
   private connectionState: RuntimeConnection = "starting";
   private mlsTail: Promise<void> = Promise.resolve();
@@ -118,6 +123,7 @@ export class BrowserMessagingRuntime extends EventTarget {
     this.identity = identity;
     this.mls = mls;
     this.archiveCache = new ArchiveSegmentCiphertextCache(options.profileId);
+    this.attachmentCache = new AttachmentCiphertextCache(options.profileId);
   }
 
   static async open(options: BrowserRuntimeOptions): Promise<BrowserMessagingRuntime> {
@@ -148,6 +154,70 @@ export class BrowserMessagingRuntime extends EventTarget {
   }
 
   rooms(): readonly ServerRoom[] { return this.roomsState; }
+
+  async approveLinkedDevice(linkId: string, expectedDeviceId: string, transferHistory: (
+    view: DeviceLinkPreview, identity: DeviceIdentity, segments: Awaited<ReturnType<ArchiveSegmentCiphertextCache["entries"]>>,
+  ) => Promise<void>): Promise<boolean> {
+    let view = await this.api.deviceLinkPreview(linkId);
+    if (view.device_id !== expectedDeviceId) throw new Error("配对设备已变化");
+    if (view.account_mode === "opaque" && !this.identity.accountCredential) throw new Error("这台设备缺少账户凭证");
+    if (view.status === "pending") {
+      await this.api.approveDeviceLink(linkId);
+      view = await this.api.deviceLinkPreview(linkId);
+    }
+    if (view.status === "awaiting_packages") return false;
+    if (!["approved", "complete", "claimed"].includes(view.status)) throw new Error("配对请求已失效");
+    if (view.status !== "claimed") await transferHistory(view, this.identity, await this.archiveCache.entries().catch(() => []));
+    if (this.identity.accountCredential && view.status !== "claimed" && !view.account_credential_ready) {
+      const envelope = await sealAccountCredential(this.identity.accountCredential, {
+        linkId, sourceDeviceId: this.identity.deviceId, targetDeviceId: view.device_id,
+      }, view.encryption_key);
+      await this.api.uploadDeviceLinkAccountCredential(linkId, envelope);
+    }
+    await this.sync?.catchUp();
+    return this.exclusiveMls(async () => {
+      for (const room of view.rooms) {
+        let queued = await this.db.deviceLinkOutbox(linkId, room.room_id);
+        if (!queued && room.status === "complete") continue;
+        if (!queued) {
+          if (this.mls.epoch(room.room_id) !== room.expected_epoch - 1) throw new Error("房间尚未同步，请稍后重试");
+          const previous = this.mls.exportState();
+          const staged = await OpenMlsMessagingCore.create(this.identity.deviceId, previous);
+          try {
+            const commit = staged.addMembers(room.room_id, [room.key_package]);
+            if (!commit.welcome || commit.epoch !== room.expected_epoch) throw new Error("无法生成房间邀请");
+            const unsigned: Omit<ClientEvent, "signature"> = {
+              event_id: `$${crypto.randomUUID()}:${serverName(this.session)}`,
+              room_id: room.room_id, sender: this.session.user_id as UserId, device_id: this.identity.deviceId,
+              type: "control.device.add", created_at: Date.now(), ciphertext: commit.commit,
+              // The durable outbox uses JSONB, which orders keys by length and then bytes.
+              metadata: { link_id: linkId, mls_epoch: commit.epoch, target_device_id: view.device_id },
+            };
+            const event = { ...unsigned, signature: await this.core.sign(this.identity, canonicalEventBytes(unsigned)) };
+            const encryptedState = JSON.stringify({ version: 1, welcome: commit.welcome, ratchet_tree: commit.ratchet_tree });
+            await this.db.saveDeviceLinkOutbox(linkId, view.device_id, event, encryptedState, previous, staged.exportState());
+          } finally { staged.destroy(); }
+          queued = await this.db.deviceLinkOutbox(linkId, room.room_id);
+          if (!queued) throw new Error("无法保存配对进度");
+        }
+        const epoch = this.mls.epoch(room.room_id);
+        if (epoch !== room.expected_epoch - 1 && epoch !== room.expected_epoch) throw new Error("房间加密状态已变化");
+        if (epoch === room.expected_epoch - 1) {
+          const current = this.mls.exportState();
+          if (stagedMlsPosition(current, queued.previous_mls_state, queued.mls_state) !== "previous") {
+            throw new LocalStagingIntegrityError("Device link transition does not match active state");
+          }
+        }
+        const accepted = await this.api.commitDeviceLinkRoom(linkId, room.room_id, queued.event, queued.encrypted_state);
+        if (!acceptedEventMatchesClientEvent(accepted.event, queued.event)) {
+          throw new LocalStagingIntegrityError("The server acknowledged a different device-link commit");
+        }
+        if (epoch === room.expected_epoch - 1) await this.replaceMls(queued.mls_state);
+        await this.db.removeDeviceLinkOutbox(linkId, room.room_id);
+      }
+      return true;
+    });
+  }
 
   async messages(roomId: RoomId, limit = 200): Promise<LocalMessage[]> {
     return (await this.db.messages(roomId, limit)).reverse();
@@ -320,10 +390,20 @@ export class BrowserMessagingRuntime extends EventTarget {
   }
 
   async downloadAttachment(attachment: AttachmentMetadata): Promise<Blob> {
+    const decrypt = async (ciphertext: ArrayBuffer) => {
+      const plaintext = await this.core.decryptAttachment(ciphertext, attachment.key, attachment.nonce, attachment.id);
+      if (plaintext.byteLength !== attachment.size) throw new Error("Attachment size does not match authenticated metadata");
+      return new Blob([plaintext], { type: attachment.type });
+    };
+    const cached = await this.attachmentCache.get(attachment.id).catch(() => null);
+    if (cached) {
+      try { return await decrypt(cached); }
+      catch { await this.attachmentCache.remove(attachment.id).catch(() => undefined); }
+    }
     const ciphertext = await this.api.downloadAttachment(attachment.id);
-    const plaintext = await this.core.decryptAttachment(ciphertext, attachment.key, attachment.nonce, attachment.id);
-    if (plaintext.byteLength !== attachment.size) throw new Error("Attachment size does not match authenticated metadata");
-    return new Blob([plaintext], { type: attachment.type });
+    const plaintext = await decrypt(ciphertext);
+    await this.attachmentCache.put(attachment.id, ciphertext);
+    return plaintext;
   }
 
   async close(): Promise<void> {
@@ -463,6 +543,18 @@ export class BrowserMessagingRuntime extends EventTarget {
       if (event.device_id === this.identity.deviceId && membershipCommit) {
         const epoch = Number(event.metadata.mls_epoch);
         if (Number.isInteger(epoch) && this.mls.epoch(event.room_id) >= epoch) return null;
+        const linkId = event.metadata.link_id;
+        if (event.type === "control.device.add" && typeof linkId === "string") {
+          const queued = await this.db.deviceLinkOutbox(linkId, event.room_id);
+          if (queued) {
+            if (!acceptedEventMatchesClientEvent(event, queued.event)
+              || stagedMlsPosition(this.mls.exportState(), queued.previous_mls_state, queued.mls_state) !== "previous") {
+              throw new LocalStagingIntegrityError("Accepted device-link event does not match its staged transition");
+            }
+            await this.replaceMls(queued.mls_state);
+            return null;
+          }
+        }
       }
       if (staged) {
         const position = stagedMlsPosition(this.mls.exportState(), staged.previous_mls_state, staged.next_mls_state);

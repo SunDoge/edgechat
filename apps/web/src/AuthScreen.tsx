@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
 import { IconShieldLock } from "@tabler/icons-react";
 import { ToggleButton, ToggleButtonGroup } from "react-aria-components";
 import type { WebCryptoMessagingCore } from "@edgechat/messaging-core";
@@ -6,15 +6,17 @@ import { ApiError, type ApiClient } from "@edgechat/sync";
 import { loadIdentity } from "@edgechat/client-storage/vault";
 import { authenticate, continueDeviceSession, normalizeAccountIdentifier, validateAuthDraft, type AuthMode, type AuthResult } from "./auth-model";
 import { ActionButton, TextInput } from "./ui";
+const DevicePairing = lazy(() => import("./DevicePairing").then(({ DevicePairing }) => ({ default: DevicePairing })));
 
 type Props = {
   profileId: string;
   api: ApiClient;
   core: WebCryptoMessagingCore;
-  onReady: (result: AuthResult) => void;
+  onReady: (result: AuthResult) => Promise<void>;
 };
 
 export function AuthScreen({ profileId, api, core, onReady }: Props) {
+  const [pairing, setPairing] = useState(false);
   const [mode, setMode] = useState<AuthMode>("register");
   const [displayName, setDisplayName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
@@ -46,7 +48,7 @@ export function AuthScreen({ profileId, api, core, onReady }: Props) {
     if (validationError) { setError(validationError); return; }
     setBusy(true); setError("");
     try {
-      onReady(await authenticate({ mode, profileId, displayName, inviteCode, username, password, api, core }));
+      await onReady(await authenticate({ mode, profileId, displayName, inviteCode, username, password, api, core }));
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === "invalid_invite") setError("邀请码无效、已过期或已用完");
       else if (cause instanceof ApiError && cause.code === "registration_closed") setError("这个服务器暂未开放注册");
@@ -59,7 +61,7 @@ export function AuthScreen({ profileId, api, core, onReady }: Props) {
   async function continueHere() {
     setBusy(true); setError("");
     try {
-      onReady(await continueDeviceSession({ profileId, api, core }));
+      await onReady(await continueDeviceSession({ profileId, api, core }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "无法恢复设备会话");
     } finally {
@@ -70,6 +72,7 @@ export function AuthScreen({ profileId, api, core, onReady }: Props) {
   return <main className="isolate grid min-h-dvh place-items-center bg-white px-6 py-10 antialiased">
     <section className="w-full max-w-xs">
       <header className="mb-10 text-center"><span className="text-xl font-semibold tracking-tight text-ink">EdgeChat</span></header>
+      {pairing ? <Suspense fallback={<p role="status">正在打开设备配对…</p>}><DevicePairing profileId={profileId} api={api} core={core} onReady={onReady} onBack={() => setPairing(false)} /></Suspense> : <>
       <ToggleButtonGroup selectionMode="single" selectedKeys={[mode]} onSelectionChange={(keys) => { const value = [...keys][0]; if (value === "register" || value === "login") setMode(value); }} className="mb-8 grid grid-cols-2 rounded-lg bg-neutral-100 p-1" aria-label="账户操作">
         {(["register", "login"] as const).map((value) => <ToggleButton key={value} id={value} className="h-9 rounded-md text-sm font-medium text-muted outline-none selected:bg-white selected:text-ink selected:shadow-sm focus-visible:ring-2 focus-visible:ring-brand">{value === "register" ? "注册" : "登录"}</ToggleButton>)}
       </ToggleButtonGroup>
@@ -82,6 +85,8 @@ export function AuthScreen({ profileId, api, core, onReady }: Props) {
         {error && <div role="alert" className="rounded-lg bg-red-50 px-3 py-2.5 text-sm/5 text-red-700">{error}</div>}
         <ActionButton type="submit" isDisabled={busy || (mode === "register" ? registrationMode === "closed" || !displayName.trim() || (registrationMode === "invite" && !inviteCode.trim()) : !username || password.length < 10)}>{busy ? "请稍候…" : mode === "register" ? "创建账户" : "登录"}</ActionButton>
       </form>
+      <ActionButton variant="quiet" className="mt-3 w-full" isDisabled={busy} onPress={() => setPairing(true)}>添加这台设备到已有账户</ActionButton>
+      </>}
       <div className="mt-7 flex items-start gap-2 text-sm/5 text-muted"><IconShieldLock className="mt-0.5 size-4 shrink-0" /><p>本机数据库包含已解密消息，请保护好这台设备。</p></div>
     </section>
   </main>;

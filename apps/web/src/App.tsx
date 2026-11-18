@@ -194,7 +194,7 @@ export function App({ profile, initialToken }: Props) {
   }
 
   if (checkingSession) return <main className="grid min-h-dvh place-items-center bg-white text-sm text-muted" role="status">正在恢复本机消息与加密状态…</main>;
-  if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={(result) => void authenticated(result)} />;
+  if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={authenticated} />;
 
   const selected = rooms.find((room) => room.room_id === selectedId) ?? null;
   return <main className="grid min-h-dvh min-w-0 overflow-hidden bg-chat antialiased md:grid-cols-[20rem_minmax(0,1fr)]">

@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./archive-segment-cache": "./src/archive-segment-cache.ts",
+    "./attachment-cache": "./src/attachment-cache.ts",
     "./key-package-replenishment": "./src/key-package-replenishment.ts",
     "./pwa-lifecycle": "./src/pwa-lifecycle.ts",
     "./push-subscription": "./src/push-subscription.ts"
