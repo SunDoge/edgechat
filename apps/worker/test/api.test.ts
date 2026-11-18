@@ -455,10 +455,18 @@ it("requires a target-device envelope before an opaque account can claim a linke
     body: JSON.stringify({ ...target.body, mls_key_packages: ["L".repeat(120)] }),
   });
   expect(initiated.status, await initiated.clone().text()).toBe(201);
-  const link = await initiated.json() as { link_id: string; secret: string };
+  const link = await initiated.json() as { link_id: string; secret: string; pairing_code: string; pairing_code_expires_at: number };
   const sourceHeaders = { authorization: `Bearer ${account.access_token}`, "content-type": "application/json" };
+  expect(link.pairing_code).toMatch(/^[2-9A-HJ-NP-Z]{8}$/);
+  const shortCodeUrl = `https://edgechat.test/api/v1/device-links/code/${link.pairing_code}`;
+  expect((await SELF.fetch(shortCodeUrl)).status).toBe(401);
+  expect(await (await SELF.fetch(shortCodeUrl, { headers: sourceHeaders })).json()).toMatchObject({ link_id: link.link_id, status: "pending" });
+  await env.DB.prepare("UPDATE device_links SET created_at=? WHERE link_id=?").bind(Date.now() - 6 * 60_000, link.link_id).run();
+  expect((await SELF.fetch(shortCodeUrl, { headers: sourceHeaders })).status).toBe(404);
+  await env.DB.prepare("UPDATE device_links SET created_at=? WHERE link_id=?").bind(link.pairing_code_expires_at - 5 * 60_000, link.link_id).run();
   const approved = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { method: "POST", headers: sourceHeaders });
   expect(await approved.json()).toMatchObject({ status: "complete", required_packages: 0 });
+  expect((await SELF.fetch(shortCodeUrl, { headers: sourceHeaders })).status).toBe(404);
   const preview = await SELF.fetch(`https://edgechat.test/api/v1/device-links/${link.link_id}`, { headers: sourceHeaders });
   expect(await preview.json()).toMatchObject({ account_mode: "opaque", account_credential_ready: false });
 

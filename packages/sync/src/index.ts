@@ -226,7 +226,7 @@ export class ApiClient {
     return this.request<AccountAppealReceipt>("/api/v1/appeals", { method: "POST", body: JSON.stringify({ user_id: userId, password, category }) });
   }
   accountAppealStatus(receipt: string) { return this.request<AccountAppealState>(`/api/v1/appeals/${encodeURIComponent(receipt)}`); }
-  createDeviceLink(payload: Record<string, unknown>) { return this.request<{ link_id: string; secret: string; expires_at: number; server_name: string }>("/api/v1/device-links", { method: "POST", body: JSON.stringify(payload) }); }
+  createDeviceLink(payload: Record<string, unknown>) { return this.request<{ link_id: string; secret: string; expires_at: number; server_name: string; pairing_code?: string; pairing_code_expires_at?: number }>("/api/v1/device-links", { method: "POST", body: JSON.stringify(payload) }); }
   deviceLinkStatus(linkId: string, secret: string) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/status`, { headers: { "x-device-link-secret": secret } }); }
   cancelDeviceLink(linkId: string, secret: string) { return this.request<void>(`/api/v1/device-links/${encodeURIComponent(linkId)}/cancel`, { method: "DELETE", headers: { "x-device-link-secret": secret } }); }
   uploadDeviceLinkPackages(linkId: string, secret: string, packages: string[]) { return this.request<DeviceLinkStatus>(`/api/v1/device-links/${encodeURIComponent(linkId)}/key-packages`, { method: "POST", headers: { "x-device-link-secret": secret }, body: JSON.stringify({ mls_key_packages: packages }) }); }
@@ -257,6 +257,7 @@ export class ApiClient {
     await this.raw(`/api/v1/device-links/${encodeURIComponent(linkId)}/history/shards/${index}`, { method: "DELETE", headers: { "x-device-link-secret": secret } });
   }
   deviceLinkPreview(linkId: string) { return this.request<DeviceLinkPreview>(`/api/v1/device-links/${encodeURIComponent(linkId)}`); }
+  deviceLinkPreviewByCode(code: string) { return this.request<DeviceLinkPreview>(`/api/v1/device-links/code/${encodeURIComponent(code)}`); }
   approveDeviceLink(linkId: string) { return this.request<{ link_id: string; status: DeviceLinkStatus["status"]; required_packages: number; expires_at: number }>(`/api/v1/device-links/${encodeURIComponent(linkId)}`, { method: "POST" }); }
   cancelApprovedDeviceLink(linkId: string) { return this.request<void>(`/api/v1/device-links/${encodeURIComponent(linkId)}`, { method: "DELETE" }); }
   uploadDeviceLinkAccountCredential(linkId: string, envelope: string) { return this.request<{ ready: true; source_device_id: string }>(`/api/v1/device-links/${encodeURIComponent(linkId)}/account-credential`, { method: "PUT", body: JSON.stringify({ envelope }) }); }

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { renderSVG } from "uqr";
 import {
   deviceFingerprint, deviceLinkClaimBytes, encodeBase64Url, openAccountCredential,
   OpenMlsMessagingCore, type WebCryptoMessagingCore,
@@ -14,8 +15,12 @@ import { deviceHistoryStagingFor } from "./device-history-staging";
 import { createDeviceHistoryManifest, openDeviceHistoryShard, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
 import type { AuthResult } from "./auth-model";
 import { ActionButton, TextInput } from "./ui";
+import { devicePairingUrl } from "./device-pairing-link";
 
-type Request = { link_id: string; secret: string; deviceId: string; token: string; credential: string };
+type Request = { link_id: string; secret: string; deviceId: string; token: string; credential: string; pairingCode?: string };
+const SHORT_CODE = /^[2-9A-HJ-NP-Z]{8}$/;
+const FULL_CODE = /^[A-Za-z0-9_-]{16,96}$/;
+const normalizeShortCode = (value: string) => value.trim().toUpperCase().replace(/[\s-]/g, "");
 const randomToken = () => encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
 const tokenHash = async (value: string) => encodeBase64Url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
 
@@ -32,6 +37,22 @@ export function DevicePairing({ profileId, api, core, onReady, onBack }: {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [copyStatus, setCopyStatus] = useState("");
+  const code = request?.pairingCode ? request.pairingCode.replace(/^(.{4})(.{4})$/, "$1-$2") : request?.link_id;
+  const pairingUrl = request ? devicePairingUrl(location.origin, request.link_id) : null;
+  const qrImage = useMemo(() => pairingUrl
+    ? `data:image/svg+xml,${encodeURIComponent(renderSVG(pairingUrl, { ecc: "M", border: 4, pixelSize: 5 }))}`
+    : null, [pairingUrl]);
+
+  async function copyCode() {
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopyStatus("已复制编号。");
+    } catch {
+      setCopyStatus("请选中下方编号并手动复制。");
+    }
+  }
 
   async function run(action: "advance" | "cancel") {
     setBusy(true); setError("");
@@ -65,7 +86,7 @@ export function DevicePairing({ profileId, api, core, onReady, onBack }: {
           device_id: identity.deviceId, display_name: navigator.userAgent.includes("Mobile") ? "移动设备" : "浏览器",
           ...keys, mls_key_packages: packages,
         });
-        const next = { link_id: response.link_id, secret: response.secret, deviceId: identity.deviceId, token: randomToken(), credential: randomToken() };
+        const next = { link_id: response.link_id, secret: response.secret, deviceId: identity.deviceId, token: randomToken(), credential: randomToken(), pairingCode: response.pairing_code };
         localStorage.setItem(key, JSON.stringify(next));
         setRequest(next); setStatus("请在旧设备上批准此请求。");
         return;
@@ -158,29 +179,40 @@ export function DevicePairing({ profileId, api, core, onReady, onBack }: {
 
   return <section className="grid min-w-0 gap-4">
     <h1 className="text-2xl font-semibold text-ink">添加这台设备</h1>
-    <p className="text-sm text-muted">在旧设备打开「设置 → 账户设备」，批准这里的请求。同一账号可在两台设备同时使用。</p>
-    {request && <div className="grid gap-2 text-sm"><p>配对编号</p><code className="select-all break-all rounded bg-neutral-100 p-2">{request.link_id}</code>{fingerprint && <><p>设备指纹</p><code className="break-words rounded bg-neutral-100 p-2">{fingerprint}</code></>}</div>}
+    <p className="text-sm text-muted">用已登录的旧设备扫描二维码并批准。也可以复制编号，粘贴到旧设备的「设置 → 账户设备」。</p>
+    {request && <div className="grid gap-2 text-sm">
+      {qrImage && <img src={qrImage} alt="设备配对二维码" width="184" height="184" className="mx-auto rounded-xl border border-line" />}
+      <div className="rounded-xl bg-neutral-50 p-3">
+        <p>{request.pairingCode ? "手输配对码（5 分钟内有效）" : "配对编号"}</p>
+        <code className="mt-1 block select-all break-all text-lg font-semibold tracking-wider">{code}</code>
+        <ActionButton variant="quiet" onPress={() => void copyCode()}>复制配对码</ActionButton>
+        {copyStatus && <p role="status" className="text-muted">{copyStatus}</p>}
+      </div>
+      {fingerprint && <><p>设备指纹</p><code className="break-words rounded bg-neutral-100 p-2">{fingerprint}</code></>}
+    </div>}
     {status && <p role="status" className="text-sm text-muted">{status}</p>}
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-    <ActionButton isDisabled={busy} onPress={() => void run("advance")}>{busy ? "请稍候…" : request ? "检查配对进度" : "生成配对编号"}</ActionButton>
+    <ActionButton isDisabled={busy} onPress={() => void run("advance")}>{busy ? "请稍候…" : request ? "检查配对进度" : "生成配对二维码"}</ActionButton>
     {request && <ActionButton variant="quiet" isDisabled={busy} onPress={() => void run("cancel")}>取消配对</ActionButton>}
     <ActionButton variant="quiet" isDisabled={busy} onPress={onBack}>返回</ActionButton>
   </section>;
 }
 
-export function ApproveDevicePairing({ runtime, onComplete }: { runtime: BrowserMessagingRuntime; onComplete(): Promise<void> }) {
-  const [code, setCode] = useState("");
+export function ApproveDevicePairing({ runtime, initialCode, onComplete }: { runtime: BrowserMessagingRuntime; initialCode: string; onComplete(): Promise<void> }) {
+  const [code, setCode] = useState(initialCode);
   const [preview, setPreview] = useState<DeviceLinkPreview | null>(null);
   const [fingerprint, setFingerprint] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const shortCode = normalizeShortCode(code);
+  const isShort = SHORT_CODE.test(shortCode);
 
   async function proceed() {
     setBusy(true); setError(""); setStatus("");
     try {
       if (!preview) {
-        const next = await runtime.api.deviceLinkPreview(code.trim());
+        const next = isShort ? await runtime.api.deviceLinkPreviewByCode(shortCode) : await runtime.api.deviceLinkPreview(code.trim());
         setFingerprint(await deviceFingerprint(next.signing_key, next.encryption_key));
         setPreview(next);
       } else if (await runtime.approveLinkedDevice(preview.link_id, preview.device_id, async (view, identity, segments) => {
@@ -212,16 +244,20 @@ export function ApproveDevicePairing({ runtime, onComplete }: { runtime: Browser
       } else {
         setStatus("请先在新设备检查配对进度，再回这里继续批准。");
       }
-    } catch {
-      setError("无法处理配对请求。请核对编号，或等待本机同步后重试。");
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404 && isShort && !preview) {
+        setError("配对码无效、已过期或已使用。请核对配对码，或扫描新设备的二维码。");
+      } else {
+        setError("无法处理配对请求。请核对配对码，或等待本机同步后重试。");
+      }
     } finally { setBusy(false); }
   }
 
   return <div className="mt-4 grid gap-2">
-    <TextInput label="新设备配对编号" value={code} onChange={(value) => { setCode(value); setPreview(null); setStatus(""); setError(""); }} isDisabled={busy} inputProps={{ autoComplete: "off", spellCheck: false, maxLength: 96 }} />
+    <TextInput label="新设备配对码" value={code} onChange={(value) => { setCode(value); setPreview(null); setStatus(""); setError(""); }} isDisabled={busy} inputProps={{ autoComplete: "off", spellCheck: false, maxLength: 96, placeholder: "7KMP-3XQT" }} />
     {preview && <p className="break-words text-sm text-muted">请核对新设备指纹：<code className="block">{fingerprint}</code></p>}
     {status && <p role="status" className="text-sm text-muted">{status}</p>}
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-    <ActionButton isDisabled={busy || !/^[A-Za-z0-9_-]{16,96}$/.test(code.trim())} onPress={() => void proceed()}>{busy ? "请稍候…" : preview ? "指纹一致，批准设备" : "查看配对请求"}</ActionButton>
+    <ActionButton isDisabled={busy || (!isShort && !FULL_CODE.test(code.trim()))} onPress={() => void proceed()}>{busy ? "请稍候…" : preview ? "指纹一致，批准设备" : "查看配对请求"}</ActionButton>
   </div>;
 }

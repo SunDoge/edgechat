@@ -18,6 +18,7 @@ import { ConversationView } from "./ConversationView";
 import { NewConversationDialog } from "./NewConversationDialog";
 import { SearchDialog } from "./SearchDialog";
 import { SettingsDialog } from "./SettingsDialog";
+import { parseDevicePairingHash } from "./device-pairing-link";
 
 type Props = { profile: LocalProfile; initialToken: string | null };
 
@@ -52,7 +53,21 @@ export function App({ profile, initialToken }: Props) {
   const [searchRoomId, setSearchRoomId] = useState<RoomId | "all" | null>(null);
   const [jumpMessageId, setJumpMessageId] = useState<string | null>(null);
   const [pwaUpdate, setPwaUpdate] = useState<PwaUpdateState>("idle");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pairingCode, setPairingCode] = useState(() => parseDevicePairingHash(location.hash));
+  const [settingsOpen, setSettingsOpen] = useState(Boolean(pairingCode));
+
+  useEffect(() => {
+    function openPairingLink() {
+      const code = parseDevicePairingHash(location.hash);
+      if (!code) return;
+      history.replaceState(history.state, "", location.pathname + location.search);
+      setPairingCode(code);
+      setSettingsOpen(true);
+    }
+    openPairingLink();
+    window.addEventListener("hashchange", openPairingLink);
+    return () => window.removeEventListener("hashchange", openPairingLink);
+  }, []);
   const [pushStatus, setPushStatus] = useState<PushStatus>("off");
   const [pushBusy, setPushBusy] = useState(false);
   const completeJump = useCallback(() => setJumpMessageId(null), []);
@@ -229,7 +244,7 @@ export function App({ profile, initialToken }: Props) {
     {selected ? <ConversationView runtime={runtime} room={selected} session={sessionState.session} messages={messages} loading={loadingMessages} jumpMessageId={jumpMessageId} onJumpComplete={completeJump} onSearch={() => setSearchRoomId(selected.room_id)} onResolveRequest={resolveMessageRequest} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}
     {newConversation && <NewConversationDialog runtime={runtime} onClose={() => setNewConversation(false)} onCreated={(roomId) => { setNewConversation(false); setSelectedId(roomId); }} />}
     {searchRoomId && <SearchDialog runtime={runtime} roomId={searchRoomId === "all" ? undefined : searchRoomId} onClose={() => setSearchRoomId(null)} onOpenResult={(result) => void openSearchResult(result)} />}
-    {settingsOpen && <SettingsDialog runtime={runtime} pushStatus={pushStatus} pushBusy={pushBusy} onEnablePush={enablePush} onDisablePush={turnOffPush} onClose={() => setSettingsOpen(false)} />}
+    {settingsOpen && <SettingsDialog runtime={runtime} pairingCode={pairingCode} pushStatus={pushStatus} pushBusy={pushBusy} onEnablePush={enablePush} onDisablePush={turnOffPush} onClose={() => { setSettingsOpen(false); setPairingCode(null); }} />}
     {pwaUpdate !== "idle" && <aside className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-40 flex w-[min(92vw,28rem)] -translate-x-1/2 items-center gap-3 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-xl" aria-live="polite"><p className="min-w-0 flex-1">{pwaUpdate === "applying" ? "正在应用更新…" : "新版本已准备好"}</p>{pwaUpdate === "ready" && <><ActionButton variant="quiet" onPress={dismissPwaUpdate} className="h-9 text-white hover:bg-white/10">稍后</ActionButton><ActionButton onPress={() => applyPwaUpdate()} className="h-9 bg-white text-ink hover:bg-neutral-100">更新</ActionButton></>}</aside>}
   </main>;
 }

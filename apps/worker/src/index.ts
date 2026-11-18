@@ -38,6 +38,8 @@ const BOT_TOKEN_MS = 365 * 24 * 60 * 60 * 1_000;
 const BOT_RATE_WINDOW_MS = 60_000;
 const BOT_DEFAULT_MESSAGES_PER_MINUTE = 60;
 const DEVICE_LINK_PENDING_MS = 15 * 60 * 1_000;
+const DEVICE_PAIRING_CODE_MS = 5 * 60 * 1_000;
+const DEVICE_PAIRING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const DEVICE_LINK_APPROVED_MS = 24 * 60 * 60 * 1_000;
 const DEVICE_LINK_SESSION_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEVICE_SESSION_CHALLENGE_MS = 5 * 60 * 1_000;
@@ -2314,7 +2316,8 @@ async function createDeviceLink(request: Request, env: Env): Promise<Response> {
   const encryptionKey = stringField(body, "encryption_key", 2_000);
   const packages = linkPackages(body);
   await validatePublicKeys(signingKey, encryptionKey);
-  const linkId = randomId(18); const secret = randomId(32); const now = Date.now();
+  const pairingCode = Array.from(crypto.getRandomValues(new Uint8Array(8)), (byte) => DEVICE_PAIRING_ALPHABET[byte & 31]).join("");
+  const linkId = `p_${pairingCode}_${randomId(18)}`; const secret = randomId(32); const now = Date.now();
   const db = createDatabase(env.DB);
   const existingDevice = await db.selectFrom("devices").select("device_id").where("device_id", "=", deviceId).executeTakeFirst();
   if (existingDevice) throw new HttpError(409, "Device ID already exists", "already_exists");
@@ -2332,7 +2335,20 @@ async function createDeviceLink(request: Request, env: Env): Promise<Response> {
     if (error instanceof Error && error.message.includes("UNIQUE")) throw new HttpError(409, "Device link already exists", "already_exists");
     throw error;
   }
-  return json({ link_id: linkId, secret, expires_at: now + DEVICE_LINK_PENDING_MS, server_name: env.SERVER_NAME }, 201);
+  return json({ link_id: linkId, secret, expires_at: now + DEVICE_LINK_PENDING_MS, server_name: env.SERVER_NAME,
+    pairing_code: pairingCode, pairing_code_expires_at: now + DEVICE_PAIRING_CODE_MS }, 201);
+}
+
+async function previewDevicePairingCode(request: Request, env: Env, auth: AuthContext, code: string): Promise<Response> {
+  requireUser(auth);
+  await limitUnauthenticatedRequest(request, env, "device-link", `pairing:${auth.userId}`);
+  const prefix = `p_${code}_`;
+  const matches = await createDatabase(env.DB).selectFrom("device_links").select("link_id")
+    .where("link_id", ">=", prefix).where("link_id", "<", `${prefix}~`)
+    .where("status", "=", "pending").where("created_at", ">", Date.now() - DEVICE_PAIRING_CODE_MS)
+    .where("expires_at", ">", Date.now()).limit(2).execute();
+  if (matches.length !== 1) throw new HttpError(404, "Device pairing code unavailable", "not_found");
+  return previewDeviceLink(env, auth, matches[0]!.link_id);
 }
 
 async function deviceLinkStatus(request: Request, env: Env, linkId: string): Promise<Response> {
@@ -6047,6 +6063,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (botDelete && request.method === "DELETE") return revokeBot(env, auth, decodeURIComponent(botDelete[1]));
   if (path === "/api/v1/devices" && request.method === "GET") { requireUser(auth); return listDevices(env, auth.userId); }
   if (path === "/api/v1/devices" && request.method === "POST") { requireUser(auth); return registerDevice(request, env, auth); }
+  const devicePairingCode = path.match(/^\/api\/v1\/device-links\/code\/([2-9A-HJ-NP-Z]{8})$/);
+  if (devicePairingCode && request.method === "GET") return previewDevicePairingCode(request, env, auth, devicePairingCode[1]!);
   const deviceLink = path.match(/^\/api\/v1\/device-links\/([^/]+)$/);
   if (deviceLink && request.method === "GET") return previewDeviceLink(env, auth, decodeURIComponent(deviceLink[1]));
   if (deviceLink && request.method === "POST") return approveDeviceLink(env, auth, decodeURIComponent(deviceLink[1]));
