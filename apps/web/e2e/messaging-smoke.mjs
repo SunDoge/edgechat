@@ -57,11 +57,14 @@ try {
     await composer.dispatchEvent("compositionend");
     await composer.fill(text);
   }
+  const posted = alice.page.waitForResponse((response) => response.status() === 201 && /\/api\/v1\/rooms\/[^/]+\/events$/.test(new URL(response.url()).pathname));
   await alice.page.getByRole("button", { name: "发送" }).click();
   await alice.page.getByText(text, { exact: true }).waitFor({ timeout: 15_000 });
+  const { event: postedEvent } = await (await posted).json();
 
   await bob.page.getByText(alice.displayName, { exact: true }).waitFor({ timeout: 20_000 });
-  await bob.page.getByText(alice.displayName, { exact: true }).click();
+  const notificationHash = `#message?${new URLSearchParams({ room: postedEvent.room_id, seq: String(postedEvent.seq) })}`;
+  await bob.page.evaluate((hash) => { location.hash = hash; }, notificationHash);
   await bob.page.getByText(text, { exact: true }).waitFor({ timeout: 20_000 });
   await bob.page.getByRole("button", { name: "接受", exact: true }).click();
   await bob.page.getByRole("button", { name: "接受", exact: true }).waitFor({ state: "detached", timeout: 15_000 });

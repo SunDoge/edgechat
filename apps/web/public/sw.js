@@ -175,19 +175,64 @@ self.addEventListener("fetch", event => {
   }));
 });
 self.addEventListener("push", event => {
+  let target = null;
+  try {
+    const data = event.data?.json();
+    if (data?.type === "message" && typeof data.room_id === "string" && data.room_id.startsWith("!")
+        && data.room_id.length <= 255 && Number.isSafeInteger(data.seq) && data.seq > 0) {
+      target = { room_id: data.room_id, seq: data.seq };
+    }
+  } catch { /* Keep generic notifications for payload-free or older pushes. */ }
+  const url = target ? `/#message?${new URLSearchParams({ room: target.room_id, seq: String(target.seq) })}` : "/";
   const badge = typeof self.navigator?.setAppBadge === "function" ? self.navigator.setAppBadge().catch(() => undefined) : Promise.resolve();
   const wakeClients = self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => clients.forEach(client => client.postMessage({ type: "EDGECHAT_SYNC_HINT" })));
   event.waitUntil(Promise.all([
-    self.registration.showNotification("EdgeChat", { body: "有新的加密活动，打开后即可同步", icon: "/icon.svg", tag: "edgechat-sync", data: { url: "/" } }),
+    self.registration.showNotification("EdgeChat", { body: "有新的加密活动，打开后即可同步", icon: "/icon.svg",
+      tag: target ? `edgechat:${target.room_id}:${target.seq}` : "edgechat-sync", data: { url } }),
     badge, wakeClients,
   ]));
 });
 self.addEventListener("pushsubscriptionchange", event => {
   event.waitUntil(renewPushSubscription(event));
 });
+async function openNotification(data) {
+  const destination = new URL(typeof data?.url === "string" && data.url.startsWith("/#message?") ? data.url : "/", self.location.origin);
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  if (!destination.hash && windows[0]) {
+    await windows[0].focus();
+    return;
+  }
+  if (destination.hash && windows.length) {
+    // Only the tab owning local messaging state acknowledges. Queueing tabs
+    // never receive routing state or restart the active tab.
+    const channels = [];
+    let timer;
+    const owner = await new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), 500);
+      for (const client of windows) {
+        const channel = new MessageChannel();
+        channels.push(channel.port1);
+        channel.port1.onmessage = (message) => { if (message.data === "received") resolve(client); };
+        try { client.postMessage({ type: "EDGECHAT_OPEN_MESSAGE", hash: destination.hash }, [channel.port2]); }
+        catch { channel.port2.close(); }
+      }
+    });
+    clearTimeout(timer);
+    for (const port of channels) port.close();
+    if (owner) {
+      await owner.focus();
+      return;
+    }
+    try {
+      const navigated = await windows[0].navigate(destination.href);
+      if (navigated) { await navigated.focus(); return; }
+    } catch { /* Open a fresh window when the existing one cannot navigate. */ }
+  }
+  await self.clients.openWindow(destination.href);
+}
+
 self.addEventListener("notificationclick", event => {
   event.notification.close();
   const clearBadge = typeof self.navigator?.clearAppBadge === "function" ? self.navigator.clearAppBadge().catch(() => undefined) : Promise.resolve();
-  const open = self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => clients[0]?.focus() || self.clients.openWindow(event.notification.data?.url || "/"));
-  event.waitUntil(Promise.all([clearBadge, open]));
+  event.waitUntil(Promise.all([clearBadge, openNotification(event.notification.data)]));
 });

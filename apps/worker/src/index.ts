@@ -4272,7 +4272,8 @@ async function sendEvent(request: Request, env: Env, ctx: ExecutionContext, auth
       await processPendingAttachmentDeletions(env, accepted.event_id);
     }
   }
-  ctx.waitUntil(notifyOfflineDevices(env, roomId, auth.deviceId));
+  const isNewMessage = accepted.type === "message.text" || accepted.type === "message.file" || accepted.type === "message.contact";
+  ctx.waitUntil(notifyOfflineDevices(env, roomId, auth.deviceId, isNewMessage ? accepted.seq : undefined));
   return json({ event: accepted }, 201);
 }
 

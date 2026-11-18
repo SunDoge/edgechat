@@ -20,6 +20,7 @@ import { NewConversationDialog } from "./NewConversationDialog";
 import { SearchDialog } from "./SearchDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { parseDevicePairingHash } from "./device-pairing-link";
+import { parseNotificationTarget } from "./notification-route";
 
 type Props = { profile: LocalProfile; initialToken: string | null };
 
@@ -54,6 +55,7 @@ export function App({ profile, initialToken }: Props) {
   const [newConversation, setNewConversation] = useState(false);
   const [searchRoomId, setSearchRoomId] = useState<RoomId | "all" | null>(null);
   const [jumpMessageId, setJumpMessageId] = useState<string | null>(null);
+  const [notificationTarget, setNotificationTarget] = useState(() => parseNotificationTarget(location.hash));
   const [pwaUpdate, setPwaUpdate] = useState<PwaUpdateState>("idle");
   const [pairingCode, setPairingCode] = useState(() => parseDevicePairingHash(location.hash));
   const [settingsOpen, setSettingsOpen] = useState(Boolean(pairingCode));
@@ -77,6 +79,74 @@ export function App({ profile, initialToken }: Props) {
   selectedRef.current = selectedId;
 
   useEffect(() => subscribePwaUpdates(setPwaUpdate), []);
+
+  useEffect(() => {
+    function onHashChange() { setNotificationTarget(parseNotificationTarget(location.hash)); }
+    function onWorkerMessage(event: MessageEvent) {
+      if (event.data?.type === "EDGECHAT_SYNC_HINT") {
+        void runtimeRef.current?.syncNow().catch(() => undefined);
+        return;
+      }
+      if (event.data?.type !== "EDGECHAT_OPEN_MESSAGE" || typeof event.data.hash !== "string") return;
+      const target = parseNotificationTarget(event.data.hash);
+      if (!target) return;
+      history.replaceState(history.state, "", location.pathname + location.search + event.data.hash);
+      setNotificationTarget(target);
+      event.ports[0]?.postMessage("received");
+      event.ports[0]?.close();
+    }
+    window.addEventListener("hashchange", onHashChange);
+    navigator.serviceWorker?.addEventListener("message", onWorkerMessage);
+    return () => {
+      window.removeEventListener("hashchange", onHashChange);
+      navigator.serviceWorker?.removeEventListener("message", onWorkerMessage);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!runtime || !notificationTarget) return;
+    let active = true;
+    const { roomId, seq } = notificationTarget;
+    function consume() {
+      if (parseNotificationTarget(location.hash)) history.replaceState(history.state, "", location.pathname + location.search);
+      setNotificationTarget(null);
+    }
+    async function openNotification(current: BrowserMessagingRuntime) {
+      let knownRoom = current.rooms().some((room) => room.room_id === roomId);
+      let window = knownRoom ? await current.messageWindow(roomId, seq) : null;
+      let message = window?.messages.find((item) => Number(item.seq) === seq);
+      if (!message) {
+        if (!navigator.onLine || connection === "unavailable" || connection === "session-expired") {
+          if (active) actions.setError("暂时无法同步通知中的消息，连接恢复后会重试。");
+          return;
+        }
+        if (!knownRoom) knownRoom = (await current.refreshRooms()).some((room) => room.room_id === roomId);
+        if (!knownRoom) {
+          if (active) { actions.setError("此通知对应的会话已不可访问。"); consume(); }
+          return;
+        }
+        await current.syncNow();
+        window = await current.messageWindow(roomId, seq);
+        message = window.messages.find((item) => Number(item.seq) === seq);
+      }
+      const visibleMessages = message && window ? window.messages : await current.messages(roomId);
+      if (!active) return;
+      messageReadVersion.current++;
+      setLoadingMessages(false);
+      setSearchRoomId(null);
+      setSettingsOpen(false);
+      if (selectedRef.current !== roomId) skipNextRoomRead.current = roomId;
+      setSelectedId(roomId);
+      setMessages(visibleMessages);
+      setJumpMessageId(message?.message_id ?? null);
+      actions.setError(message ? "" : "通知里的消息已不可用，已打开对应会话。");
+      consume();
+    }
+    void openNotification(runtime).catch(() => {
+      if (active) actions.setError("暂时无法打开通知中的消息，连接恢复后会重试。");
+    });
+    return () => { active = false; };
+  }, [actions, connection, notificationTarget, runtime]);
 
   useEffect(() => {
     if (!runtime) return;

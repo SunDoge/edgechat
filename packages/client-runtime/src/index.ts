@@ -238,6 +238,10 @@ export class BrowserMessagingRuntime extends EventTarget {
     return this.db.messageWindow(roomId, targetSeq);
   }
 
+  async syncNow(): Promise<void> {
+    await this.sync?.catchUp();
+  }
+
   async search(query: string, roomId?: RoomId): Promise<SearchResult[]> {
     const normalized = query.trim().slice(0, 200);
     return normalized ? this.db.search(normalized, roomId) : [];

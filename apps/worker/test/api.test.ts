@@ -2,7 +2,7 @@ import { SELF, createExecutionContext, env, waitOnExecutionContext } from "cloud
 import { describe, expect, it, vi } from "vitest";
 import { canonicalDraftEnvelopeBytes, canonicalEventBytes, deviceSessionProofBytes, type ClientEvent, type DeviceSessionChallenge, type DraftEnvelope, type EventId, type RoomEvent, type RoomId, type UserId } from "@edgechat/protocol";
 import worker, { archiveCompactionEnabled, auditRoomHistory, cleanupAccountAppeals, cleanupExpiredDeviceLinks, cleanupExpiredDeviceSessionChallenges, cleanupExpiredKeyPackages, cleanupExpiredRoomPeerRecoveries, isDatabaseSchemaMismatch, processPendingAttachmentDeletions, processPendingR2Writes, processPendingRepairObjectCleanups, processProfileAvatarDeletions, processRetentionObjectDeletions, processRoomRetention, purgeUncommittedAttachments, stageRetentionObjectDeletions } from "../src/index";
-import { eligibleAccountPushEndpoints, eligiblePushEndpoints } from "../src/push";
+import { eligibleAccountPushEndpoints, eligiblePushEndpoints, notifyOfflineDevices } from "../src/push";
 import { LOGIN_FAILURE_LIMIT, cleanupLoginFailureState, clearLoginFailures, limitUnauthenticatedRequest, loginTemporarilyBlocked, recordLoginFailure } from "../src/abuse";
 import type { Env } from "../src/env";
 import { HttpError } from "../src/http";
@@ -3022,6 +3022,26 @@ describe("single-server durable delivery", () => {
     const unmute = await SELF.fetch(`https://edgechat.test/api/v1/rooms/${encodeURIComponent(roomId)}/preferences`, { method: "PUT", headers: { authorization: `Bearer ${bob.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ muted_until: null }) });
     expect(unmute.status).toBe(200);
     expect(await eligiblePushEndpoints(env, roomId, alice.device_id)).toEqual(["https://push.example.test/bob"]);
+    const subscriber = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const vapid = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    await env.DB.prepare("UPDATE push_subscriptions SET p256dh=?, auth=? WHERE device_id=?").bind(
+      b64url(await crypto.subtle.exportKey("raw", subscriber.publicKey)),
+      b64url(crypto.getRandomValues(new Uint8Array(16)).buffer), bob.device_id,
+    ).run();
+    const sendPush = vi.fn(async (_endpoint: string, _request: RequestInit) => new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", sendPush);
+    try {
+      await notifyOfflineDevices({
+        ...env, VAPID_PUBLIC_KEY: b64url(await crypto.subtle.exportKey("raw", vapid.publicKey)),
+        VAPID_PRIVATE_JWK: JSON.stringify(await crypto.subtle.exportKey("jwk", vapid.privateKey)),
+        VAPID_SUBJECT: "mailto:test@example.com",
+      }, roomId, alice.device_id, 42);
+    } finally { vi.unstubAllGlobals(); }
+    expect(sendPush).toHaveBeenCalledOnce();
+    const [pushEndpoint, pushRequest] = sendPush.mock.calls[0]!;
+    expect(pushEndpoint).toBe("https://push.example.test/bob");
+    expect(new Headers(pushRequest.headers).get("content-encoding")).toBe("aes128gcm");
+    expect(new TextDecoder().decode(pushRequest.body as Uint8Array<ArrayBuffer>)).not.toContain(roomId);
     const uploadBody = new Uint8Array([1, 2, 3, 4]);
     const attachment = await SELF.fetch("https://edgechat.test/api/v1/attachments", {
       method: "POST", headers: { authorization: `Bearer ${alice.access_token}`, "x-room-id": roomId, "x-attachment-id": newAttachmentId(), "content-length": "4", "x-content-sha256": await ciphertextDigest(uploadBody) }, body: uploadBody,
