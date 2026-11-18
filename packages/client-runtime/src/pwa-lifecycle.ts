@@ -33,6 +33,21 @@ export function applyPwaUpdate(): boolean {
   return true;
 }
 
+export async function checkForPwaUpdate(): Promise<"ready" | "downloading" | "current" | "unavailable"> {
+  if (!("serviceWorker" in navigator)) return "unavailable";
+  const registration = await navigator.serviceWorker.getRegistration();
+  if (!registration?.active || !navigator.serviceWorker.controller) return "unavailable";
+  if (!registration.waiting) await registration.update();
+  if (registration.waiting) {
+    if (state !== "applying") {
+      waitingWorker = registration.waiting;
+      publish("ready");
+    }
+    return "ready";
+  }
+  return registration.installing ? "downloading" : "current";
+}
+
 export async function registerPwaServiceWorker(): Promise<void> {
   if (!("serviceWorker" in navigator)) return;
   try {

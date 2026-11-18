@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Dialog, Heading, Modal, ModalOverlay } from "react-aria-components";
-import { IconBell, IconDeviceLaptop, IconInfoCircle, IconShieldLock, IconX } from "@tabler/icons-react";
+import { IconBell, IconDeviceLaptop, IconInfoCircle, IconRefresh, IconShieldLock, IconX } from "@tabler/icons-react";
 import type { BrowserMessagingRuntime } from "@edgechat/client-runtime";
 import type { PushStatus } from "@edgechat/client-runtime/push-subscription";
+import { checkForPwaUpdate, subscribePwaUpdates } from "@edgechat/client-runtime/pwa-lifecycle";
 import type { ServerDevice } from "@edgechat/sync";
 import { supportsVoiceRecording } from "./VoiceRecorder";
 import { ActionButton } from "./ui";
@@ -18,6 +19,16 @@ const pushLabels: Record<PushStatus, string> = {
   error: "订阅异常，请重试",
 };
 
+const updateLabels = {
+  idle: "手动检查 EdgeChat 是否有新版本。",
+  checking: "正在检查…",
+  downloading: "正在下载新版本…",
+  ready: "新版本已准备好，关闭设置后可选择更新。",
+  current: "当前已是最新版本。",
+  unavailable: "此页面的自动更新服务尚未就绪。",
+  error: "检查失败，请确认网络连接后重试。",
+};
+
 export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onEnablePush, onDisablePush, onClose }: {
   runtime: BrowserMessagingRuntime;
   pairingCode: string | null;
@@ -30,6 +41,16 @@ export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onE
   const [devices, setDevices] = useState<ServerDevice[]>([]);
   const [persistent, setPersistent] = useState<boolean | null>(null);
   const [storageBusy, setStorageBusy] = useState(false);
+  const [updateCheck, setUpdateCheck] = useState<keyof typeof updateLabels>("idle");
+  const [updateReady, setUpdateReady] = useState(false);
+
+  useEffect(() => subscribePwaUpdates((state) => setUpdateReady(state === "ready")), []);
+
+  async function checkUpdate() {
+    setUpdateCheck("checking");
+    try { setUpdateCheck(await checkForPwaUpdate()); }
+    catch { setUpdateCheck("error"); }
+  }
 
   useEffect(() => {
     let active = true;
@@ -57,6 +78,14 @@ export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onE
           <section><h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><IconDeviceLaptop className="size-4 text-brand" />账户设备</h2><div className="mt-2 divide-y divide-black/5 rounded-xl ring-1 ring-black/5">{devices.map((device) => <div key={device.device_id} className="px-3 py-2.5"><p className="text-sm font-medium text-ink">{device.display_name}{device.device_id === runtime.session.device_id ? " · 当前设备" : ""}</p><p className="truncate text-xs text-muted">{device.device_id}{device.revoked_at ? " · 已撤销" : ""}</p></div>)}</div><Suspense fallback={<p role="status" className="mt-2 text-sm text-muted">正在打开设备配对…</p>}><ApproveDevicePairing key={pairingCode ?? ""} runtime={runtime} initialCode={pairingCode ?? ""} onComplete={async () => setDevices((await runtime.api.devices()).devices)} /></Suspense></section>
           <section className="flex items-center gap-3"><IconBell className="size-5 shrink-0 text-brand" /><div className="min-w-0 flex-1"><h2 className="text-sm font-semibold text-ink">离线通知</h2><p className="text-xs/5 text-muted">{pushLabels[pushStatus]}</p></div>{pushStatus === "on" ? <ActionButton variant="quiet" isDisabled={pushBusy} onPress={() => void onDisablePush()}>关闭</ActionButton> : <ActionButton isDisabled={pushBusy || pushStatus === "unsupported" || pushStatus === "blocked"} onPress={() => void onEnablePush()}>开启</ActionButton>}</section>
           <section className="flex items-center gap-3"><IconDeviceLaptop className="size-5 shrink-0 text-brand" /><div className="min-w-0 flex-1"><h2 className="text-sm font-semibold text-ink">保护本机记录</h2><p className="text-xs/5 text-muted">{persistent === true ? "浏览器已授予持久存储" : persistent === false ? "浏览器仍可能在空间不足时清理记录" : "正在检查…"}</p></div>{persistent === false && <ActionButton variant="quiet" isDisabled={storageBusy} onPress={() => void protectStorage()}>申请保护</ActionButton>}</section>
+          <section className="flex items-center gap-3">
+            <IconRefresh className="size-5 shrink-0 text-brand" />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold text-ink">应用更新</h2>
+              <p role="status" className="text-xs/5 text-muted">{updateLabels[updateReady ? "ready" : updateCheck]}</p>
+            </div>
+            <ActionButton variant="quiet" isDisabled={updateCheck === "checking"} onPress={() => void checkUpdate()}>检查更新</ActionButton>
+          </section>
           <section className="rounded-xl bg-amber-50 p-3 text-xs/5 text-amber-950"><h2 className="flex items-center gap-2 font-semibold"><IconInfoCircle className="size-4" />PWA 能力说明</h2><ul className="mt-1 list-disc space-y-1 pl-5"><li>支持文字、图片、语音和普通文件；语音录制：{supportsVoiceRecording() ? "可用" : "此浏览器不可用，可上传音频"}。</li><li>后台持续运行、系统级分享和通知行为受浏览器/系统限制。</li><li>图片语义搜索默认关闭，只有用户主动下载模型后才会启用；当前 React PWA 尚未下载模型。</li><li>PGlite 中含解密后的本机消息，E2EE 不防护已失陷的本地设备。</li></ul></section>
         </div>
       </Dialog>
