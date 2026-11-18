@@ -1006,7 +1006,11 @@ export class SyncEngine extends EventTarget {
   private async catchUpOnce(): Promise<void> {
     let cursor = await this.db.getCursor();
     do {
-      const page = await this.api.sync(cursor);
+      const page = await this.api.sync(cursor).catch((error: unknown) => {
+        this.dispatchEvent(new CustomEvent("sync-request-failed", { detail: error }));
+        throw error;
+      });
+      this.dispatchEvent(new Event("sync-request-succeeded"));
       for (const item of page.items) {
         if (item.kind === "room.event.available" && item.room_id) await this.prepareRoom?.(item.room_id);
         else if (item.kind === "device.event") {

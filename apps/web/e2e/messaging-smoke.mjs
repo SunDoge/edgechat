@@ -198,6 +198,14 @@ try {
   await bob.page.getByRole("menuitem", { name: "复制消息" }).click();
   await bob.page.waitForFunction((expected) => navigator.clipboard.readText().then((value) => value === expected), longMessage);
 
+  const conversation = bob.page.getByRole("region", { name: "当前对话" });
+  await conversation.getByText("服务器连接正常", { exact: true }).waitFor();
+  const syncRequests = "**/api/v1/sync?*";
+  await bob.page.route(syncRequests, (route) => route.fulfill({ status: 503, json: { code: "unavailable" } }));
+  await conversation.getByText("服务器连接异常", { exact: true }).waitFor({ timeout: 20_000 });
+  await bob.page.unroute(syncRequests);
+  await conversation.getByText("服务器连接正常", { exact: true }).waitFor({ timeout: 20_000 });
+
   const secondTab = await bob.page.context().newPage();
   await secondTab.goto(baseUrl);
   await secondTab.getByRole("heading", { name: "EdgeChat 已在另一个标签页打开" }).waitFor();

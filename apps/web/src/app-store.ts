@@ -1,10 +1,11 @@
 import { createStore } from "zustand/vanilla";
 import type { ServerRoom, SessionIdentity } from "@edgechat/sync";
+import type { RuntimeConnection } from "@edgechat/client-runtime";
 
 export type SessionState = { session: SessionIdentity; token: string } | null;
 
 export type AppState = {
-  connection: "starting" | "online" | "offline" | "stopped";
+  connection: RuntimeConnection;
   sessionState: SessionState;
   rooms: ServerRoom[];
   loadingRooms: boolean;

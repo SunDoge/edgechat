@@ -6,7 +6,8 @@ import type { LocalMessage } from "@edgechat/db";
 import { attachmentPresentation, embeddedImagePreviewUrl, messageAttachments, normalizeMessagePayload, type AttachmentMetadata, type MessagePayload } from "@edgechat/message-content";
 import type { RoomId } from "@edgechat/protocol";
 import type { ServerRoom, SessionIdentity } from "@edgechat/sync";
-import type { BrowserMessagingRuntime } from "@edgechat/client-runtime";
+import type { BrowserMessagingRuntime, RuntimeConnection } from "@edgechat/client-runtime";
+import { ConnectionStatus } from "./ConnectionStatus";
 import { ActionButton } from "./ui";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { copyText } from "./CopyButton";
@@ -15,6 +16,7 @@ const ChatInput = lazy(() => import("./ChatInput"));
 const composerInputClass = "block max-h-32 min-h-11 w-full resize-none rounded-2xl bg-neutral-100 px-4 py-2.5 text-base/6 text-ink outline-none focus:ring-2 focus:ring-brand disabled:text-muted";
 
 type Props = {
+  connection: RuntimeConnection;
   runtime: BrowserMessagingRuntime;
   room: ServerRoom;
   session: SessionIdentity;
@@ -110,7 +112,7 @@ function MessageRow({ runtime, message, own }: { runtime: BrowserMessagingRuntim
   </article>;
 }
 
-export function ConversationView({ runtime, room, session, messages, loading, jumpMessageId, onJumpComplete, onSearch, onResolveRequest, onBack, onSend, onLoadOlder }: Props) {
+export function ConversationView({ connection, runtime, room, session, messages, loading, jumpMessageId, onJumpComplete, onSearch, onResolveRequest, onBack, onSend, onLoadOlder }: Props) {
   const timeline = useRef<VirtuosoHandle>(null);
   const atBottom = useRef(true);
   const loadingOlder = useRef(false);
@@ -223,7 +225,10 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
   return <section className="fixed inset-x-0 top-[var(--edgechat-viewport-top,0px)] grid h-[var(--edgechat-viewport-height,100dvh)] min-h-0 grid-rows-[auto_1fr_auto] bg-chat md:static md:h-dvh" aria-label="当前对话">
     <div className="bg-white pt-[env(safe-area-inset-top)] md:pt-0"><header className="flex min-h-16 items-center gap-2 border-b border-black/5 px-2 sm:px-4">
       <ActionButton variant="icon" aria-label="返回对话列表" onPress={onBack} className="md:hidden"><IconArrowLeft className="size-5" /></ActionButton>
-      <div className="min-w-0 flex-1"><h1 className="truncate font-semibold text-ink">{roomTitle(room, session.user_id)}</h1><p className="text-xs text-muted">端到端加密 · {room.purpose === "saved" ? "仅自己的设备" : `${room.members.length} 位成员`}</p></div>
+      <div className="min-w-0 flex-1">
+        <h1 className="truncate font-semibold text-ink">{roomTitle(room, session.user_id)}</h1>
+        <div className="flex items-center gap-2"><ConnectionStatus connection={connection} /><span className="hidden text-[11px] text-muted sm:inline">· 端到端加密 · {room.purpose === "saved" ? "仅自己的设备" : `${room.members.length} 位成员`}</span></div>
+      </div>
       <ActionButton variant="icon" aria-label="搜索当前对话" onPress={onSearch}><IconSearch className="size-5" /></ActionButton>
     </header>{room.request_status === "pending" && room.request_role === "recipient" && <div className="flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-950"><p className="min-w-0 flex-1">接受后才能回复或收发附件。</p><ActionButton variant="quiet" isDisabled={resolvingRequest} onPress={() => void resolveRequest("rejected")} className="h-9">拒绝</ActionButton><ActionButton isDisabled={resolvingRequest} onPress={() => void resolveRequest("accepted")} className="h-9">接受</ActionButton></div>}{room.request_status === "pending" && room.request_role === "requester" && requestCannotSend && <p className="border-b border-black/5 bg-white px-4 py-2 text-center text-xs text-muted">等待对方接受消息请求</p>}</div>
     <div className="min-h-0">

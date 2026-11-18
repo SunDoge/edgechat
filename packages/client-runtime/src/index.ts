@@ -25,6 +25,7 @@ import {
 } from "@edgechat/protocol";
 import {
   ApiClient,
+  ApiError,
   ArchiveCoordinator,
   ArchiveSegmentBuilder,
   LocalProjectionPersistenceError,
@@ -47,7 +48,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const ROOM_DISCOVERY_INTERVAL_MS = 5_000;
 
-export type RuntimeConnection = "starting" | "online" | "offline" | "stopped";
+export type RuntimeConnection = "starting" | "online" | "offline" | "unavailable" | "session-expired" | "stopped";
 export type RuntimeSnapshot = {
   connection: RuntimeConnection;
   session: SessionIdentity;
@@ -109,7 +110,13 @@ export class BrowserMessagingRuntime extends EventTarget {
   private discoveryTimer: ReturnType<typeof setInterval> | null = null;
   private keyPackageTimer: ReturnType<typeof setInterval> | null = null;
   private readonly resumeDiscovery = () => {
-    if (document.visibilityState === "visible" && navigator.onLine) void this.sync?.catchUp();
+    if (document.visibilityState === "visible" && navigator.onLine && this.connectionState !== "session-expired") {
+      if (this.connectionState === "offline") this.setConnection("starting");
+      void this.sync?.catchUp().catch(() => undefined);
+    }
+  };
+  private readonly markOffline = () => {
+    if (this.connectionState !== "session-expired") this.setConnection("offline");
   };
   private closed = false;
 
@@ -415,6 +422,7 @@ export class BrowserMessagingRuntime extends EventTarget {
     this.keyPackageTimer = null;
     document.removeEventListener("visibilitychange", this.resumeDiscovery);
     window.removeEventListener("online", this.resumeDiscovery);
+    window.removeEventListener("offline", this.markOffline);
     this.connectionState = "stopped";
     await Promise.allSettled([this.sync?.quiesce(), this.outbox?.quiesce(), this.archive?.quiesce(), this.mlsTail]);
     this.sync = null; this.outbox = null; this.archive = null;
@@ -449,18 +457,22 @@ export class BrowserMessagingRuntime extends EventTarget {
       if (event.seq % 25 === 0) void this.archive?.compact(event.room_id).catch(() => undefined);
       this.emit("messages", { roomId: event.room_id }); this.emit("rooms");
     });
-    this.sync.addEventListener("transport", (received) => {
-      const connected = Boolean((received as CustomEvent<{ connected: boolean }>).detail.connected);
-      this.connectionState = connected ? "online" : "offline"; this.emit("state");
+    this.sync.addEventListener("sync-request-succeeded", () => {
+      if (!this.closed) this.setConnection(navigator.onLine ? "online" : "offline");
+    });
+    this.sync.addEventListener("sync-request-failed", (received) => {
+      if (this.closed) return;
+      const cause = (received as CustomEvent<unknown>).detail;
+      this.setConnection(cause instanceof ApiError && cause.status === 401
+        ? "session-expired" : navigator.onLine ? "unavailable" : "offline");
     });
     this.sync.addEventListener("error", (received) => {
-      this.connectionState = "offline";
-      this.emit("state");
       this.dispatchEvent(new CustomEvent("runtime-error", { detail: (received as CustomEvent<unknown>).detail }));
     });
     this.sync.addEventListener("quarantined", (received) => {
       this.dispatchEvent(new CustomEvent("runtime-error", { detail: (received as CustomEvent<{ error: unknown }>).detail.error }));
     });
+    if (!navigator.onLine) this.markOffline();
     await this.outbox.start();
     void this.sync.start();
     for (const room of this.roomsState) void this.sync.connectRoom(room.room_id);
@@ -469,9 +481,8 @@ export class BrowserMessagingRuntime extends EventTarget {
     });
     document.addEventListener("visibilitychange", this.resumeDiscovery);
     window.addEventListener("online", this.resumeDiscovery);
-    this.discoveryTimer = setInterval(() => {
-      if (document.visibilityState === "visible" && navigator.onLine) void this.sync?.catchUp();
-    }, ROOM_DISCOVERY_INTERVAL_MS);
+    window.addEventListener("offline", this.markOffline);
+    this.discoveryTimer = setInterval(this.resumeDiscovery, ROOM_DISCOVERY_INTERVAL_MS);
     const replenish = () => replenishMlsKeyPackages({
       api: this.api,
       mls: this.mls,
@@ -487,8 +498,6 @@ export class BrowserMessagingRuntime extends EventTarget {
       void this.archive.reconcilePendingUploads().then(() => this.archive?.reconcileRetentionAcks()).catch(() => undefined);
       this.roomsState.forEach((room, index) => window.setTimeout(() => void this.archive?.compact(room.room_id).catch(() => undefined), 2_000 + index * 500));
     }
-    this.connectionState = navigator.onLine ? "online" : "offline";
-    this.emit("state");
   }
 
   private async resolveArchiveKey(roomId: RoomId, segment: ArchiveSegmentDescriptor, envelope: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
@@ -689,6 +698,12 @@ export class BrowserMessagingRuntime extends EventTarget {
 
   private emit(type: string, detail?: unknown): void {
     this.dispatchEvent(detail === undefined ? new Event(type) : new CustomEvent(type, { detail }));
+  }
+
+  private setConnection(next: RuntimeConnection): void {
+    if (next === this.connectionState) return;
+    this.connectionState = next;
+    this.emit("state");
   }
 }
 
