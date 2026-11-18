@@ -49,6 +49,7 @@ export function App({ profile, initialToken }: Props) {
   const skipNextRoomRead = useRef<RoomId | null>(null);
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const messageReadVersion = useRef(0);
   const [newConversation, setNewConversation] = useState(false);
   const [searchRoomId, setSearchRoomId] = useState<RoomId | "all" | null>(null);
   const [jumpMessageId, setJumpMessageId] = useState<string | null>(null);
@@ -86,11 +87,22 @@ export function App({ profile, initialToken }: Props) {
     return () => { active = false; };
   }, [profile.profile_id, runtime]);
 
-  const readMessages = useCallback(async (active: BrowserMessagingRuntime, roomId: RoomId) => {
-    setLoadingMessages(true);
-    try { setMessages(await active.messages(roomId)); }
-    catch (cause) { actions.setError(cause instanceof Error ? cause.message : "无法读取本机消息"); }
-    finally { setLoadingMessages(false); }
+  const readMessages = useCallback(async (active: BrowserMessagingRuntime, roomId: RoomId, initial = false) => {
+    const version = ++messageReadVersion.current;
+    const isCurrent = () => version === messageReadVersion.current && selectedRef.current === roomId;
+    if (initial) { setMessages([]); setLoadingMessages(true); }
+    try {
+      const latest = await active.messages(roomId);
+      if (isCurrent()) setMessages((current) => {
+        if (initial || !latest.length) return latest;
+        const oldest = Number(latest[0]!.seq);
+        return [...current.filter((message) => message.room_id === roomId && Number(message.seq) < oldest), ...latest];
+      });
+    } catch (cause) {
+      if (isCurrent()) actions.setError(cause instanceof Error ? cause.message : "无法读取本机消息");
+    } finally {
+      if (isCurrent()) setLoadingMessages(false);
+    }
   }, [actions]);
 
   const attachRuntime = useCallback((active: BrowserMessagingRuntime, token: string) => {
@@ -136,7 +148,7 @@ export function App({ profile, initialToken }: Props) {
   useEffect(() => {
     if (!runtime || !selectedId) { setMessages([]); return; }
     if (skipNextRoomRead.current === selectedId) { skipNextRoomRead.current = null; return; }
-    void readMessages(runtime, selectedId);
+    void readMessages(runtime, selectedId, true);
   }, [readMessages, runtime, selectedId]);
 
   async function authenticated(result: AuthResult) {
@@ -153,11 +165,13 @@ export function App({ profile, initialToken }: Props) {
   }
 
   async function loadOlder() {
-    if (!runtime || !selectedId || !messages[0]) return;
+    if (!runtime || !selectedId || !messages[0] || messages[0].room_id !== selectedId) return;
     const older = await runtime.olderMessages(selectedId, Number(messages[0].seq));
-    if (!older.length) return;
-    const known = new Set(messages.map((message) => message.message_id));
-    setMessages((current) => [...older.filter((message) => !known.has(message.message_id)), ...current]);
+    if (!older.length || selectedRef.current !== selectedId) return;
+    setMessages((current) => {
+      const known = new Set(current.map((message) => message.message_id));
+      return [...older.filter((message) => !known.has(message.message_id)), ...current];
+    });
   }
 
   async function send(text: string, files: File[]) {
@@ -168,6 +182,7 @@ export function App({ profile, initialToken }: Props) {
       else await runtime.sendText(selectedId, text);
     } catch (cause) {
       actions.setError(cause instanceof Error ? cause.message : "消息发送失败");
+      throw cause;
     }
   }
 
@@ -241,7 +256,7 @@ export function App({ profile, initialToken }: Props) {
         {rooms.length ? rooms.map((room) => <ActionButton key={room.room_id} variant="quiet" onPress={() => setSelectedId(room.room_id)} className="flex min-h-16 h-auto w-full items-center justify-start gap-3 rounded-xl text-left"><span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-soft text-brand"><IconMessageCircle className="size-5" /></span><span className="min-w-0"><strong className="block truncate text-sm text-ink">{titleForRoom(room, sessionState.session.user_id)}</strong><span className="block truncate text-xs text-muted">{room.kind === "group" ? `${room.members.length} 位成员` : "端到端加密"}</span></span></ActionButton>) : <div className="px-4 py-12 text-center"><p className="text-sm font-medium text-ink">还没有对话</p><p className="mt-1 text-xs/5 text-muted">点右上角的加号，开始一段端到端加密对话。</p></div>}
       </nav>
     </aside>
-    {selected ? <ConversationView runtime={runtime} room={selected} session={sessionState.session} messages={messages} loading={loadingMessages} jumpMessageId={jumpMessageId} onJumpComplete={completeJump} onSearch={() => setSearchRoomId(selected.room_id)} onResolveRequest={resolveMessageRequest} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}
+    {selected ? <ConversationView runtime={runtime} room={selected} session={sessionState.session} messages={messages[0]?.room_id === selected.room_id ? messages : []} loading={loadingMessages} jumpMessageId={jumpMessageId} onJumpComplete={completeJump} onSearch={() => setSearchRoomId(selected.room_id)} onResolveRequest={resolveMessageRequest} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}
     {newConversation && <NewConversationDialog runtime={runtime} onClose={() => setNewConversation(false)} onCreated={(roomId) => { setNewConversation(false); setSelectedId(roomId); }} />}
     {searchRoomId && <SearchDialog runtime={runtime} roomId={searchRoomId === "all" ? undefined : searchRoomId} onClose={() => setSearchRoomId(null)} onOpenResult={(result) => void openSearchResult(result)} />}
     {settingsOpen && <SettingsDialog runtime={runtime} pairingCode={pairingCode} pushStatus={pushStatus} pushBusy={pushBusy} onEnablePush={enablePush} onDisablePush={turnOffPush} onClose={() => { setSettingsOpen(false); setPairingCode(null); }} />}

@@ -163,6 +163,21 @@ try {
   assert.equal(landscapeChat.scrollWidth, landscapeChat.innerWidth);
   assert.equal(landscapeChat.conversationHeight, 320);
 
+  await bob.page.setViewportSize({ width: 390, height: 844 });
+  await bob.page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: baseUrl });
+  const longMessage = `移动端展开与复制-${Date.now()} ${"完整的消息内容。".repeat(50)}`;
+  await bob.page.getByLabel("消息输入").fill(longMessage);
+  await bob.page.getByRole("button", { name: "发送", exact: true }).click();
+  const longBubble = bob.page.getByRole("article").filter({ hasText: longMessage.slice(0, 50) });
+  await longBubble.getByRole("button", { name: "消息操作" }).click();
+  await bob.page.getByRole("menuitem", { name: "展开全文" }).click();
+  await longBubble.getByText(longMessage, { exact: true }).waitFor();
+  await longBubble.getByRole("button", { name: "消息操作" }).click();
+  await bob.page.getByRole("menuitem", { name: "收起全文" }).click();
+  await longBubble.getByRole("button", { name: "消息操作" }).click();
+  await bob.page.getByRole("menuitem", { name: "复制消息" }).click();
+  await bob.page.waitForFunction((expected) => navigator.clipboard.readText().then((value) => value === expected), longMessage);
+
   const secondTab = await bob.page.context().newPage();
   await secondTab.goto(baseUrl);
   await secondTab.getByRole("heading", { name: "EdgeChat 已在另一个标签页打开" }).waitFor();

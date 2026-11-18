@@ -7,6 +7,7 @@ import { checkForPwaUpdate, subscribePwaUpdates } from "@edgechat/client-runtime
 import type { ServerDevice } from "@edgechat/sync";
 import { supportsVoiceRecording } from "./VoiceRecorder";
 import { ActionButton } from "./ui";
+import { CopyButton } from "./CopyButton";
 const ApproveDevicePairing = lazy(() => import("./DevicePairing").then(({ ApproveDevicePairing }) => ({ default: ApproveDevicePairing })));
 
 const pushLabels: Record<PushStatus, string> = {
@@ -74,7 +75,13 @@ export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onE
       <Dialog aria-label="设置" className="outline-none">
         <header className="flex h-16 items-center justify-between border-b border-black/5 px-5"><Heading slot="title" className="font-semibold text-ink">设备与 PWA</Heading><ActionButton variant="icon" aria-label="关闭设置" onPress={onClose}><IconX className="size-5" /></ActionButton></header>
         <div className="grid gap-6 p-5">
-          <section><h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><IconShieldLock className="size-4 text-brand" />当前加密身份</h2><p className="mt-2 break-all rounded-lg bg-neutral-50 px-3 py-2 text-xs/5 text-muted">{runtime.session.user_id}<br />设备：{runtime.session.device_id}</p></section>
+          <section>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><IconShieldLock className="size-4 text-brand" />当前加密身份</h2>
+            <div className="mt-2 space-y-2 rounded-lg bg-neutral-50 px-3 pt-2">
+              <div><p className="select-all break-all text-xs/5 text-muted">{runtime.session.user_id}</p><CopyButton value={runtime.session.user_id} label="复制账户 ID" /></div>
+              <div><p className="select-all break-all text-xs/5 text-muted">{runtime.session.device_id}</p><CopyButton value={runtime.session.device_id} label="复制当前设备 ID" /></div>
+            </div>
+          </section>
           <section><h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><IconDeviceLaptop className="size-4 text-brand" />账户设备</h2><div className="mt-2 divide-y divide-black/5 rounded-xl ring-1 ring-black/5">{devices.map((device) => <div key={device.device_id} className="px-3 py-2.5"><p className="text-sm font-medium text-ink">{device.display_name}{device.device_id === runtime.session.device_id ? " · 当前设备" : ""}</p><p className="truncate text-xs text-muted">{device.device_id}{device.revoked_at ? " · 已撤销" : ""}</p></div>)}</div><Suspense fallback={<p role="status" className="mt-2 text-sm text-muted">正在打开设备配对…</p>}><ApproveDevicePairing key={pairingCode ?? ""} runtime={runtime} initialCode={pairingCode ?? ""} onComplete={async () => setDevices((await runtime.api.devices()).devices)} /></Suspense></section>
           <section className="flex items-center gap-3"><IconBell className="size-5 shrink-0 text-brand" /><div className="min-w-0 flex-1"><h2 className="text-sm font-semibold text-ink">离线通知</h2><p className="text-xs/5 text-muted">{pushLabels[pushStatus]}</p></div>{pushStatus === "on" ? <ActionButton variant="quiet" isDisabled={pushBusy} onPress={() => void onDisablePush()}>关闭</ActionButton> : <ActionButton isDisabled={pushBusy || pushStatus === "unsupported" || pushStatus === "blocked"} onPress={() => void onEnablePush()}>开启</ActionButton>}</section>
           <section className="flex items-center gap-3"><IconDeviceLaptop className="size-5 shrink-0 text-brand" /><div className="min-w-0 flex-1"><h2 className="text-sm font-semibold text-ink">保护本机记录</h2><p className="text-xs/5 text-muted">{persistent === true ? "浏览器已授予持久存储" : persistent === false ? "浏览器仍可能在空间不足时清理记录" : "正在检查…"}</p></div>{persistent === false && <ActionButton variant="quiet" isDisabled={storageBusy} onPress={() => void protectStorage()}>申请保护</ActionButton>}</section>

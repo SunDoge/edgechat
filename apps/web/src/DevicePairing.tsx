@@ -15,6 +15,7 @@ import { deviceHistoryStagingFor } from "./device-history-staging";
 import { createDeviceHistoryManifest, openDeviceHistoryShard, sealDeviceHistoryShard, type DeviceHistoryManifest } from "./device-history-transfer";
 import type { AuthResult } from "./auth-model";
 import { ActionButton, TextInput } from "./ui";
+import { CopyButton } from "./CopyButton";
 import { devicePairingUrl } from "./device-pairing-link";
 
 type Request = { link_id: string; secret: string; deviceId: string; token: string; credential: string; pairingCode?: string };
@@ -37,22 +38,12 @@ export function DevicePairing({ profileId, api, core, onReady, onBack }: {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [copyStatus, setCopyStatus] = useState("");
   const code = request?.pairingCode ? request.pairingCode.replace(/^(.{4})(.{4})$/, "$1-$2") : request?.link_id;
   const pairingUrl = request ? devicePairingUrl(location.origin, request.link_id) : null;
   const qrImage = useMemo(() => pairingUrl
     ? `data:image/svg+xml,${encodeURIComponent(renderSVG(pairingUrl, { ecc: "M", border: 4, pixelSize: 5 }))}`
     : null, [pairingUrl]);
 
-  async function copyCode() {
-    if (!code) return;
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopyStatus("已复制编号。");
-    } catch {
-      setCopyStatus("请选中下方编号并手动复制。");
-    }
-  }
 
   async function run(action: "advance" | "cancel") {
     setBusy(true); setError("");
@@ -185,10 +176,9 @@ export function DevicePairing({ profileId, api, core, onReady, onBack }: {
       <div className="rounded-xl bg-neutral-50 p-3">
         <p>{request.pairingCode ? "手输配对码（5 分钟内有效）" : "配对编号"}</p>
         <code className="mt-1 block select-all break-all text-lg font-semibold tracking-wider">{code}</code>
-        <ActionButton variant="quiet" onPress={() => void copyCode()}>复制配对码</ActionButton>
-        {copyStatus && <p role="status" className="text-muted">{copyStatus}</p>}
+        <CopyButton key={code} value={code ?? ""} label="复制配对码" />
       </div>
-      {fingerprint && <><p>设备指纹</p><code className="break-words rounded bg-neutral-100 p-2">{fingerprint}</code></>}
+      {fingerprint && <><p>设备指纹</p><code className="select-all break-words rounded bg-neutral-100 p-2">{fingerprint}</code><CopyButton value={fingerprint} label="复制设备指纹" /></>}
     </div>}
     {status && <p role="status" className="text-sm text-muted">{status}</p>}
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
@@ -255,7 +245,7 @@ export function ApproveDevicePairing({ runtime, initialCode, onComplete }: { run
 
   return <div className="mt-4 grid gap-2">
     <TextInput label="新设备配对码" value={code} onChange={(value) => { setCode(value); setPreview(null); setStatus(""); setError(""); }} isDisabled={busy} inputProps={{ autoComplete: "off", spellCheck: false, maxLength: 96, placeholder: "7KMP-3XQT" }} />
-    {preview && <p className="break-words text-sm text-muted">请核对新设备指纹：<code className="block">{fingerprint}</code></p>}
+    {preview && <div className="break-words text-sm text-muted"><p>请核对新设备指纹</p><code className="block select-all">{fingerprint}</code><CopyButton value={fingerprint} label="复制新设备指纹" /></div>}
     {status && <p role="status" className="text-sm text-muted">{status}</p>}
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
     <ActionButton isDisabled={busy || (!isShort && !FULL_CODE.test(code.trim()))} onPress={() => void proceed()}>{busy ? "请稍候…" : preview ? "指纹一致，批准设备" : "查看配对请求"}</ActionButton>

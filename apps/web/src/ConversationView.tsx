@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Button, FileTrigger, TextArea, TextField } from "react-aria-components";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { IconArrowLeft, IconDownload, IconFile, IconPaperclip, IconSearch, IconSend } from "@tabler/icons-react";
+import { Button, FileTrigger, Menu, MenuItem, MenuTrigger, Popover, TextArea, TextField } from "react-aria-components";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { IconArrowLeft, IconDots, IconDownload, IconFile, IconPaperclip, IconSearch, IconSend } from "@tabler/icons-react";
 import type { LocalMessage } from "@edgechat/db";
 import { attachmentPresentation, embeddedImagePreviewUrl, messageAttachments, normalizeMessagePayload, type AttachmentMetadata, type MessagePayload } from "@edgechat/message-content";
 import type { RoomId } from "@edgechat/protocol";
@@ -9,6 +9,7 @@ import type { ServerRoom, SessionIdentity } from "@edgechat/sync";
 import type { BrowserMessagingRuntime } from "@edgechat/client-runtime";
 import { ActionButton } from "./ui";
 import { VoiceRecorder } from "./VoiceRecorder";
+import { copyText } from "./CopyButton";
 
 type Props = {
   runtime: BrowserMessagingRuntime;
@@ -60,22 +61,56 @@ function AttachmentView({ runtime, attachment }: { runtime: BrowserMessagingRunt
 }
 
 function MessageRow({ runtime, message, own }: { runtime: BrowserMessagingRuntime; message: LocalMessage; own: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
+  useEffect(() => {
+    if (!copyStatus) return;
+    const timer = window.setTimeout(() => setCopyStatus(""), 2500);
+    return () => window.clearTimeout(timer);
+  }, [copyStatus]);
   let payload: MessagePayload | null = null;
   try { if (message.payload) payload = normalizeMessagePayload(message.payload as MessagePayload, message.message_id); } catch { /* quarantined UI fallback */ }
   const attachments = payload ? messageAttachments(payload).map((part) => part.attachment) : [];
+  const text = message.deleted_at ? "" : (message.plaintext ?? "");
+  const lines = text.split("\n", 7);
+  const preview = Array.from(lines.slice(0, 6).join("\n")).slice(0, 240).join("");
+  const canExpand = preview.length < text.length;
+  async function copy() {
+    const copied = await copyText(text);
+    if (!copied && canExpand) setExpanded(true);
+    setCopyStatus(copied ? "已复制消息" : "无法自动复制，请长按消息复制。");
+  }
   return <article className={`flex px-4 py-1 ${own ? "justify-end" : "justify-start"}`} aria-label={own ? "你发送的消息" : `${message.sender} 发送的消息`}>
-    <div className={`max-w-[min(82%,36rem)] rounded-2xl px-3.5 py-2.5 shadow-sm ${own ? "rounded-br-md bg-brand text-white" : "rounded-bl-md bg-white text-ink ring-1 ring-black/5"}`}>
+    <div className={`min-w-0 max-w-[min(82%,36rem)] rounded-2xl px-3.5 py-2.5 shadow-sm ${own ? "rounded-br-md bg-brand text-white" : "rounded-bl-md bg-white text-ink ring-1 ring-black/5"}`}>
       {message.deleted_at ? <p className="text-sm italic opacity-60">此消息已撤回</p> : <>
-        {message.plaintext && <p className="whitespace-pre-wrap break-words text-[15px]/6">{message.plaintext}</p>}
+        {text && <p className="whitespace-pre-wrap break-words text-[15px]/6">{canExpand && !expanded ? `${preview}…` : text}</p>}
         {attachments.length > 0 && <div className={`grid gap-2 ${message.plaintext ? "mt-2" : ""}`}>{attachments.map((attachment) => <AttachmentView key={attachment.id} runtime={runtime} attachment={attachment} />)}</div>}
       </>}
       <time className="mt-1 block text-right text-[10px] opacity-55">{new Date(Number(message.created_at)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
     </div>
+    {text && <div className={`shrink-0 self-end ${own ? "order-first" : ""}`}>
+      <MenuTrigger>
+        <ActionButton variant="icon" aria-label="消息操作" className="text-muted"><IconDots className="size-4" /></ActionButton>
+        <Popover placement={own ? "top end" : "top start"} className="z-40 min-w-32 rounded-xl bg-white p-1 shadow-lg ring-1 ring-black/10">
+          <Menu aria-label="消息操作" className="outline-none" onAction={(key) => {
+            if (key === "copy") void copy();
+            if (key === "expand") setExpanded((value) => !value);
+          }}>
+            <MenuItem id="copy" className="flex min-h-11 items-center rounded-lg px-3 text-sm outline-none focus:bg-brand-soft">复制消息</MenuItem>
+            {canExpand && <MenuItem id="expand" className="flex min-h-11 items-center rounded-lg px-3 text-sm outline-none focus:bg-brand-soft">{expanded ? "收起全文" : "展开全文"}</MenuItem>}
+          </Menu>
+        </Popover>
+      </MenuTrigger>
+      <span role="status" className="sr-only">{copyStatus}</span>
+      {copyStatus && <span aria-hidden="true" className="fixed inset-x-0 bottom-24 z-40 mx-auto w-fit rounded-lg bg-ink px-3 py-2 text-xs text-white">{copyStatus}</span>}
+    </div>}
   </article>;
 }
 
 export function ConversationView({ runtime, room, session, messages, loading, jumpMessageId, onJumpComplete, onSearch, onResolveRequest, onBack, onSend, onLoadOlder }: Props) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const timeline = useRef<VirtuosoHandle>(null);
+  const atBottom = useRef(true);
+  const loadingOlder = useRef(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -83,14 +118,14 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
   const [composerError, setComposerError] = useState("");
   const [resolvingRequest, setResolvingRequest] = useState(false);
   const composing = useRef(false);
-  const previousRoom = useRef<RoomId | null>(null);
-  const previousFirst = useRef<string | null>(null);
-  const olderAnchor = useRef<{ height: number; top: number; first: string | null } | null>(null);
-  const virtualizer = useVirtualizer({ count: messages.length, getScrollElement: () => scrollRef.current, estimateSize: () => 76, overscan: 8, getItemKey: (index) => messages[index]!.message_id });
-  const virtualizerRef = useRef(virtualizer);
-  const messageCountRef = useRef(messages.length);
-  virtualizerRef.current = virtualizer;
-  messageCountRef.current = messages.length;
+  const firstId = messages[0]?.message_id ?? null;
+  const [anchor, setAnchor] = useState({ firstId, index: 1_000_000, generation: 0 });
+  if (anchor.firstId !== firstId) {
+    const prepended = anchor.firstId ? messages.findIndex((message) => message.message_id === anchor.firstId) : -1;
+    setAnchor(prepended > 0
+      ? { ...anchor, firstId, index: anchor.index - prepended }
+      : { firstId, index: 1_000_000, generation: anchor.generation + 1 });
+  }
   const requestCannotSend = room.request_status === "rejected" || (room.request_status === "pending"
     && (room.request_role === "recipient" || room.request_message_sent || messages.some((message) => message.sender === session.user_id)));
 
@@ -107,13 +142,17 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
     const viewport = window.visualViewport;
     const root = document.documentElement;
     let frame = 0;
+    let previousHeight = 0;
     const update = () => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        root.style.setProperty("--edgechat-viewport-height", `${Math.round(viewport?.height ?? window.innerHeight)}px`);
+        const height = Math.round(viewport?.height ?? window.innerHeight);
+        const heightChanged = previousHeight !== height;
+        previousHeight = height;
+        root.style.setProperty("--edgechat-viewport-height", `${height}px`);
         root.style.setProperty("--edgechat-viewport-top", `${Math.round(viewport?.offsetTop ?? 0)}px`);
-        if (document.activeElement === composerRef.current && messageCountRef.current) {
-          virtualizerRef.current.scrollToIndex(messageCountRef.current - 1, { align: "end" });
+        if (heightChanged && document.activeElement === composerRef.current && atBottom.current) {
+          timeline.current?.autoscrollToBottom();
         }
       });
     };
@@ -132,42 +171,23 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
   }, []);
 
   useEffect(() => {
-    if (!messages.length) return;
-    const changedRoom = previousRoom.current !== room.room_id;
-    const appended = previousFirst.current === messages[0]?.message_id;
-    const element = scrollRef.current;
-    const nearBottom = element ? element.scrollHeight - element.clientHeight - element.scrollTop < 320 : true;
-    if (changedRoom || (appended && nearBottom)) requestAnimationFrame(() => virtualizer.scrollToIndex(messages.length - 1, { align: "end" }));
-    previousRoom.current = room.room_id;
-    previousFirst.current = messages[0]?.message_id ?? null;
-  }, [messages, room.room_id, virtualizer]);
-
-  useLayoutEffect(() => {
-    const anchor = olderAnchor.current;
-    const element = scrollRef.current;
-    if (!anchor || !element || anchor.first === (messages[0]?.message_id ?? null)) return;
-    requestAnimationFrame(() => {
-      element.scrollTop = anchor.top + Math.max(0, element.scrollHeight - anchor.height);
-      olderAnchor.current = null;
-    });
-  }, [messages]);
-
-  useEffect(() => {
     if (!jumpMessageId) return;
     const index = messages.findIndex((message) => message.message_id === jumpMessageId);
     if (index < 0) return;
-    requestAnimationFrame(() => {
-      virtualizer.scrollToIndex(index, { align: "center" });
-      window.setTimeout(onJumpComplete, 900);
+    let timer = 0;
+    const frame = requestAnimationFrame(() => {
+      timeline.current?.scrollToIndex({ index, align: "center" });
+      timer = window.setTimeout(onJumpComplete, 900);
     });
-  }, [jumpMessageId, messages, onJumpComplete, virtualizer]);
+    return () => { window.cancelAnimationFrame(frame); window.clearTimeout(timer); };
+  }, [jumpMessageId, messages, onJumpComplete]);
 
   async function loadOlder() {
-    const element = scrollRef.current;
-    if (!element || olderAnchor.current) return;
-    olderAnchor.current = { height: element.scrollHeight, top: element.scrollTop, first: messages[0]?.message_id ?? null };
-    await onLoadOlder();
-    if (olderAnchor.current?.first === (messages[0]?.message_id ?? null)) olderAnchor.current = null;
+    if (loading || loadingOlder.current || !messages.length) return;
+    loadingOlder.current = true;
+    try { await onLoadOlder(); }
+    catch { setComposerError("无法读取较早的消息，请稍后重试。"); }
+    finally { loadingOlder.current = false; }
   }
 
   async function submit() {
@@ -175,6 +195,7 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
     if (sending || requestCannotSend || (!content && !files.length)) return;
     setSending(true);
     try { setComposerError(""); await onSend(content, files); setText(""); setFiles([]); }
+    catch { setComposerError("消息发送失败，请重试。"); }
     finally { setSending(false); }
   }
 
@@ -197,21 +218,21 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
     event.preventDefault(); void submit();
   }
 
-  const virtualItems = virtualizer.getVirtualItems();
   return <section className="fixed inset-x-0 top-[var(--edgechat-viewport-top,0px)] grid h-[var(--edgechat-viewport-height,100dvh)] min-h-0 grid-rows-[auto_1fr_auto] bg-chat md:static md:h-dvh" aria-label="当前对话">
     <div className="bg-white pt-[env(safe-area-inset-top)] md:pt-0"><header className="flex min-h-16 items-center gap-2 border-b border-black/5 px-2 sm:px-4">
       <ActionButton variant="icon" aria-label="返回对话列表" onPress={onBack} className="md:hidden"><IconArrowLeft className="size-5" /></ActionButton>
       <div className="min-w-0 flex-1"><h1 className="truncate font-semibold text-ink">{roomTitle(room, session.user_id)}</h1><p className="text-xs text-muted">端到端加密 · {room.purpose === "saved" ? "仅自己的设备" : `${room.members.length} 位成员`}</p></div>
       <ActionButton variant="icon" aria-label="搜索当前对话" onPress={onSearch}><IconSearch className="size-5" /></ActionButton>
     </header>{room.request_status === "pending" && room.request_role === "recipient" && <div className="flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-950"><p className="min-w-0 flex-1">接受后才能回复或收发附件。</p><ActionButton variant="quiet" isDisabled={resolvingRequest} onPress={() => void resolveRequest("rejected")} className="h-9">拒绝</ActionButton><ActionButton isDisabled={resolvingRequest} onPress={() => void resolveRequest("accepted")} className="h-9">接受</ActionButton></div>}{room.request_status === "pending" && room.request_role === "requester" && requestCannotSend && <p className="border-b border-black/5 bg-white px-4 py-2 text-center text-xs text-muted">等待对方接受消息请求</p>}</div>
-    <div ref={scrollRef} className="min-h-0 overflow-y-auto overscroll-contain" onScroll={(event) => { if (event.currentTarget.scrollTop < 80 && !loading) void loadOlder(); }}>
-      {loading && <p className="py-3 text-center text-xs text-muted" role="status">正在读取消息…</p>}
-      {!messages.length && !loading && <div className="grid min-h-full place-items-center p-8 text-center text-sm text-muted">还没有消息。发出第一条端到端加密消息。</div>}
-      <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
-        <div className="absolute left-0 top-0 w-full" style={{ transform: `translateY(${virtualItems[0]?.start ?? 0}px)` }}>
-          {virtualItems.map((item) => <div key={item.key} data-index={item.index} data-message-id={messages[item.index]!.message_id} ref={virtualizer.measureElement} className={jumpMessageId === messages[item.index]!.message_id ? "rounded-2xl ring-2 ring-brand/40" : ""}><MessageRow runtime={runtime} message={messages[item.index]!} own={messages[item.index]!.sender === session.user_id} /></div>)}
-        </div>
-      </div>
+    <div className="min-h-0">
+      {!messages.length ? <div className="grid h-full place-items-center p-8 text-center text-sm text-muted" role="status">{loading ? "正在读取消息…" : "还没有消息。发出第一条端到端加密消息。"}</div> :
+        <Virtuoso key={`${room.room_id}:${anchor.generation}`} ref={timeline} className="h-full overscroll-contain"
+          data={messages} firstItemIndex={anchor.index} initialTopMostItemIndex={{ index: "LAST", align: "end" }}
+          computeItemKey={(_, message) => message.message_id} followOutput="auto"
+          atBottomStateChange={(value) => { atBottom.current = value; }}
+          atTopStateChange={(value) => { if (value) void loadOlder(); }}
+          itemContent={(_, message) => <div data-message-id={message.message_id} className={jumpMessageId === message.message_id ? "rounded-2xl ring-2 ring-brand/40" : ""}><MessageRow runtime={runtime} message={message} own={message.sender === session.user_id} /></div>}
+        />}
     </div>
     <div className="border-t border-black/5 bg-white px-3 pb-[max(.75rem,env(safe-area-inset-bottom))] pt-2">
       {composerError && <p role="alert" className="mb-2 text-xs text-red-700">{composerError}</p>}
