@@ -162,6 +162,16 @@ try {
   }));
   assert.equal(landscapeChat.scrollWidth, landscapeChat.innerWidth);
   assert.equal(landscapeChat.conversationHeight, 320);
+
+  const secondTab = await bob.page.context().newPage();
+  await secondTab.goto(baseUrl);
+  await secondTab.getByRole("heading", { name: "EdgeChat 已在另一个标签页打开" }).waitFor();
+  await bob.page.close();
+  const resumedIdentity = secondTab.locator('header p[title^="@"]');
+  await resumedIdentity.waitFor({ timeout: 30_000 });
+  assert.equal(await resumedIdentity.getAttribute("title"), bob.userId);
+  await secondTab.getByRole("button", { name: "已保存消息", exact: true }).first().click();
+  await secondTab.getByText(linkedText, { exact: true }).waitFor();
   console.log(JSON.stringify({ ok: true, alice: alice.userId, bob: bob.userId, text }));
 } catch (error) {
   for (const [index, context] of contexts.entries()) {
