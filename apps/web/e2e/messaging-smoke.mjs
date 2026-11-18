@@ -43,6 +43,11 @@ try {
   await alice.page.getByRole("button", { name: "开始聊天" }).click();
 
   const text = `React E2EE smoke ${Date.now()}`;
+  const inputBox = await alice.page.getByLabel("消息输入").boundingBox();
+  const sendBox = await alice.page.getByRole("button", { name: "发送", exact: true }).boundingBox();
+  assert.ok(inputBox && sendBox);
+  assert.equal(inputBox.height, sendBox.height);
+  assert.equal(inputBox.y, sendBox.y);
   await alice.page.getByLabel("消息输入").fill(text);
   await alice.page.getByRole("button", { name: "发送" }).click();
   await alice.page.getByText(text, { exact: true }).waitFor({ timeout: 15_000 });
