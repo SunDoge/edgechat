@@ -2,9 +2,6 @@ import { chromium } from "playwright";
 import assert from "node:assert/strict";
 
 const baseUrl = process.env.EDGECHAT_WEB_URL ?? "http://localhost:5174";
-const entryUrl = new URL(baseUrl);
-const chatUiExperiment = process.env.EDGECHAT_COMPOSER === "chatui";
-if (chatUiExperiment) entryUrl.searchParams.set("composer", "chatui");
 const browser = await chromium.launch({ headless: true });
 const contexts = [];
 
@@ -26,7 +23,7 @@ async function register(displayName) {
   contexts.push(context);
   const page = await context.newPage();
   observe(page, displayName);
-  await page.goto(entryUrl.href);
+  await page.goto(baseUrl);
   await page.getByLabel("显示名称").fill(displayName);
   await page.getByRole("button", { name: "创建账户" }).click();
   const identity = page.locator('header p[title^="@"]');
@@ -52,7 +49,7 @@ try {
   assert.equal(inputBox.height, sendBox.height);
   assert.equal(inputBox.y, sendBox.y);
   await alice.page.getByLabel("消息输入").fill(text);
-  if (chatUiExperiment) {
+  {
     const composer = alice.page.getByLabel("消息输入");
     await composer.dispatchEvent("compositionstart");
     await composer.press("Enter");
@@ -83,7 +80,7 @@ try {
   await alice.page.getByRole("button", { name: "添加附件" }).click();
   const chooser = await chooserPromise;
   await chooser.setFiles({ name: "encrypted-proof.txt", mimeType: "text/plain", buffer: Buffer.from("attachment ciphertext smoke") });
-  if (chatUiExperiment) {
+  {
     const composer = alice.page.getByLabel("消息输入");
     const upload = "**/api/v1/attachments";
     const draft = "上传失败后保留这段草稿";
@@ -109,7 +106,7 @@ try {
   contexts.push(linkedContext);
   const linked = await linkedContext.newPage();
   observe(linked, "linked");
-  await linked.goto(entryUrl.href);
+  await linked.goto(baseUrl);
   await linked.getByRole("button", { name: "添加这台设备到已有账户" }).click();
   const createdLink = linked.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/device-links");
   await linked.getByRole("button", { name: "生成配对二维码" }).click();
@@ -202,7 +199,7 @@ try {
   await bob.page.waitForFunction((expected) => navigator.clipboard.readText().then((value) => value === expected), longMessage);
 
   const secondTab = await bob.page.context().newPage();
-  await secondTab.goto(entryUrl.href);
+  await secondTab.goto(baseUrl);
   await secondTab.getByRole("heading", { name: "EdgeChat 已在另一个标签页打开" }).waitFor();
   await bob.page.close();
   const resumedIdentity = secondTab.locator('header p[title^="@"]');

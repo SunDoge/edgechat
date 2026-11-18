@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Button, FileTrigger, Menu, MenuItem, MenuTrigger, Popover, TextArea, TextField } from "react-aria-components";
+import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Button, FileTrigger, Menu, MenuItem, MenuTrigger, Popover } from "react-aria-components";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { IconArrowLeft, IconDots, IconDownload, IconFile, IconPaperclip, IconSearch, IconSend } from "@tabler/icons-react";
 import type { LocalMessage } from "@edgechat/db";
@@ -11,7 +11,7 @@ import { ActionButton } from "./ui";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { copyText } from "./CopyButton";
 
-const ChatUiInputExperiment = lazy(() => import("./ChatUiInputExperiment"));
+const ChatInput = lazy(() => import("./ChatInput"));
 const composerInputClass = "block max-h-32 min-h-11 w-full resize-none rounded-2xl bg-neutral-100 px-4 py-2.5 text-base/6 text-ink outline-none focus:ring-2 focus:ring-brand disabled:text-muted";
 
 type Props = {
@@ -111,7 +111,6 @@ function MessageRow({ runtime, message, own }: { runtime: BrowserMessagingRuntim
 }
 
 export function ConversationView({ runtime, room, session, messages, loading, jumpMessageId, onJumpComplete, onSearch, onResolveRequest, onBack, onSend, onLoadOlder }: Props) {
-  const [chatUiExperiment] = useState(() => new URLSearchParams(location.search).get("composer") === "chatui");
   const timeline = useRef<VirtuosoHandle>(null);
   const atBottom = useRef(true);
   const loadingOlder = useRef(false);
@@ -132,16 +131,6 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
   }
   const requestCannotSend = room.request_status === "rejected" || (room.request_status === "pending"
     && (room.request_role === "recipient" || room.request_message_sent || messages.some((message) => message.sender === session.user_id)));
-
-  useLayoutEffect(() => {
-    if (chatUiExperiment) return;
-    const composer = composerRef.current;
-    if (!composer) return;
-    composer.style.height = "auto";
-    const height = Math.min(128, Math.max(44, composer.scrollHeight));
-    composer.style.height = `${height}px`;
-    composer.style.overflowY = composer.scrollHeight > 128 ? "auto" : "hidden";
-  }, [text, chatUiExperiment]);
 
   useEffect(() => {
     const viewport = window.visualViewport;
@@ -253,12 +242,12 @@ export function ConversationView({ runtime, room, session, messages, loading, ju
       <div className="flex items-end gap-1.5">
         <FileTrigger allowsMultiple onSelect={addFiles}><ActionButton variant="icon" aria-label="添加附件" isDisabled={requestCannotSend}><IconPaperclip className="size-5" /></ActionButton></FileTrigger>
         {!files.length && <VoiceRecorder contextId={room.room_id} disabled={sending || requestCannotSend} onRecorded={(file) => setFiles([file])} onError={setComposerError} />}
-        {chatUiExperiment ? <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1">
           <Suspense fallback={<div className="min-h-11 rounded-2xl bg-neutral-100" role="status">正在加载输入框…</div>}>
-            <ChatUiInputExperiment {...inputInteraction} aria-label="消息输入" value={text} onChange={setText} disabled={requestCannotSend}
+            <ChatInput {...inputInteraction} aria-label="消息输入" value={text} onChange={setText} disabled={requestCannotSend}
               ref={(input) => { composerRef.current = input instanceof HTMLTextAreaElement ? input : null; }} />
           </Suspense>
-        </div> : <TextField aria-label="消息输入" value={text} onChange={setText} isDisabled={requestCannotSend} className="min-w-0 flex-1"><TextArea {...inputInteraction} ref={composerRef} rows={1} /></TextField>}
+        </div>
         <ActionButton variant="icon" aria-label="发送" isDisabled={sending || requestCannotSend || (!text.trim() && !files.length)} onPress={() => void submit()} className="bg-brand text-white hover:bg-brand-strong disabled:bg-neutral-200 disabled:text-neutral-400"><IconSend className="size-5" /></ActionButton>
       </div>
     </div>
