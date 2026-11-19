@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Button, FileTrigger, Menu, MenuItem, MenuTrigger, Popover } from "react-aria-components";
+import { Button, Dialog, DialogTrigger, FileTrigger, Heading, Menu, MenuItem, MenuTrigger, Modal, ModalOverlay, Popover } from "react-aria-components";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import { IconArrowLeft, IconDots, IconDownload, IconFile, IconPaperclip, IconSearch, IconSend } from "@tabler/icons-react";
+import { IconArrowLeft, IconDots, IconDownload, IconFile, IconPaperclip, IconSearch, IconSend, IconX } from "@tabler/icons-react";
 import type { LocalMessage } from "@edgechat/db";
 import { attachmentPresentation, embeddedImagePreviewUrl, messageAttachments, normalizeMessagePayload, type AttachmentMetadata, type MessagePayload } from "@edgechat/message-content";
 import type { RoomId } from "@edgechat/protocol";
@@ -38,26 +38,56 @@ function roomTitle(room: ServerRoom, ownUserId: string): string {
 }
 
 function AttachmentView({ runtime, attachment }: { runtime: BrowserMessagingRuntime; attachment: AttachmentMetadata }) {
+  const [blob, setBlob] = useState<Blob | null>(null);
   const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const presentation = attachmentPresentation(attachment);
 
-  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  useEffect(() => {
+    if (!blob) return;
+    const objectUrl = URL.createObjectURL(blob);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [blob]);
 
   async function open() {
-    if (url || busy) return;
+    if (blob || busy) return;
     setBusy(true); setError("");
-    try { setUrl(URL.createObjectURL(await runtime.downloadAttachment(attachment))); }
+    try { setBlob(await runtime.downloadAttachment(attachment)); }
     catch { setError("文件解密失败"); }
     finally { setBusy(false); }
   }
 
-  if (url && presentation === "image") return <img src={url} alt={attachment.name} className="max-h-80 max-w-full rounded-xl object-contain" />;
+  if (presentation === "image") {
+    const thumbnail = url ?? (attachment.preview ? embeddedImagePreviewUrl(attachment.preview) : undefined);
+    return <DialogTrigger onOpenChange={(opened) => { if (opened) void open(); }}>
+      <Button aria-label={`查看大图：${attachment.name}`} className="block min-h-11 max-w-full overflow-hidden rounded-xl bg-black/5 text-left outline-none focus-visible:ring-2 focus-visible:ring-brand">
+        {thumbnail ? <img src={thumbnail} alt="" className="block max-h-64 max-w-full object-contain" />
+          : <span className="flex items-center gap-2 px-3 py-2 text-sm"><IconFile className="size-5 shrink-0" /><span className="break-all">{attachment.name}</span></span>}
+      </Button>
+      <ModalOverlay isDismissable className="fixed inset-0 z-60 grid place-items-center bg-black/90">
+        <Modal className="h-dvh w-full outline-none">
+          <Dialog className="flex h-full flex-col px-3 pb-[max(.75rem,env(safe-area-inset-bottom))] pt-[max(.75rem,env(safe-area-inset-top))] text-white outline-none">
+            {({ close }) => <>
+              <header className="flex items-center gap-3">
+                <Heading slot="title" className="min-w-0 flex-1 truncate text-sm">{attachment.name}</Heading>
+                <ActionButton variant="icon" aria-label="关闭大图" autoFocus onPress={close} className="shrink-0 text-white hover:bg-white/15"><IconX className="size-5" /></ActionButton>
+              </header>
+              <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)] place-items-center">
+                {error ? <div className="grid gap-3 text-center"><p role="alert">{error}</p>{!blob && <ActionButton onPress={() => void open()}>重试</ActionButton>}</div>
+                  : url ? <img src={url} alt={attachment.name} onError={() => setError("无法显示这张图片")} className="max-h-full max-w-full object-contain" />
+                  : <p role="status" className="text-sm text-white/80">正在加载图片…</p>}
+              </div>
+            </>}
+          </Dialog>
+        </Modal>
+      </ModalOverlay>
+    </DialogTrigger>;
+  }
   if (url && presentation === "audio") return <audio src={url} controls className="max-w-full" />;
   if (url) return <a href={url} download={attachment.name} className="flex min-h-11 items-center gap-2 rounded-lg bg-black/5 px-3 text-sm font-medium"><IconDownload className="size-4" />{attachment.name}</a>;
   return <div className="relative">
-    {presentation === "image" && attachment.preview && <img src={embeddedImagePreviewUrl(attachment.preview)} alt="" className="max-h-64 max-w-full rounded-xl object-contain opacity-80 blur-[1px]" />}
     <Button onPress={() => void open()} isDisabled={busy} className="flex min-h-11 max-w-full items-center gap-2 rounded-lg bg-black/5 px-3 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand">
       <IconFile className="size-5 shrink-0" /><span className="min-w-0"><strong className="block truncate font-medium">{attachment.name}</strong><span className="block text-xs opacity-60">{busy ? "正在解密…" : `${Math.ceil(attachment.size / 1024)} KB`}</span></span>
     </Button>

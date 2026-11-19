@@ -98,6 +98,28 @@ try {
   await alice.page.getByRole("button", { name: "发送" }).click();
   await bob.page.getByText("encrypted-proof.txt", { exact: true }).waitFor({ timeout: 20_000 });
 
+  const imageBytes = await alice.page.evaluate(async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 960;
+    canvas.height = 640;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "green";
+    context.fillRect(0, 0, 960, 640);
+    return Array.from(new Uint8Array(await (await fetch(canvas.toDataURL("image/png"))).arrayBuffer()));
+  });
+  const imageChooser = alice.page.waitForEvent("filechooser");
+  await alice.page.getByRole("button", { name: "添加附件" }).click();
+  await (await imageChooser).setFiles({ name: "full-image.png", mimeType: "image/png", buffer: Buffer.from(imageBytes) });
+  await alice.page.getByRole("button", { name: "发送", exact: true }).click();
+  const thumbnail = bob.page.getByRole("button", { name: "查看大图：full-image.png" });
+  await thumbnail.click({ timeout: 20_000 });
+  const preview = bob.page.getByRole("dialog", { name: "full-image.png" });
+  const fullImage = preview.getByRole("img", { name: "full-image.png" });
+  assert.equal(await fullImage.evaluate(async (image) => { await image.decode(); return image.naturalWidth; }), 960);
+  await preview.getByRole("button", { name: "关闭大图" }).click();
+  await preview.waitFor({ state: "hidden" });
+  assert.equal(await thumbnail.evaluate((button) => document.activeElement === button), true);
+
   await bob.page.getByRole("button", { name: "已保存消息" }).click();
   await bob.page.getByRole("heading", { name: "已保存消息" }).waitFor({ timeout: 20_000 });
   const savedText = `Saved locally ${Date.now()}`;
