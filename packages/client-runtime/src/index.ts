@@ -137,20 +137,31 @@ export class BrowserMessagingRuntime extends EventTarget {
     const api = options.api ?? new ApiClient("", options.accessToken);
     api.setToken(options.accessToken);
     const db = options.database ?? new LocalDatabase(options.profileId);
-    await db.open();
-    const identity = await loadIdentity(options.profileId);
-    if (!identity?.mlsState) { db.close(); throw new Error("Device MLS state is unavailable"); }
-    const cached = await db.cachedSession<SessionIdentity>();
-    let session: SessionIdentity;
-    if (cached?.device_id === identity.deviceId) session = cached;
-    else {
-      try {
-        session = await api.me();
-        await db.cacheSession(session);
-      } catch (cause) { db.close(); throw cause; }
+    const [database, device] = await Promise.allSettled([
+      db.open().then(() => db.cachedSession<SessionIdentity>()),
+      loadIdentity(options.profileId).then(async (identity) => {
+        if (!identity?.mlsState) throw new Error("Device MLS state is unavailable");
+        const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
+        return { identity, mls };
+      }),
+    ]);
+    if (database.status === "rejected" || device.status === "rejected") {
+      if (device.status === "fulfilled") device.value.mls.destroy();
+      await db.close().catch(() => undefined);
+      throw database.status === "rejected" ? database.reason : device.status === "rejected" ? device.reason : new Error("Device startup failed");
     }
-    if (session.device_id !== identity.deviceId) { db.close(); throw new Error("Session belongs to another device"); }
-    const mls = await OpenMlsMessagingCore.create(identity.deviceId, identity.mlsState);
+    const { identity, mls } = device.value;
+    const cached = database.value;
+    let session: SessionIdentity;
+    try {
+      session = cached?.device_id === identity.deviceId ? cached : await api.me();
+      if (session.device_id !== identity.deviceId) throw new Error("Session belongs to another device");
+      if (session !== cached) await db.cacheSession(session);
+    } catch (cause) {
+      mls.destroy();
+      await db.close().catch(() => undefined);
+      throw cause;
+    }
     const runtime = new BrowserMessagingRuntime({ ...options, api, database: db }, session, identity, mls);
     try { await runtime.start(); return runtime; }
     catch (cause) { await runtime.close(); throw cause; }
