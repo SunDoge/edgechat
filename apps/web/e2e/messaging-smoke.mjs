@@ -240,6 +240,12 @@ try {
   assert.equal(await resumedIdentity.getAttribute("title"), bob.userId);
   await secondTab.getByRole("button", { name: "已保存消息", exact: true }).first().click();
   await secondTab.getByText(linkedText, { exact: true }).waitFor();
+  await secondTab.getByRole("button", { name: "设置", exact: true }).click();
+  await secondTab.getByRole("button", { name: "退出登录" }).click();
+  await secondTab.getByLabel("显示名称").fill(`Switched-${Date.now()}`);
+  await secondTab.getByRole("button", { name: "创建账户" }).click();
+  await resumedIdentity.waitFor({ timeout: 30_000 });
+  assert.notEqual(await resumedIdentity.getAttribute("title"), bob.userId);
   console.log(JSON.stringify({ ok: true, alice: alice.userId, bob: bob.userId, text }));
 } catch (error) {
   for (const [index, context] of contexts.entries()) {

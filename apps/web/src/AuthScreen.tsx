@@ -13,9 +13,10 @@ type Props = {
   api: ApiClient;
   core: WebCryptoMessagingCore;
   onReady: (result: AuthResult) => Promise<void>;
+  onSwitchAccount?: () => Promise<void>;
 };
 
-export function AuthScreen({ profileId, api, core, onReady }: Props) {
+export function AuthScreen({ profileId, api, core, onReady, onSwitchAccount }: Props) {
   const [pairing, setPairing] = useState(false);
   const [mode, setMode] = useState<AuthMode>("register");
   const [displayName, setDisplayName] = useState("");
@@ -87,6 +88,10 @@ export function AuthScreen({ profileId, api, core, onReady }: Props) {
       </form>
       <ActionButton variant="quiet" className="mt-3 w-full" isDisabled={busy} onPress={() => setPairing(true)}>添加这台设备到已有账户</ActionButton>
       </>}
+      {onSwitchAccount && <ActionButton variant="quiet" className="mt-3 w-full" isDisabled={busy} onPress={() => {
+        setBusy(true);
+        void onSwitchAccount().catch(() => { setError("无法切换账户，请重试"); setBusy(false); });
+      }}>使用另一个账户</ActionButton>}
       <div className="mt-7 flex items-start gap-2 text-sm/5 text-muted"><IconShieldLock className="mt-0.5 size-4 shrink-0" /><p>本机数据库包含已解密消息，请保护好这台设备。</p></div>
     </section>
   </main>;

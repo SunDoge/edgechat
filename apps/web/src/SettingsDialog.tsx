@@ -30,13 +30,14 @@ const updateLabels = {
   error: "检查失败，请确认网络连接后重试。",
 };
 
-export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onEnablePush, onDisablePush, onClose }: {
+export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onEnablePush, onDisablePush, onSignOut, onClose }: {
   runtime: BrowserMessagingRuntime;
   pairingCode: string | null;
   pushStatus: PushStatus;
   pushBusy: boolean;
   onEnablePush(): Promise<void>;
   onDisablePush(): Promise<void>;
+  onSignOut(): Promise<void>;
   onClose(): void;
 }) {
   const [devices, setDevices] = useState<ServerDevice[]>([]);
@@ -44,6 +45,15 @@ export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onE
   const [storageBusy, setStorageBusy] = useState(false);
   const [updateCheck, setUpdateCheck] = useState<keyof typeof updateLabels>("idle");
   const [updateReady, setUpdateReady] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState(false);
+
+  async function signOut() {
+    setSigningOut(true);
+    setSignOutError(false);
+    try { await onSignOut(); }
+    catch { setSignOutError(true); setSigningOut(false); }
+  }
 
   useEffect(() => subscribePwaUpdates((state) => setUpdateReady(state === "ready")), []);
 
@@ -94,6 +104,11 @@ export function SettingsDialog({ runtime, pairingCode, pushStatus, pushBusy, onE
             <ActionButton variant="quiet" isDisabled={updateCheck === "checking"} onPress={() => void checkUpdate()}>检查更新</ActionButton>
           </section>
           <section className="rounded-xl bg-amber-50 p-3 text-xs/5 text-amber-950"><h2 className="flex items-center gap-2 font-semibold"><IconInfoCircle className="size-4" />PWA 能力说明</h2><ul className="mt-1 list-disc space-y-1 pl-5"><li>支持文字、图片、语音和普通文件；语音录制：{supportsVoiceRecording() ? "可用" : "此浏览器不可用，可上传音频"}。</li><li>后台持续运行、系统级分享和通知行为受浏览器/系统限制。</li><li>图片语义搜索默认关闭，只有用户主动下载模型后才会启用；当前 React PWA 尚未下载模型。</li><li>PGlite 中含解密后的本机消息，E2EE 不防护已失陷的本地设备。</li></ul></section>
+          <section className="grid gap-2 border-t border-line pt-4">
+            <p className="text-xs text-muted">退出这台浏览器，保留本机聊天记录。</p>
+            <ActionButton variant="quiet" isDisabled={signingOut} onPress={() => void signOut()} className="justify-self-start text-red-700">退出登录</ActionButton>
+            {signOutError && <p role="alert" className="text-sm text-red-700">无法退出登录，请重试。</p>}
+          </section>
         </div>
       </Dialog>
     </Modal>

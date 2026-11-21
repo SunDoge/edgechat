@@ -124,6 +124,17 @@ export async function clearLocalProfileToken(profileId: string): Promise<void> {
   await database.profiles.update(assertLocalProfileId(profileId), { access_token: null });
 }
 
+export async function leaveLocalProfile(profileId: string, displayName: string): Promise<LocalProfile> {
+  const id = assertLocalProfileId(profileId);
+  const next = pendingRecord(displayName);
+  await database.transaction("rw", database.profiles, database.settings, async () => {
+    await database.profiles.update(id, { access_token: null });
+    await database.profiles.add(next);
+    await database.settings.put({ id: ACTIVE_SETTING, value: next.profile_id });
+  });
+  return publicProfile(next);
+}
+
 export function localBackupExport(profile: LocalProfile): LocalBackupExport | null {
   if (!Number.isSafeInteger(profile.last_backup_at) || profile.last_backup_at! <= 0 || !profile.last_backup_delivery) return null;
   return { created_at: profile.last_backup_at!, delivery: profile.last_backup_delivery };

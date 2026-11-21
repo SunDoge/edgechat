@@ -9,7 +9,7 @@ import type { LocalMessage, SearchResult } from "@edgechat/db";
 import type { RoomId } from "@edgechat/protocol";
 import { ApiClient } from "@edgechat/sync";
 import { useStore } from "zustand";
-import { bindLocalProfile, type LocalProfile } from "@edgechat/client-storage/local-profiles";
+import { bindLocalProfile, leaveLocalProfile, type LocalProfile } from "@edgechat/client-storage/local-profiles";
 import { AuthScreen } from "./AuthScreen";
 import type { AuthResult } from "./auth-model";
 import { ActionButton } from "./ui";
@@ -298,8 +298,18 @@ export function App({ profile, initialToken }: Props) {
     finally { setPushBusy(false); }
   }
 
+  async function signOut() {
+    const next = await leaveLocalProfile(profile.profile_id, "新账户");
+    await navigator.serviceWorker?.getRegistration()
+      .then((registration) => registration?.pushManager?.getSubscription())
+      .then((subscription) => subscription?.unsubscribe())
+      .catch(() => undefined);
+    await setActivePushProfile(next.profile_id).catch(() => undefined);
+    location.reload();
+  }
+
   if (checkingSession) return <main className="grid min-h-dvh place-items-center bg-white text-sm text-muted" role="status">正在恢复本机消息与加密状态…</main>;
-  if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={authenticated} />;
+  if (!sessionState || !runtime) return <AuthScreen profileId={profile.profile_id} api={api} core={core} onReady={authenticated} onSwitchAccount={profile.user_id ? signOut : undefined} />;
 
   const selected = rooms.find((room) => room.room_id === selectedId) ?? null;
   return <main className="grid h-dvh min-w-0 overflow-hidden bg-chat antialiased md:grid-cols-[20rem_minmax(0,1fr)]">
@@ -334,7 +344,7 @@ export function App({ profile, initialToken }: Props) {
     {selected ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">正在打开对话…</p>}><ConversationView connection={connection} runtime={runtime} room={selected} session={sessionState.session} messages={messages[0]?.room_id === selected.room_id ? messages : []} loading={loadingMessages} jumpMessageId={jumpMessageId} onJumpComplete={completeJump} onSearch={() => setSearchRoomId(selected.room_id)} onResolveRequest={resolveMessageRequest} onBack={() => setSelectedId(null)} onSend={send} onLoadOlder={loadOlder} /></Suspense> : <section className="hidden place-items-center md:grid"><div className="text-center"><IconMessageCircle className="mx-auto size-8 text-brand" /><h2 className="mt-3 font-semibold text-ink">选择一段对话</h2><p className="mt-1 text-sm text-muted">消息经 MLS 加密后发送</p></div></section>}
     {newConversation && <Suspense fallback={<p role="status" className="fixed bottom-4 right-4 z-50 rounded-lg bg-white p-3 text-sm shadow">正在打开…</p>}><NewConversationDialog runtime={runtime} onClose={() => setNewConversation(false)} onCreated={(roomId) => { setNewConversation(false); setSelectedId(roomId); }} /></Suspense>}
     {searchRoomId && <Suspense fallback={<p role="status" className="fixed bottom-4 right-4 z-50 rounded-lg bg-white p-3 text-sm shadow">正在打开…</p>}><SearchDialog runtime={runtime} roomId={searchRoomId === "all" ? undefined : searchRoomId} onClose={() => setSearchRoomId(null)} onOpenResult={(result) => void openSearchResult(result)} /></Suspense>}
-    {settingsOpen && <Suspense fallback={<p role="status" className="fixed bottom-4 right-4 z-50 rounded-lg bg-white p-3 text-sm shadow">正在打开…</p>}><SettingsDialog runtime={runtime} pairingCode={pairingCode} pushStatus={pushStatus} pushBusy={pushBusy} onEnablePush={enablePush} onDisablePush={turnOffPush} onClose={() => { setSettingsOpen(false); setPairingCode(null); }} /></Suspense>}
+    {settingsOpen && <Suspense fallback={<p role="status" className="fixed bottom-4 right-4 z-50 rounded-lg bg-white p-3 text-sm shadow">正在打开…</p>}><SettingsDialog runtime={runtime} pairingCode={pairingCode} pushStatus={pushStatus} pushBusy={pushBusy} onEnablePush={enablePush} onDisablePush={turnOffPush} onSignOut={signOut} onClose={() => { setSettingsOpen(false); setPairingCode(null); }} /></Suspense>}
     {pwaUpdate !== "idle" && <aside className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-40 flex w-[min(92vw,28rem)] -translate-x-1/2 items-center gap-3 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-xl" aria-live="polite"><p className="min-w-0 flex-1">{pwaUpdate === "applying" ? "正在应用更新…" : "新版本已准备好"}</p>{pwaUpdate === "ready" && <><ActionButton variant="quiet" onPress={dismissPwaUpdate} className="h-9 text-white hover:bg-white/10">稍后</ActionButton><ActionButton onPress={() => applyPwaUpdate()} className="h-9 bg-white text-ink hover:bg-neutral-100">更新</ActionButton></>}</aside>}
   </main>;
 }
